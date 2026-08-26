@@ -238,6 +238,15 @@ class PlayerController(context: Context) {
         }
     }
 
+    fun clearQueue() = withController { controller ->
+        fadeJob?.cancel()
+        controller.clearMediaItems()
+        controller.pause()
+        _queue.value = emptyList()
+        _queueIndex.value = -1
+        publishProgress(controller)
+    }
+
     fun removeQueueItem(index: Int) = withController { controller ->
         if (index in 0 until controller.mediaItemCount) {
             controller.removeMediaItem(index)

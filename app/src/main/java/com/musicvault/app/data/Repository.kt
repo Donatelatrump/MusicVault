@@ -35,6 +35,9 @@ class MusicRepository(private val db: MusicDatabase) {
     fun playlistTracks(id: String): Flow<List<Track>> =
         db.playlistDao().observeTracks(id).map { list -> list.map(::toTrack) }
 
+    suspend fun getPlaylistTracks(id: String): List<Track> =
+        db.playlistDao().getTracks(id).map(::toTrack)
+
     suspend fun createPlaylist(id: String, title: String, description: String) {
         db.playlistDao().upsertAll(listOf(PlaylistEntity(id, title, description)))
     }
@@ -101,6 +104,11 @@ class MusicRepository(private val db: MusicDatabase) {
     suspend fun updateLatestCompletion(trackId: String, completionRatio: Float) {
         val id = db.historyDao().latestId(trackId) ?: return
         db.historyDao().updateCompletion(id, completionRatio.coerceIn(0f, 1f))
+    }
+
+
+    suspend fun deleteTrack(id: String) {
+        db.trackDao().delete(id)
     }
 
     suspend fun setDownloaded(track: Track, audioUri: String) {

@@ -12,6 +12,7 @@ interface TrackDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertAll(items: List<TrackEntity>)
     @Query("DELETE FROM tracks WHERE id LIKE 'local:%'") suspend fun deleteLocalScannedTracks()
     @Update suspend fun update(item: TrackEntity)
+    @Query("DELETE FROM tracks WHERE id = :id") suspend fun delete(id: String)
     @Query("SELECT * FROM tracks WHERE isDownloaded = 1 ORDER BY title") fun observeDownloaded(): Flow<List<TrackEntity>>
     @Query("SELECT * FROM tracks WHERE id IN (:ids)") suspend fun getByIds(ids: List<String>): List<TrackEntity>
 }
@@ -36,6 +37,7 @@ interface AlbumTrackDao {
 interface PlaylistDao {
     @Query("SELECT * FROM playlists ORDER BY title") fun observeAll(): Flow<List<PlaylistEntity>>
     @Query("SELECT t.* FROM tracks t INNER JOIN playlist_tracks pt ON pt.trackId=t.id WHERE pt.playlistId=:playlistId ORDER BY pt.position") fun observeTracks(playlistId: String): Flow<List<TrackEntity>>
+    @Query("SELECT t.* FROM tracks t INNER JOIN playlist_tracks pt ON pt.trackId=t.id WHERE pt.playlistId=:playlistId ORDER BY pt.position") suspend fun getTracks(playlistId: String): List<TrackEntity>
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertAll(items: List<PlaylistEntity>)
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertTracks(items: List<PlaylistTrackEntity>)
     @Query("DELETE FROM playlist_tracks WHERE playlistId=:playlistId") suspend fun deleteTracks(playlistId: String)
@@ -76,6 +78,9 @@ interface DownloadRecordDao {
 interface CatalogSearchCacheDao {
     @Query("SELECT * FROM catalog_search_cache WHERE cacheKey=:cacheKey LIMIT 1")
     suspend fun get(cacheKey: String): CatalogSearchCacheEntity?
+
+    @Query("SELECT * FROM catalog_search_cache ORDER BY savedAt DESC")
+    fun observeAll(): Flow<List<CatalogSearchCacheEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun save(item: CatalogSearchCacheEntity)

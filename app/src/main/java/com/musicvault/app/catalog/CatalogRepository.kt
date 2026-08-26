@@ -6,6 +6,8 @@ import com.musicvault.app.data.TrackEntity
 import com.musicvault.app.data.CatalogSearchCacheEntity
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
 
 class CatalogRepository(
     private val provider: CatalogProvider,
@@ -16,6 +18,16 @@ class CatalogRepository(
     }
 
     private val albumTrackCache = mutableMapOf<String, List<CatalogTrack>>()
+
+    /** Cached search metadata used by Home recommendations without another network request. */
+    fun cachedTracks(): Flow<List<CatalogTrack>> =
+        db.catalogSearchCacheDao().observeAll().map { entries ->
+            entries.asSequence()
+                .flatMap { decode(it).tracks.asSequence() }
+                .distinctBy { "${it.provider}:${it.id}" }
+                .take(120)
+                .toList()
+        }
 
     suspend fun search(query: String, limitTracks: Int = 20, limitAlbums: Int = 10): MetadataCatalogProvider.SearchResult {
         val normalized = query.trim().lowercase()

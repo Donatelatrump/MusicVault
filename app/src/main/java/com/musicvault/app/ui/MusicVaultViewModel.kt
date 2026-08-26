@@ -87,6 +87,7 @@ class MusicVaultViewModel(
     private val _providerMessage = MutableStateFlow<String?>(null)
     private val _errorMessage = MutableStateFlow<String?>(null)
     private val _downloadProgress = MutableStateFlow<Map<String, Int>>(emptyMap())
+    private val _albumDownloads = MutableStateFlow<Set<String>>(emptySet())
     private val favoriteIds = repository.favorites()
     private val recentSearches = repository.recentSearches(12)
     private val downloadJobs = mutableMapOf<String, Job>()
@@ -96,6 +97,7 @@ class MusicVaultViewModel(
     // publishing stale results after the user has typed a newer query.
     private var searchGeneration: Long = 0L
     private var playlistJob: Job? = null
+    private var activePlaylistId: String? = null
     private var albumJob: Job? = null
     private var historyJob: Job? = null
     private var lastHistoryUpdateAt = 0L
@@ -103,12 +105,14 @@ class MusicVaultViewModel(
     private val localTracks = repository.tracks()
     private val downloaded = repository.downloaded()
     private val allCatalogAlbums = repository.albums()
+    private val cachedCatalogTracks = catalog.cachedTracks()
     private val albums = allCatalogAlbums.map { list -> list.filter { it.id.startsWith("album:custom:") } }
     private val playlists = repository.playlists()
 
     val isPlaying: StateFlow<Boolean> = player.isPlaying
     val playbackProgress: StateFlow<PlayerController.PlaybackProgress> = player.progress
     val downloadProgress: StateFlow<Map<String, Int>> = _downloadProgress.asStateFlow()
+    val albumDownloads: StateFlow<Set<String>> = _albumDownloads.asStateFlow()
 
     fun downloadProgressFor(id: String): Flow<Int?> =
         downloadProgress.map { it[id] }.distinctUntilChanged()
@@ -120,19 +124,12 @@ class MusicVaultViewModel(
     private val _equalizerBands = MutableStateFlow<List<NativeEqualizer.Band>>(emptyList())
     val equalizerBands: StateFlow<List<NativeEqualizer.Band>> = _equalizerBands.asStateFlow()
 
-    // Keep rapidly changing download/player state out of the main screen state object.
-    val state: StateFlow<MusicUiState> = combine(
-        _section, _search, localTracks, downloaded, albums, playlists,
-        _remoteTracks, _remoteAlbums, _selectedTrack, _selectedPlaylist,
-        _selectedPlaylistTracks, _selectedRemoteAlbum, _remoteAlbumTracks, _loadingRemoteAlbum,
-        _selectedLocalAlbum, _selectedLocalAlbumTracks, _fullPlayer, _shuffle, _crossfadeSeconds,
-        _searching, _scanning, _providerMessage, _errorMessage, favoriteIds, recentSearches, allCatalogAlbums
-    ) { v ->
-        val tracks = v[2] as List<Track>
-        val albums = v[4] as List<Album>
-        val catalogAlbums = v[25] as List<Album>
-        val favorites = v[23] as Set<String>
-        val searches = v[24] as List<String>
+    // Recommendations are isolated from fast-changing player/download UI state.
+    // This prevents Home from rescoring/sorting the catalog during playback or
+    // download progress updates. The expensive work runs off the main thread.
+    private val recommendations: StateFlow<Pair<List<Track>, List<Album>>> = combine(
+        localTracks, allCatalogAlbums, favoriteIds, recentSearches, cachedCatalogTracks
+    ) { tracks, catalogAlbums, favorites, searches, cachedTracks ->
         val tokens = searches.asSequence()
             .flatMap { it.lowercase().split(Regex("\\s+")).asSequence() }
             .filter { it.length >= 2 }
@@ -140,51 +137,58 @@ class MusicVaultViewModel(
             .toList()
         fun scoreTrack(t: Track): Int {
             val hay = "${t.title} ${t.artistName} ${t.albumTitle}".lowercase()
-            val match = tokens.count { hay.contains(it) } * 8
-            return match + if (t.id in favorites) 40 else 0
+            return tokens.count { hay.contains(it) } * 8 + if (t.id in favorites) 40 else 0
         }
         fun scoreAlbum(a: Album): Int {
             val hay = "${a.title} ${a.artistName}".lowercase()
             return tokens.count { hay.contains(it) } * 8
         }
-        val recommendedTracks = tracks.asSequence()
+        val cachedRecommendations = cachedTracks.asSequence()
+            .map { ct ->
+                Track(
+                    id = "${ct.provider}:recording:${ct.id}", title = ct.title,
+                    artistName = ct.artistName,
+                    albumId = ct.albumId?.let { "${ct.provider}:release:$it" } ?: "unknown",
+                    albumTitle = ct.albumTitle ?: "Álbum desconocido", durationMs = ct.durationMs,
+                    audioUri = null, isDownloaded = false, coverUri = ct.coverUri
+                )
+            }
+        // Home intentionally mixes downloaded favorites/history with new cached discoveries.
+        // The UI itself decides which action to show: Play for remote-only tracks,
+        // spinner while downloading, and only the overflow menu once persisted.
+        val tracksResult = (tracks.asSequence() + cachedRecommendations)
+            .distinctBy { it.id }.sortedByDescending(::scoreTrack).take(16).toList()
+        val albumsResult = catalogAlbums.asSequence()
+            .filter { !it.id.startsWith("album:custom:") }
             .distinctBy { it.id }
-            .sortedByDescending { scoreTrack(it) }
-            .take(12)
-            .toList()
-        val recommendedAlbums = catalogAlbums.asSequence()
-            .distinctBy { it.id }
-            .sortedByDescending { scoreAlbum(it) }
-            .take(10)
-            .toList()
+            .sortedWith(compareByDescending<Album> { scoreAlbum(it) }.thenBy { it.title.lowercase() })
+            .take(12).toList()
+        tracksResult to albumsResult
+    }.flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList<Track>() to emptyList())
+
+    // Keep rapidly changing download/player state out of recommendation calculation.
+    val state: StateFlow<MusicUiState> = combine(
+        _section, _search, localTracks, downloaded, albums, playlists,
+        _remoteTracks, _remoteAlbums, _selectedTrack, _selectedPlaylist,
+        _selectedPlaylistTracks, _selectedRemoteAlbum, _remoteAlbumTracks, _loadingRemoteAlbum,
+        _selectedLocalAlbum, _selectedLocalAlbumTracks, _fullPlayer, _shuffle, _crossfadeSeconds,
+        _searching, _scanning, _providerMessage, _errorMessage, favoriteIds, recentSearches, recommendations
+    ) { v ->
+        val rec = v[25] as Pair<*, *>
         MusicUiState(
-            section = v[0] as AppSection,
-            search = v[1] as String,
-            tracks = v[2] as List<Track>,
-            downloaded = v[3] as List<Track>,
-            albums = v[4] as List<Album>,
-            playlists = v[5] as List<Playlist>,
-            remoteTracks = v[6] as List<CatalogTrack>,
-            remoteAlbums = v[7] as List<CatalogAlbum>,
-            selectedTrack = v[8] as Track?,
-            selectedPlaylist = v[9] as Playlist?,
-            selectedPlaylistTracks = v[10] as List<Track>,
-            selectedRemoteAlbum = v[11] as CatalogAlbum?,
-            remoteAlbumTracks = v[12] as List<CatalogTrack>,
-            isLoadingRemoteAlbum = v[13] as Boolean,
-            selectedLocalAlbum = v[14] as Album?,
-            selectedLocalAlbumTracks = v[15] as List<Track>,
-            fullPlayer = v[16] as Boolean,
-            shuffle = v[17] as Boolean,
-            crossfadeSeconds = v[18] as Int,
-            isSearching = v[19] as Boolean,
-            isScanning = v[20] as Boolean,
-            providerMessage = v[21] as String?,
-            errorMessage = v[22] as String?,
-            favoriteIds = favorites,
-            recentSearches = searches,
-            recommendedTracks = recommendedTracks,
-            recommendedAlbums = recommendedAlbums
+            section = v[0] as AppSection, search = v[1] as String, tracks = v[2] as List<Track>,
+            downloaded = v[3] as List<Track>, albums = v[4] as List<Album>, playlists = v[5] as List<Playlist>,
+            remoteTracks = v[6] as List<CatalogTrack>, remoteAlbums = v[7] as List<CatalogAlbum>,
+            selectedTrack = v[8] as Track?, selectedPlaylist = v[9] as Playlist?,
+            selectedPlaylistTracks = v[10] as List<Track>, selectedRemoteAlbum = v[11] as CatalogAlbum?,
+            remoteAlbumTracks = v[12] as List<CatalogTrack>, isLoadingRemoteAlbum = v[13] as Boolean,
+            selectedLocalAlbum = v[14] as Album?, selectedLocalAlbumTracks = v[15] as List<Track>,
+            fullPlayer = v[16] as Boolean, shuffle = v[17] as Boolean, crossfadeSeconds = v[18] as Int,
+            isSearching = v[19] as Boolean, isScanning = v[20] as Boolean,
+            providerMessage = v[21] as String?, errorMessage = v[22] as String?,
+            favoriteIds = v[23] as Set<String>, recentSearches = v[24] as List<String>,
+            recommendedTracks = rec.first as List<Track>, recommendedAlbums = rec.second as List<Album>
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MusicUiState())
 
@@ -297,6 +301,7 @@ class MusicVaultViewModel(
     }
 
     fun selectTrack(track: Track) {
+        activePlaylistId = null
         _selectedTrack.value = track
         if (track.audioUri != null && track.isDownloaded) {
             player.play(track)
@@ -351,6 +356,59 @@ class MusicVaultViewModel(
         }
     }
 
+    fun downloadRecommendedAlbum(album: Album) {
+        val parts = album.id.split(":", limit = 3)
+        if (parts.size != 3 || parts[1] != "release-group") return
+        val catalogAlbum = CatalogAlbum(
+            id = parts[2], title = album.title, artistId = album.artistId, artistName = album.artistName,
+            year = album.year.takeIf { it > 0 }, coverUri = album.coverUri, provider = parts[0]
+        )
+        val albumKey = album.id
+        // Mark it immediately so the button animates while album metadata is fetched.
+        _albumDownloads.value = _albumDownloads.value + albumKey
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val albumTracks = catalog.tracksForAlbum(catalogAlbum, 50)
+                if (albumTracks.isEmpty()) {
+                    _errorMessage.value = "No hay canciones disponibles para este álbum."
+                    return@launch
+                }
+                _providerMessage.value = "Descargando álbum \"${album.title}\" (${albumTracks.size} canciones)..."
+                albumTracks.forEach { track -> requestRemoteDownload(track, autoPlay = false) }
+                while (albumTracks.any { _downloadProgress.value.containsKey("${it.provider}:recording:${it.id}") }) {
+                    delay(120)
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _errorMessage.value = "No se pudo preparar el álbum: ${e.message ?: "error"}"
+            } finally {
+                withContext(Dispatchers.Main.immediate) { _albumDownloads.value = _albumDownloads.value - albumKey }
+            }
+        }
+    }
+
+    fun downloadRemoteAlbum(album: CatalogAlbum, tracks: List<CatalogTrack> = emptyList()) {
+        val albumKey = "${album.provider}:${album.id}"
+        _albumDownloads.value = _albumDownloads.value + albumKey
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val albumTracks = if (tracks.isNotEmpty()) tracks else catalog.tracksForAlbum(album, 50)
+                if (albumTracks.isEmpty()) {
+                    _errorMessage.value = "No hay canciones disponibles para este álbum."
+                    return@launch
+                }
+                _providerMessage.value = "Descargando álbum \"${album.title}\" (${albumTracks.size} canciones)..."
+                albumTracks.forEach { track -> requestRemoteDownload(track, autoPlay = false) }
+                while (albumTracks.any { _downloadProgress.value.containsKey("${it.provider}:recording:${it.id}") }) {
+                    delay(120)
+                }
+            } finally {
+                withContext(Dispatchers.Main.immediate) { _albumDownloads.value = _albumDownloads.value - albumKey }
+            }
+        }
+    }
+
     fun openRecommendedAlbum(album: Album) {
         val parts = album.id.split(":", limit = 3)
         if (parts.size == 3 && parts[1] == "release-group") {
@@ -377,7 +435,54 @@ class MusicVaultViewModel(
         val enabled = !_shuffle.value
         _shuffle.value = enabled
         player.setShuffle(enabled)
-        if (enabled) _selectedTrack.value?.let { viewModelScope.launch { enqueueSmartNext(it) } }
+        if (activePlaylistId == null && enabled) {
+            _selectedTrack.value?.let { viewModelScope.launch { enqueueSmartNext(it) } }
+        }
+    }
+
+    fun playPlaylist(playlist: Playlist, shuffle: Boolean = _shuffle.value) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val tracks = repository.getPlaylistTracks(playlist.id)
+                .filter { it.isDownloaded && it.audioUri != null }
+            if (tracks.isEmpty()) {
+                _errorMessage.value = "Esta playlist no tiene canciones descargadas."
+                return@launch
+            }
+            activePlaylistId = playlist.id
+            _selectedPlaylist.value = playlist
+            _selectedPlaylistTracks.value = tracks
+            _shuffle.value = shuffle
+            withContext(Dispatchers.Main.immediate) {
+                // When shuffle is requested, start from a genuinely random item
+                // instead of always beginning with item 0. Media3 then keeps the
+                // rest of the queue shuffled within this playlist.
+                val startIndex = if (shuffle && tracks.size > 1) tracks.indices.random() else 0
+                player.playQueue(tracks, startIndex, shuffle)
+                _selectedTrack.value = tracks[startIndex]
+                repository.recordPlay(tracks[startIndex], 0f)
+            }
+        }
+    }
+
+    fun playPlaylistTrack(playlist: Playlist, track: Track, shuffle: Boolean = _shuffle.value) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val tracks = repository.getPlaylistTracks(playlist.id)
+                .filter { it.isDownloaded && it.audioUri != null }
+            val index = tracks.indexOfFirst { it.id == track.id }
+            if (index < 0) {
+                _errorMessage.value = "La canción ya no está disponible en esta playlist."
+                return@launch
+            }
+            activePlaylistId = playlist.id
+            _selectedPlaylist.value = playlist
+            _selectedPlaylistTracks.value = tracks
+            _shuffle.value = shuffle
+            withContext(Dispatchers.Main.immediate) {
+                player.playQueue(tracks, index, shuffle)
+                _selectedTrack.value = tracks[index]
+                repository.recordPlay(tracks[index], 0f)
+            }
+        }
     }
 
     fun setCrossfadeSeconds(seconds: Int) {
@@ -406,6 +511,10 @@ class MusicVaultViewModel(
 
     fun nextTrack() {
         val current = _selectedTrack.value ?: return
+        if (activePlaylistId != null && queue.value.size > 1) {
+            player.next()
+            return
+        }
         viewModelScope.launch {
             val localAlbumTracks = when {
                 _selectedLocalAlbum.value != null -> _selectedLocalAlbumTracks.value
@@ -459,6 +568,10 @@ class MusicVaultViewModel(
 
     fun previousTrack() {
         val current = _selectedTrack.value ?: return
+        if (activePlaylistId != null && queue.value.size > 1) {
+            player.previous()
+            return
+        }
         val list = state.value.downloaded.filter { it.audioUri != null }
         val index = list.indexOfFirst { it.id == current.id }
         if (index > 0) selectTrack(list[index - 1]) else player.previous()
@@ -603,6 +716,13 @@ class MusicVaultViewModel(
         _loadingRemoteAlbum.value = false
     }
 
+    fun closePlaylist() {
+        playlistJob?.cancel()
+        playlistJob = null
+        _selectedPlaylist.value = null
+        _selectedPlaylistTracks.value = emptyList()
+    }
+
     fun openPlaylist(playlist: Playlist) {
         _selectedPlaylist.value = playlist
         playlistJob?.cancel()
@@ -611,7 +731,35 @@ class MusicVaultViewModel(
         }
     }
 
+    fun deleteTrack(track: Track) {
+        if (!track.isDownloaded) return
+        if (_selectedTrack.value?.id == track.id) {
+            player.clearQueue()
+            _selectedTrack.value = null
+            _fullPlayer.value = false
+            activePlaylistId = null
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                val uri = track.audioUri?.let(android.net.Uri::parse)
+                if (uri != null && uri.scheme == "content") {
+                    val fileName = uri.lastPathSegment?.let { java.net.URLDecoder.decode(it, "UTF-8") }
+                    if (!fileName.isNullOrBlank()) {
+                        val root = java.io.File(appContext.getExternalFilesDir("Music") ?: appContext.filesDir, "downloads")
+                        root.walkTopDown().firstOrNull { it.isFile && it.name == fileName }?.delete()
+                    }
+                }
+            }
+            repository.deleteTrack(track.id)
+        }
+    }
+
+    fun deleteDownloadedTrack(id: String) {
+        state.value.tracks.firstOrNull { it.id == id }?.let(::deleteTrack)
+    }
+
     fun clearSelection() {
+        activePlaylistId = null
         _selectedTrack.value = null
         _selectedPlaylist.value = null
         _selectedPlaylistTracks.value = emptyList()

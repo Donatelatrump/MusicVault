@@ -2,9 +2,11 @@ package com.musicvault.app.ui
 
 import android.Manifest
 import android.os.Build
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -26,6 +28,9 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
@@ -103,12 +108,29 @@ private fun Modifier.pressScale(
 fun MusicVaultApp(vm: MusicVaultViewModel) {
     val state by vm.state.collectAsState()
     val isPlaying by vm.isPlaying.collectAsState()
-    val downloadProgress by vm.downloadProgress.collectAsState()
+    val albumDownloads by vm.albumDownloads.collectAsState()
     val queue by vm.queue.collectAsState()
     val queueIndex by vm.queueIndex.collectAsState()
     val favoriteIds = state.favoriteIds
     val equalizerBands by vm.equalizerBands.collectAsState()
     var showSettings by rememberSaveable { mutableStateOf(false) }
+
+    // App-level back navigation: close the full player/details before allowing
+    // Android to leave the activity. This keeps the system Back button useful
+    // for navigating inside MusicVault.
+    val canHandleBack = state.fullPlayer || showSettings ||
+        state.selectedLocalAlbum != null || state.selectedRemoteAlbum != null ||
+        state.selectedPlaylist != null || state.section != AppSection.HOME
+    BackHandler(enabled = canHandleBack) {
+        when {
+            state.fullPlayer -> vm.closeFullPlayer()
+            showSettings -> showSettings = false
+            state.selectedLocalAlbum != null -> vm.closeLocalAlbum()
+            state.selectedRemoteAlbum != null -> vm.closeRemoteAlbum()
+            state.selectedPlaylist != null -> vm.closePlaylist()
+            state.section != AppSection.HOME -> vm.selectSection(AppSection.HOME)
+        }
+    }
 
     Scaffold(
         containerColor = VaultColors.Background,
@@ -191,11 +213,11 @@ fun MusicVaultApp(vm: MusicVaultViewModel) {
                         }
                     }
                     when {
-                        state.selectedLocalAlbum != null -> LocalAlbumDetail(state.selectedLocalAlbum!!, state.selectedLocalAlbumTracks, emptyMap(), isPlaying, state.selectedTrack?.id, state.playlists, state.albums, vm)
+                        state.selectedLocalAlbum != null -> LocalAlbumDetail(state.selectedLocalAlbum!!, state.selectedLocalAlbumTracks, isPlaying, state.selectedTrack?.id, state.playlists, state.albums, vm)
                         state.selectedRemoteAlbum != null -> RemoteAlbumDetail(
                             album = state.selectedRemoteAlbum!!,
                             tracks = state.remoteAlbumTracks,
-                            downloadProgress = emptyMap(),
+                            albumDownloads = albumDownloads,
                             isPlaying = isPlaying,
                             selectedTrackId = state.selectedTrack?.id,
                             loading = state.isLoadingRemoteAlbum,
@@ -207,7 +229,6 @@ fun MusicVaultApp(vm: MusicVaultViewModel) {
                         state.selectedPlaylist != null -> PlaylistDetail(
                             playlist = state.selectedPlaylist!!,
                             tracks = state.selectedPlaylistTracks,
-                            downloadProgress = emptyMap(),
                             isPlaying = isPlaying,
                             selectedTrackId = state.selectedTrack?.id,
                             playlists = state.playlists,
@@ -215,9 +236,9 @@ fun MusicVaultApp(vm: MusicVaultViewModel) {
                             vm = vm
                         )
                         else -> when (state.section) {
-                            AppSection.HOME -> HomeScreen(state, emptyMap(), isPlaying, vm)
-                            AppSection.SEARCH -> SearchScreen(state, downloadProgress, isPlaying, vm)
-                            AppSection.LIBRARY -> LibraryScreen(state, emptyMap(), isPlaying, vm)
+                            AppSection.HOME -> HomeScreen(state, albumDownloads, isPlaying, vm)
+                            AppSection.SEARCH -> SearchScreen(state, isPlaying, vm)
+                            AppSection.LIBRARY -> LibraryScreen(state, isPlaying, vm)
                             AppSection.PLAYLISTS -> PlaylistScreen(state, vm)
                         }
                     }
@@ -255,7 +276,8 @@ fun MusicVaultApp(vm: MusicVaultViewModel) {
 }
 
 @Composable
-private fun HomeScreen(state: MusicUiState, downloadProgress: Map<String, Int>, isPlaying: Boolean, vm: MusicVaultViewModel) {
+private fun HomeScreen(state: MusicUiState, albumDownloads: Set<String>, isPlaying: Boolean, vm: MusicVaultViewModel) {
+    val downloadProgress by vm.downloadProgress.collectAsState()
     val recommendationTracks = state.recommendedTracks
     val recommendationAlbums = state.recommendedAlbums
     LazyColumn(
@@ -278,7 +300,7 @@ private fun HomeScreen(state: MusicUiState, downloadProgress: Map<String, Int>, 
                     contentPadding = PaddingValues(end = 8.dp)
                 ) {
                     items(recommendationTracks, key = { "rec-track:${it.id}" }, contentType = { "track" }) { track ->
-                        RecommendationTrackCard(track) { vm.playRecommendation(track) }
+                        RecommendationTrackCard(track, downloadProgress, state.playlists, state.albums, vm, isPlaying && state.selectedTrack?.id == track.id)
                     }
                 }
             }
@@ -292,7 +314,12 @@ private fun HomeScreen(state: MusicUiState, downloadProgress: Map<String, Int>, 
                     contentPadding = PaddingValues(end = 8.dp)
                 ) {
                     items(recommendationAlbums, key = { "rec-album:${it.id}" }, contentType = { "album" }) { album ->
-                        AlbumCard(album) { vm.openRecommendedAlbum(album) }
+                        AlbumCard(
+                            album = album,
+                            onClick = { vm.openRecommendedAlbum(album) },
+                            onDownloadAll = if (album.id.contains(":release-group:")) { { vm.downloadRecommendedAlbum(album) } } else null,
+                            isDownloading = album.id in albumDownloads
+                        )
                     }
                 }
             }
@@ -303,7 +330,7 @@ private fun HomeScreen(state: MusicUiState, downloadProgress: Map<String, Int>, 
                 Spacer(Modifier.height(10.dp))
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                     items(state.albums.take(12), key = { "album:${it.id}" }, contentType = { "album" }) { album ->
-                        AlbumCard(album) { vm.openLocalAlbum(album) }
+                        AlbumCard(album = album, onClick = { vm.openLocalAlbum(album) })
                     }
                 }
             }
@@ -326,17 +353,72 @@ private fun HomeScreen(state: MusicUiState, downloadProgress: Map<String, Int>, 
 }
 
 @Composable
-private fun RecommendationTrackCard(track: Track, onClick: () -> Unit) {
-    Column(Modifier.width(150.dp).clickable(onClick = onClick)) {
-        AsyncImage(
-            model = ImageRequest.Builder(LocalContext.current).data(track.coverUri).size(300).memoryCacheKey("home:${track.coverUri}").diskCacheKey("home:${track.coverUri}").crossfade(false).build(),
-            contentDescription = null,
-            modifier = Modifier.size(150.dp).clip(RoundedCornerShape(12.dp)),
-            contentScale = ContentScale.Crop
-        )
+private fun RecommendationTrackCard(
+    track: Track,
+    downloadProgress: Map<String, Int>,
+    playlists: List<Playlist>,
+    albums: List<Album>,
+    vm: MusicVaultViewModel,
+    isPlaying: Boolean
+) {
+    val downloading = downloadProgress.containsKey(track.id) && !track.isDownloaded
+    Column(Modifier.width(150.dp)) {
+        Box(Modifier.size(150.dp)) {
+            AsyncImage(
+                model = ImageRequest.Builder(LocalContext.current)
+                    .data(track.coverUri)
+                    .size(180)
+                    .memoryCacheKey("home-track:${track.coverUri}")
+                    .diskCacheKey("home-track:${track.coverUri}")
+                    .crossfade(false)
+                    .build(),
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(12.dp)).clickable { vm.playRecommendation(track) },
+                contentScale = ContentScale.Crop,
+                imageLoader = CoverImageCache.loader(LocalContext.current)
+            )
+        }
         Spacer(Modifier.height(8.dp))
-        Text(track.title, color = VaultColors.TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Text(track.artistName, color = VaultColors.TextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(track.title, color = if (isPlaying) VaultColors.Green else VaultColors.TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(track.artistName, color = VaultColors.TextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            when {
+                downloading -> DownloadDotsSpinner(modifier = Modifier.size(34.dp))
+                track.isDownloaded -> TrackActionsMenu(track, playlists, albums.filter { it.id.startsWith("album:custom:") }, vm, vm.isFavorite(track.id))
+                else -> {
+                    IconButton(onClick = { vm.playRecommendation(track) }, modifier = Modifier.size(38.dp)) {
+                        Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, if (isPlaying) "Pausar" else "Descargar y reproducir", tint = VaultColors.TextPrimary)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DownloadDotsSpinner(modifier: Modifier = Modifier, dotColor: Color = VaultColors.Green) {
+    val transition = rememberInfiniteTransition(label = "download-dots")
+    val phase by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 8f,
+        animationSpec = infiniteRepeatable(tween(900, easing = androidx.compose.animation.core.LinearEasing)),
+        label = "download-dots-phase"
+    )
+    Canvas(modifier) {
+        val cx = size.width / 2f
+        val cy = size.height / 2f
+        val radius = size.minDimension * 0.30f
+        val dotRadius = size.minDimension * 0.065f
+        for (i in 0 until 8) {
+            val angle = Math.toRadians(i * 45.0 - 90.0)
+            val x = cx + kotlin.math.cos(angle).toFloat() * radius
+            val y = cy + kotlin.math.sin(angle).toFloat() * radius
+            val distance = ((i - phase.toInt()) + 8) % 8
+            val alpha = 0.28f + 0.72f * ((8 - distance) / 8f)
+            drawCircle(dotColor.copy(alpha = alpha), dotRadius, androidx.compose.ui.geometry.Offset(x, y))
+        }
     }
 }
 
@@ -353,14 +435,15 @@ private fun greetingForNow(): String {
 @Composable
 private fun SearchScreen(
     state: MusicUiState,
-    downloadProgress: Map<String, Int>,
     isPlaying: Boolean,
     vm: MusicVaultViewModel
 ) {
+    val downloadProgress by vm.downloadProgress.collectAsState()
     var actionTrack by remember { mutableStateOf<CatalogTrack?>(null) }
     var actionAction by remember { mutableStateOf<MoreAction?>(null) }
     var showCreateAlbum by remember { mutableStateOf(false) }
     var newAlbumName by remember { mutableStateOf("") }
+    var deleteSearchTrack by remember { mutableStateOf<CatalogTrack?>(null) }
     val latestIsPlaying by rememberUpdatedState(isPlaying)
     val latestSelectedTrackId by rememberUpdatedState(state.selectedTrack?.id)
 
@@ -507,7 +590,27 @@ private fun SearchScreen(
                 onDelete = vm::deleteAlbum
             )
         }
+        MoreAction.DELETE -> if (selectedTrack != null) {
+            deleteSearchTrack = selectedTrack
+            actionTrack = null
+            actionAction = null
+        }
         null -> Unit
+    }
+
+    deleteSearchTrack?.let { remote ->
+        AlertDialog(
+            onDismissRequest = { deleteSearchTrack = null },
+            title = { Text("Eliminar canción") },
+            text = { Text("¿Quieres eliminar \"${remote.title}\" de las descargas de MusicVault?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.deleteDownloadedTrack("${remote.provider}:recording:${remote.id}")
+                    deleteSearchTrack = null
+                }) { Text("Eliminar", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { deleteSearchTrack = null }) { Text("Cancelar") } }
+        )
     }
 
     if (showCreateAlbum && selectedTrack != null) {
@@ -616,42 +719,31 @@ private fun RemoteTrackRow(
                 "${track.artistName} · ${track.albumTitle ?: "Álbum desconocido"}",
                 color = VaultColors.TextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
             )
-            if (displayedProgress != null) {
-                Spacer(Modifier.height(6.dp))
-                LinearProgressIndicator(
-                    progress = { progressFraction },
-                    modifier = Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)),
-                    color = VaultColors.Green,
-                    trackColor = VaultColors.Surface3
-                )
-            }
+
         }
-        if (downloading) {
-            IconButton(onClick = onCancelDownload) {
-                CircularProgressIndicator(
-                    progress = { progressFraction },
-                    modifier = Modifier.size(22.dp),
-                    strokeWidth = 2.dp,
-                    color = VaultColors.Green,
-                    trackColor = VaultColors.Surface3
-                )
+        when {
+            downloading -> {
+                IconButton(onClick = onCancelDownload) {
+                    DownloadDotsSpinner(modifier = Modifier.size(28.dp))
+                }
             }
-        } else {
-            IconButton(onClick = onPlayToggle) {
-                Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, if (isPlaying) "Pausar" else "Reproducir", tint = VaultColors.TextPrimary)
+            downloaded -> {
+                IconButton(onClick = onMore) {
+                    Icon(Icons.Default.MoreVert, "Más opciones", tint = VaultColors.TextPrimary)
+                }
             }
-        }
-        if (downloaded) {
-            Icon(Icons.Default.CheckCircle, "Descargada", tint = VaultColors.Green, modifier = Modifier.size(20.dp))
-        }
-        IconButton(onClick = onMore) {
-            Icon(Icons.Default.MoreVert, "Más opciones", tint = VaultColors.TextPrimary)
+            else -> {
+                IconButton(onClick = onPlayToggle) {
+                    Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, if (isPlaying) "Pausar" else "Reproducir", tint = VaultColors.TextPrimary)
+                }
+            }
         }
     }
 }
 
 @Composable
-private fun LibraryScreen(state: MusicUiState, downloadProgress: Map<String, Int>, isPlaying: Boolean, vm: MusicVaultViewModel) {
+private fun LibraryScreen(state: MusicUiState, isPlaying: Boolean, vm: MusicVaultViewModel) {
+    val downloadProgress by vm.downloadProgress.collectAsState()
     val context = androidx.compose.ui.platform.LocalContext.current
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -730,7 +822,7 @@ private fun PlaylistScreen(state: MusicUiState, vm: MusicVaultViewModel) {
         item { SectionTitle("Playlists") }
         items(state.playlists, key = { it.id }) { PlaylistCard(it) { vm.openPlaylist(it) } }
         item { SectionTitle("Álbumes") }
-        items(state.albums, key = { it.id }) { AlbumCard(it) { vm.openLocalAlbum(it) } }
+        items(state.albums, key = { it.id }) { album -> AlbumCard(album = album, onClick = { vm.openLocalAlbum(album) }) }
     }
     if (showPlaylistDialog) {
         CreateCollectionDialog("Nueva playlist", "Nombre de la playlist", state.downloaded, vm::createPlaylist) { showPlaylistDialog = false }
@@ -779,7 +871,8 @@ private fun CreateCollectionDialog(
 }
 
 @Composable
-private fun LocalAlbumDetail(album: Album, tracks: List<Track>, downloadProgress: Map<String, Int>, isPlaying: Boolean, selectedTrackId: String?, playlists: List<Playlist>, albums: List<Album>, vm: MusicVaultViewModel) {
+private fun LocalAlbumDetail(album: Album, tracks: List<Track>, isPlaying: Boolean, selectedTrackId: String?, playlists: List<Playlist>, albums: List<Album>, vm: MusicVaultViewModel) {
+    val downloadProgress by vm.downloadProgress.collectAsState()
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         item {
             IconButton(onClick = vm::closeLocalAlbum) { Icon(Icons.Default.ArrowBack, "Atrás", tint = VaultColors.TextPrimary) }
@@ -825,7 +918,7 @@ private fun LocalAlbumDetail(album: Album, tracks: List<Track>, downloadProgress
 private fun RemoteAlbumDetail(
     album: CatalogAlbum,
     tracks: List<CatalogTrack>,
-    downloadProgress: Map<String, Int>,
+    albumDownloads: Set<String>,
     isPlaying: Boolean,
     selectedTrackId: String?,
     loading: Boolean,
@@ -834,6 +927,7 @@ private fun RemoteAlbumDetail(
     albums: List<Album>,
     vm: MusicVaultViewModel
 ) {
+    val downloadProgress by vm.downloadProgress.collectAsState()
     val downloadedIds = remember(localTracks) {
         localTracks.filter { it.isDownloaded }.mapTo(HashSet()) { it.id }
     }
@@ -879,6 +973,30 @@ private fun RemoteAlbumDetail(
                     album.year?.let { Text(it.toString(), color = VaultColors.TextTertiary, fontSize = 12.sp) }
                 }
             }
+            Spacer(Modifier.height(14.dp))
+            if (tracks.isNotEmpty()) {
+                val albumKey = "${album.provider}:${album.id}"
+                val albumDownloading = albumKey in albumDownloads
+                Button(
+                    onClick = { if (!albumDownloading) vm.downloadRemoteAlbum(album, tracks) },
+                    enabled = !albumDownloading,
+                    shape = RoundedCornerShape(50),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = VaultColors.Surface2,
+                        contentColor = VaultColors.TextPrimary,
+                        disabledContainerColor = VaultColors.Surface2,
+                        disabledContentColor = VaultColors.TextPrimary
+                    )
+                ) {
+                    if (albumDownloading) {
+                        DownloadDotsSpinner(modifier = Modifier.size(24.dp))
+                    } else {
+                        Icon(Icons.Default.Download, contentDescription = null)
+                    }
+                    Spacer(Modifier.width(6.dp))
+                    Text(if (albumDownloading) "Descargando álbum" else "Descargar álbum", fontWeight = FontWeight.Bold)
+                }
+            }
             Spacer(Modifier.height(18.dp))
             when {
                 loading -> LinearProgressIndicator(Modifier.fillMaxWidth(), color = VaultColors.Green, trackColor = VaultColors.Surface3)
@@ -922,13 +1040,13 @@ private fun RemoteAlbumDetail(
 private fun PlaylistDetail(
     playlist: Playlist,
     tracks: List<Track>,
-    downloadProgress: Map<String, Int>,
     isPlaying: Boolean,
     selectedTrackId: String?,
     playlists: List<Playlist>,
     albums: List<Album>,
     vm: MusicVaultViewModel
 ) {
+    val downloadProgress by vm.downloadProgress.collectAsState()
     LazyColumn(
         Modifier.fillMaxSize(),
         contentPadding = PaddingValues(20.dp)
@@ -939,6 +1057,26 @@ private fun PlaylistDetail(
             }
             Text(playlist.title, color = VaultColors.TextPrimary, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.5).sp)
             Text(playlist.description, color = VaultColors.TextSecondary, fontSize = 14.sp)
+            Spacer(Modifier.height(14.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(
+                    onClick = { vm.playPlaylist(playlist, shuffle = false) },
+                    shape = RoundedCornerShape(50),
+                    colors = ButtonDefaults.buttonColors(containerColor = VaultColors.Green, contentColor = Color.Black)
+                ) {
+                    Icon(Icons.Default.PlayArrow, null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Reproducir", fontWeight = FontWeight.Bold)
+                }
+                OutlinedButton(
+                    onClick = { vm.playPlaylist(playlist, shuffle = true) },
+                    shape = RoundedCornerShape(50)
+                ) {
+                    Icon(Icons.Default.Shuffle, null, tint = VaultColors.TextPrimary)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Aleatorio", color = VaultColors.TextPrimary, fontWeight = FontWeight.Bold)
+                }
+            }
             Spacer(Modifier.height(20.dp))
         }
         items(
@@ -1301,25 +1439,48 @@ private fun SectionTitle(text: String) {
 }
 
 @Composable
-private fun AlbumCard(album: Album, onClick: () -> Unit = {}) {
+private fun AlbumCard(
+    album: Album,
+    onClick: () -> Unit = {},
+    onDownloadAll: (() -> Unit)? = null,
+    isDownloading: Boolean = false
+) {
     val (top, bottom) = remember(album.id) { gradientFor(album.id) }
-    Column(Modifier.width(150.dp).pressScale(onClick = onClick)) {
+    Column(Modifier.width(150.dp)) {
         Box(
             Modifier
                 .size(150.dp)
-                .shadow(elevation = 10.dp, shape = RoundedCornerShape(10.dp), ambientColor = top.copy(alpha = 0.4f))
+                .shadow(elevation = 3.dp, shape = RoundedCornerShape(10.dp), ambientColor = top.copy(alpha = 0.4f))
                 .clip(RoundedCornerShape(10.dp))
-                .background(Brush.linearGradient(listOf(top, bottom))),
+                .background(Brush.linearGradient(listOf(top, bottom)))
+                .pressScale(onClick = onClick),
             contentAlignment = Alignment.Center
         ) {
             if (album.coverUri != null) {
                 AsyncImage(
-                    model = album.coverUri,
+                    model = ImageRequest.Builder(LocalContext.current).data(album.coverUri).size(180).memoryCacheKey("home-album:${album.coverUri}").diskCacheKey("home-album:${album.coverUri}").crossfade(false).build(),
                     contentDescription = album.title,
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
                 )
             } else {
                 Icon(Icons.Default.Album, null, tint = VaultColors.TextPrimary.copy(alpha = 0.85f), modifier = Modifier.size(54.dp))
+            }
+            if (onDownloadAll != null) {
+                Surface(
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp),
+                    shape = CircleShape,
+                    color = VaultColors.Background.copy(alpha = 0.88f),
+                    tonalElevation = 4.dp
+                ) {
+                    IconButton(onClick = onDownloadAll, modifier = Modifier.size(40.dp)) {
+                        if (isDownloading) {
+                            DownloadDotsSpinner(modifier = Modifier.size(26.dp), dotColor = VaultColors.TextPrimary)
+                        } else {
+                            Icon(Icons.Default.Download, contentDescription = "Descargar álbum", tint = VaultColors.TextPrimary)
+                        }
+                    }
+                }
             }
         }
         Spacer(Modifier.height(10.dp))
@@ -1376,10 +1537,11 @@ private fun TrackRow(
             .padding(horizontal = 4.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        AsyncImage(
-            model = track.coverUri,
+        CachedCover(
+            url = track.coverUri,
             contentDescription = track.albumTitle,
-            modifier = Modifier.size(52.dp).clip(RoundedCornerShape(6.dp))
+            modifier = Modifier.size(52.dp).clip(RoundedCornerShape(6.dp)),
+            targetSizePx = 104
         )
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
@@ -1398,37 +1560,27 @@ private fun TrackRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
-            if (displayedProgress != null) {
-                Spacer(Modifier.height(6.dp))
-                LinearProgressIndicator(
-                    progress = { progressFraction },
-                    modifier = Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)),
-                    color = VaultColors.Green,
-                    trackColor = VaultColors.Surface3
-                )
+
+        }
+        when {
+            displayedProgress != null -> {
+                IconButton(onClick = onCancelDownload) {
+                    DownloadDotsSpinner(modifier = Modifier.size(28.dp))
+                }
+            }
+            track.isDownloaded -> {
+                if (vm != null) TrackActionsMenu(track, playlists, albums.filter { it.id.startsWith("album:custom:") }, vm, vm.isFavorite(track.id))
+            }
+            else -> {
+                IconButton(onClick = onPlayToggle) {
+                    Icon(
+                        if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        if (isPlaying) "Pausar" else "Reproducir",
+                        tint = VaultColors.TextPrimary
+                    )
+                }
             }
         }
-        IconButton(onClick = onPlayToggle) {
-            Icon(
-                if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                if (isPlaying) "Pausar" else "Reproducir",
-                tint = VaultColors.TextPrimary
-            )
-        }
-        if (track.isDownloaded) {
-            Icon(Icons.Default.CheckCircle, "Descargada", tint = VaultColors.Green, modifier = Modifier.size(20.dp))
-        } else if (displayedProgress != null) {
-            IconButton(onClick = onCancelDownload) {
-                CircularProgressIndicator(
-                    progress = { progressFraction },
-                    modifier = Modifier.size(22.dp),
-                    strokeWidth = 2.dp,
-                    color = VaultColors.Green,
-                    trackColor = VaultColors.Surface3
-                )
-            }
-        }
-        if (vm != null) TrackActionsMenu(track, playlists, albums.filter { it.id.startsWith("album:custom:") }, vm, vm.isFavorite(track.id))
     }
 }
 
@@ -1440,6 +1592,7 @@ private fun TrackActionsMenu(track: Track, playlists: List<Playlist>, albums: Li
     var showAlbums by remember { mutableStateOf(false) }
     var showCreateAlbum by remember { mutableStateOf(false) }
     var newAlbumName by remember { mutableStateOf("") }
+    var confirmDelete by remember { mutableStateOf(false) }
 
     Box {
         IconButton(onClick = { expanded = true }) { Icon(Icons.Default.MoreVert, "Más opciones", tint = VaultColors.TextPrimary) }
@@ -1447,7 +1600,26 @@ private fun TrackActionsMenu(track: Track, playlists: List<Playlist>, albums: Li
             DropdownMenuItem(leadingIcon = { Icon(if (currentFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder, null) }, text = { Text(if (currentFavorite) "Quitar de Me gusta" else "Me gusta") }, onClick = { vm.toggleFavorite(track); expanded = false })
             DropdownMenuItem(text = { Text("Agregar a lista de reproducción") }, onClick = { expanded = false; showPlaylists = true })
             DropdownMenuItem(text = { Text("Agregar a álbum") }, onClick = { expanded = false; showAlbums = true })
+            if (track.isDownloaded) {
+                DropdownMenuItem(
+                    leadingIcon = { Icon(Icons.Default.DeleteOutline, null, tint = MaterialTheme.colorScheme.error) },
+                    text = { Text("Eliminar canción", color = MaterialTheme.colorScheme.error) },
+                    onClick = { expanded = false; confirmDelete = true }
+                )
+            }
         }
+    }
+
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Eliminar canción") },
+            text = { Text("¿Quieres eliminar \"${track.title}\" de las descargas de MusicVault?") },
+            confirmButton = {
+                TextButton(onClick = { vm.deleteTrack(track); confirmDelete = false }) { Text("Eliminar", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancelar") } }
+        )
     }
 
     if (showPlaylists) {
