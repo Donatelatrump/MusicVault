@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import com.musicvault.app.catalog.CatalogAlbum
 import com.musicvault.app.catalog.CatalogRepository
 import com.musicvault.app.catalog.CatalogTrack
+import com.musicvault.app.catalog.CoverImageCache
 import com.musicvault.app.catalog.MetadataCatalogProvider
 import com.musicvault.app.data.*
 import com.musicvault.app.library.LocalAudioScanner
@@ -17,15 +18,12 @@ import com.musicvault.app.providers.ProviderResult
 import com.musicvault.app.providers.Providers
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.first
-import kotlin.random.Random
 
 enum class AppSection(val label: String) { HOME("Inicio"), SEARCH("Buscar"), LIBRARY("Biblioteca"), PLAYLISTS("Playlists") }
 
@@ -53,7 +51,10 @@ data class MusicUiState(
     val isScanning: Boolean = false,
     val providerMessage: String? = null,
     val errorMessage: String? = null,
-    val favoriteIds: Set<String> = emptySet()
+    val favoriteIds: Set<String> = emptySet(),
+    val recentSearches: List<String> = emptyList(),
+    val recommendedTracks: List<Track> = emptyList(),
+    val recommendedAlbums: List<Album> = emptyList()
 )
 
 class MusicVaultViewModel(
@@ -87,9 +88,13 @@ class MusicVaultViewModel(
     private val _errorMessage = MutableStateFlow<String?>(null)
     private val _downloadProgress = MutableStateFlow<Map<String, Int>>(emptyMap())
     private val favoriteIds = repository.favorites()
+    private val recentSearches = repository.recentSearches(12)
     private val downloadJobs = mutableMapOf<String, Job>()
     private val downloadWaiters = mutableMapOf<String, MutableList<suspend (ProviderResult) -> Unit>>()
     private var searchJob: Job? = null
+    // Monotonic generation prevents a slow/cancel-resistant provider request from
+    // publishing stale results after the user has typed a newer query.
+    private var searchGeneration: Long = 0L
     private var playlistJob: Job? = null
     private var albumJob: Job? = null
     private var historyJob: Job? = null
@@ -97,12 +102,16 @@ class MusicVaultViewModel(
 
     private val localTracks = repository.tracks()
     private val downloaded = repository.downloaded()
-    private val albums = repository.albums().map { list -> list.filter { it.id.startsWith("album:custom:") } }
+    private val allCatalogAlbums = repository.albums()
+    private val albums = allCatalogAlbums.map { list -> list.filter { it.id.startsWith("album:custom:") } }
     private val playlists = repository.playlists()
 
     val isPlaying: StateFlow<Boolean> = player.isPlaying
     val playbackProgress: StateFlow<PlayerController.PlaybackProgress> = player.progress
     val downloadProgress: StateFlow<Map<String, Int>> = _downloadProgress.asStateFlow()
+
+    fun downloadProgressFor(id: String): Flow<Int?> =
+        downloadProgress.map { it[id] }.distinctUntilChanged()
     val shuffle: StateFlow<Boolean> = player.shuffle
     val crossfadeSeconds: StateFlow<Int> = player.crossfadeSeconds
     val queue: StateFlow<List<Track>> = player.queue
@@ -117,8 +126,37 @@ class MusicVaultViewModel(
         _remoteTracks, _remoteAlbums, _selectedTrack, _selectedPlaylist,
         _selectedPlaylistTracks, _selectedRemoteAlbum, _remoteAlbumTracks, _loadingRemoteAlbum,
         _selectedLocalAlbum, _selectedLocalAlbumTracks, _fullPlayer, _shuffle, _crossfadeSeconds,
-        _searching, _scanning, _providerMessage, _errorMessage, favoriteIds
+        _searching, _scanning, _providerMessage, _errorMessage, favoriteIds, recentSearches, allCatalogAlbums
     ) { v ->
+        val tracks = v[2] as List<Track>
+        val albums = v[4] as List<Album>
+        val catalogAlbums = v[25] as List<Album>
+        val favorites = v[23] as Set<String>
+        val searches = v[24] as List<String>
+        val tokens = searches.asSequence()
+            .flatMap { it.lowercase().split(Regex("\\s+")).asSequence() }
+            .filter { it.length >= 2 }
+            .take(24)
+            .toList()
+        fun scoreTrack(t: Track): Int {
+            val hay = "${t.title} ${t.artistName} ${t.albumTitle}".lowercase()
+            val match = tokens.count { hay.contains(it) } * 8
+            return match + if (t.id in favorites) 40 else 0
+        }
+        fun scoreAlbum(a: Album): Int {
+            val hay = "${a.title} ${a.artistName}".lowercase()
+            return tokens.count { hay.contains(it) } * 8
+        }
+        val recommendedTracks = tracks.asSequence()
+            .distinctBy { it.id }
+            .sortedByDescending { scoreTrack(it) }
+            .take(12)
+            .toList()
+        val recommendedAlbums = catalogAlbums.asSequence()
+            .distinctBy { it.id }
+            .sortedByDescending { scoreAlbum(it) }
+            .take(10)
+            .toList()
         MusicUiState(
             section = v[0] as AppSection,
             search = v[1] as String,
@@ -143,7 +181,10 @@ class MusicVaultViewModel(
             isScanning = v[20] as Boolean,
             providerMessage = v[21] as String?,
             errorMessage = v[22] as String?,
-            favoriteIds = v[23] as Set<String>
+            favoriteIds = favorites,
+            recentSearches = searches,
+            recommendedTracks = recommendedTracks,
+            recommendedAlbums = recommendedAlbums
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MusicUiState())
 
@@ -195,55 +236,62 @@ class MusicVaultViewModel(
     fun search(value: String) {
         _search.value = value
         _section.value = AppSection.SEARCH
+        searchGeneration += 1L
+        val generation = searchGeneration
+
+        // Every keystroke cancels and restarts the full debounce window.
+        // This is intentionally 1.5s: typing must never be interrupted by an
+        // intermediate network request.
         searchJob?.cancel()
         closeRemoteAlbum()
         _remoteTracks.value = emptyList()
         _remoteAlbums.value = emptyList()
-        if (value.isBlank()) {
-            _remoteTracks.value = emptyList()
-            _remoteAlbums.value = emptyList()
-            _searching.value = false
-            return
-        }
+        _searching.value = false
+
+        if (value.isBlank()) return
+
         searchJob = viewModelScope.launch {
-            delay(1_500)
+            delay(1_500L)
+
+            // A newer keystroke may have arrived while this coroutine was waiting.
+            if (generation != searchGeneration) return@launch
+
             _searching.value = true
             _errorMessage.value = null
             try {
-                coroutineScope {
-                    val trackJob = launch {
-                        try {
-                            val results = catalog.searchTracks(value, 20)
-                            _remoteTracks.value = results
-                        } catch (e: kotlinx.coroutines.CancellationException) {
-                            throw e
-                        } catch (_: Exception) {
-                            // The album search can still succeed.
-                        }
-                    }
-                    val albumJob = launch {
-                        try {
-                            val results = catalog.searchAlbums(value, 10)
-                            _remoteAlbums.value = results
-                        } catch (e: kotlinx.coroutines.CancellationException) {
-                            throw e
-                        } catch (_: Exception) {
-                            // The track search can still succeed.
-                        }
-                    }
-                    joinAll(trackJob, albumJob)
-                }
-                if (_remoteTracks.value.isEmpty() && _remoteAlbums.value.isEmpty()) {
-                    _errorMessage.value = "No se encontró metadata para \"$value\"."
+                val results = catalog.search(value, 20, 10)
+
+                // Some providers use blocking I/O and may not react immediately to
+                // coroutine cancellation. Never publish results belonging to an
+                // older query.
+                if (generation != searchGeneration) return@launch
+
+                // Warm the image cache before exposing the list so the first scroll
+                // is not competing with a burst of thumbnail decodes.
+                CoverImageCache.prefetch(
+                    appContext,
+                    results.tracks.map { it.coverUri } +
+                        results.albums.map { it.coverUri }
+                )
+
+                if (generation != searchGeneration) return@launch
+
+                _remoteTracks.value = results.tracks
+                _remoteAlbums.value = results.albums
+                repository.recordSearch(value)
+                if (results.tracks.isEmpty() && results.albums.isEmpty()) {
+                    _errorMessage.value = "No se encontró metadata para \"${value.trim()}\"."
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
-                if (_remoteTracks.value.isEmpty() && _remoteAlbums.value.isEmpty()) {
+                if (generation == searchGeneration) {
                     _errorMessage.value = "No se pudo consultar metadata: ${e.message ?: "error de red"}"
                 }
             } finally {
-                _searching.value = false
+                if (generation == searchGeneration) {
+                    _searching.value = false
+                }
             }
         }
     }
@@ -280,6 +328,44 @@ class MusicVaultViewModel(
         _selectedTrack.value = Track(localId, track.title, track.artistName, track.albumId?.let { "${track.provider}:release:$it" } ?: "unknown", track.albumTitle ?: "Álbum desconocido", track.durationMs, null, false, track.coverUri)
         _providerMessage.value = "Descargando \"${track.title}\" para reproducir..."
         requestRemoteDownload(track, autoPlay = true)
+    }
+
+    fun playRecommendation(track: Track) {
+        if (track.isDownloaded && track.audioUri != null) {
+            selectTrack(track)
+            return
+        }
+        val parts = track.id.split(":", limit = 3)
+        if (parts.size == 3 && parts[1] == "recording") {
+            playRemote(CatalogTrack(
+                id = parts[2],
+                title = track.title,
+                artistId = "",
+                artistName = track.artistName,
+                albumId = track.albumId.substringAfter(":release:", "").takeIf { it.isNotBlank() },
+                albumTitle = track.albumTitle,
+                durationMs = track.durationMs,
+                coverUri = track.coverUri,
+                provider = parts[0]
+            ))
+        }
+    }
+
+    fun openRecommendedAlbum(album: Album) {
+        val parts = album.id.split(":", limit = 3)
+        if (parts.size == 3 && parts[1] == "release-group") {
+            openRemoteAlbum(CatalogAlbum(
+                id = parts[2],
+                title = album.title,
+                artistId = album.artistId,
+                artistName = album.artistName,
+                year = album.year.takeIf { it > 0 },
+                coverUri = album.coverUri,
+                provider = parts[0]
+            ))
+        } else {
+            openLocalAlbum(album)
+        }
     }
 
     fun togglePlayback() = player.toggle()
@@ -659,8 +745,18 @@ class MusicVaultViewModel(
         _downloadProgress.value = _downloadProgress.value + (id to 0)
         val job = viewModelScope.launch(Dispatchers.IO) {
             try {
+                var lastProgress = 0
+                var lastProgressAt = 0L
                 val result = Providers.download(name, author, onProgress = { progress ->
-                    _downloadProgress.value = _downloadProgress.value + (id to progress)
+                    val now = System.currentTimeMillis()
+                    // Download progress is not animation state. Throttle UI updates
+                    // so a fast provider cannot invalidate the whole visible list
+                    // dozens of times per second. 100% is always delivered.
+                    if (progress == 100 || progress == 0 || progress - lastProgress >= 2 || now - lastProgressAt >= 120L) {
+                        lastProgress = progress
+                        lastProgressAt = now
+                        _downloadProgress.value = _downloadProgress.value + (id to progress)
+                    }
                 }, requestId = id)
                 kotlinx.coroutines.currentCoroutineContext().ensureActive()
                 val waiters = downloadWaiters.remove(id).orEmpty().toList()

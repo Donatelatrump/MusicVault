@@ -87,15 +87,45 @@ class MetadataCatalogProvider(
     override suspend fun searchAlbums(query: String, limit: Int): List<CatalogAlbum> = searchAlbumsOnly(query, limit)
 
     suspend fun tracksForAlbum(album: CatalogAlbum, limit: Int = 50): List<CatalogTrack> {
-        val provider = providers.firstOrNull { itName(it) == album.provider }
-            ?: return emptyList()
-        return try {
-            provider.albumTracks(album.id, limit)
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            emptyList()
+        val preferred = providers.firstOrNull { itName(it) == album.provider }
+        val ordered = buildList {
+            preferred?.let { add(it) }
+            providers.filter { it !== preferred }.forEach(::add)
         }
+
+        // First use the exact provider/id returned by the search.
+        for (source in ordered) {
+            try {
+                val exact = source.albumTracks(album.id, limit)
+                if (exact.isNotEmpty()) return exact
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Try the next provider below.
+            }
+        }
+
+        // If an API rejected the original id, resolve the album again by title
+        // and artist. This makes cached/mixed-provider album results resilient.
+        val query = "${album.title} ${album.artistName}".trim()
+        for (source in ordered) {
+            try {
+                val matches = source.searchAlbums(query, 5)
+                val match = matches.firstOrNull {
+                    it.title.equals(album.title, ignoreCase = true) &&
+                    (album.artistName.isBlank() || it.artistName.equals(album.artistName, ignoreCase = true))
+                } ?: matches.firstOrNull { it.title.equals(album.title, ignoreCase = true) }
+                if (match != null) {
+                    val tracks = source.albumTracks(match.id, limit)
+                    if (tracks.isNotEmpty()) return tracks
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Continue to the next source.
+            }
+        }
+        return emptyList()
     }
 
     override suspend fun albumTracks(albumId: String, limit: Int): List<CatalogTrack> = emptyList()

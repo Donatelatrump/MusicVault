@@ -32,3 +32,12 @@ Base: MusicVault v0.4.2 UX/custom albums.
 .\gradlew.bat clean
 .\gradlew.bat assembleDebug
 ```
+
+
+## Performance/cache pass
+- Search results are cached in Room for 30 minutes and restored without a network request.
+- Cover art uses a shared Coil memory+disk cache and is prefetched after search.
+- Search list images request 180px thumbnails; album detail uses 360px.
+- Search debounce is 350ms.
+- Remote result rows no longer create one download-progress Flow collector each, reducing Compose work while scrolling.
+- Launcher icon regenerated from the supplied MusicVault logo at mdpi through xxxhdpi.

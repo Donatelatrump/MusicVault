@@ -16,9 +16,10 @@ import androidx.room.RoomDatabase
         PlayHistoryEntity::class,
         FavoriteEntity::class,
         SearchHistoryEntity::class,
-        DownloadRecordEntity::class
+        DownloadRecordEntity::class,
+        CatalogSearchCacheEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class MusicDatabase : RoomDatabase() {
@@ -30,6 +31,7 @@ abstract class MusicDatabase : RoomDatabase() {
     abstract fun favoriteDao(): FavoriteDao
     abstract fun searchHistoryDao(): SearchHistoryDao
     abstract fun downloadRecordDao(): DownloadRecordDao
+    abstract fun catalogSearchCacheDao(): CatalogSearchCacheDao
 
     companion object {
         val MIGRATION_1_2 = object : androidx.room.migration.Migration(1, 2) {
@@ -49,6 +51,12 @@ abstract class MusicDatabase : RoomDatabase() {
                 db.execSQL("CREATE TABLE IF NOT EXISTS download_records (trackId TEXT PRIMARY KEY NOT NULL, path TEXT NOT NULL, checksum TEXT, savedAt INTEGER NOT NULL)")
             }
         }
+        val MIGRATION_4_5 = object : androidx.room.migration.Migration(4, 5) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS catalog_search_cache (cacheKey TEXT NOT NULL PRIMARY KEY, query TEXT NOT NULL, tracksJson TEXT NOT NULL, albumsJson TEXT NOT NULL, savedAt INTEGER NOT NULL)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_catalog_search_cache_savedAt ON catalog_search_cache(savedAt)")
+            }
+        }
         @Volatile private var INSTANCE: MusicDatabase? = null
 
         fun get(context: Context): MusicDatabase =
@@ -57,7 +65,7 @@ abstract class MusicDatabase : RoomDatabase() {
                     context.applicationContext,
                     MusicDatabase::class.java,
                     "musicvault.db"
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build().also { INSTANCE = it }
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5).build().also { INSTANCE = it }
             }
     }
 }

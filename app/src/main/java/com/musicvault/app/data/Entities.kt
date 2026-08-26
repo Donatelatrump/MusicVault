@@ -68,3 +68,13 @@ data class DownloadRecordEntity(
     val checksum: String? = null,
     val savedAt: Long = System.currentTimeMillis()
 )
+
+
+@Entity(tableName = "catalog_search_cache")
+data class CatalogSearchCacheEntity(
+    @PrimaryKey val cacheKey: String,
+    val query: String,
+    val tracksJson: String,
+    val albumsJson: String,
+    val savedAt: Long
+)

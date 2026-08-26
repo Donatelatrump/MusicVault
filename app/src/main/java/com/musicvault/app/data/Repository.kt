@@ -65,6 +65,16 @@ class MusicRepository(private val db: MusicDatabase) {
         db.albumDao().delete(id)
     }
 
+
+    fun recentSearches(limit: Int = 12): Flow<List<String>> =
+        db.searchHistoryDao().recent(limit).map { items -> items.map { it.query } }
+
+    suspend fun recordSearch(query: String) {
+        val normalized = query.trim()
+        if (normalized.isBlank()) return
+        db.searchHistoryDao().add(SearchHistoryEntity(query = normalized))
+    }
+
     fun favorites(): Flow<Set<String>> =
         db.favoriteDao().observeAll().map { list -> list.mapTo(HashSet()) { it.trackId } }
 

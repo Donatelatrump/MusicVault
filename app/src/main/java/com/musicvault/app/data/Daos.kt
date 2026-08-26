@@ -70,3 +70,16 @@ interface DownloadRecordDao {
     @Query("SELECT * FROM download_records WHERE trackId=:id LIMIT 1") suspend fun get(id: String): DownloadRecordEntity?
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun save(item: DownloadRecordEntity)
 }
+
+
+@Dao
+interface CatalogSearchCacheDao {
+    @Query("SELECT * FROM catalog_search_cache WHERE cacheKey=:cacheKey LIMIT 1")
+    suspend fun get(cacheKey: String): CatalogSearchCacheEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun save(item: CatalogSearchCacheEntity)
+
+    @Query("DELETE FROM catalog_search_cache WHERE savedAt < :cutoff")
+    suspend fun deleteOlderThan(cutoff: Long)
+}

@@ -27,7 +27,7 @@ class ItunesCatalogProvider : CatalogProvider {
         } finally { c.disconnect() }
     }
 
-    private fun art(url: String?): String? = url?.takeIf { it.isNotBlank() }?.replace("100x100", "300x300")
+    private fun art(url: String?): String? = url?.takeIf { it.isNotBlank() }?.replace("100x100", "200x200")
 
     override suspend fun searchTracks(query: String, limit: Int): List<CatalogTrack> {
         val results = getJson(query, "song", limit).optJSONArray("results") ?: return emptyList()
