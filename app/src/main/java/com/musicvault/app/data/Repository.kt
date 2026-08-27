@@ -58,6 +58,10 @@ class MusicRepository(private val db: MusicDatabase) {
 
     suspend fun addTrackToPlaylist(id: String, track: Track) = addTracksToPlaylist(id, listOf(track))
 
+    suspend fun removeTrackFromPlaylist(id: String, trackId: String) {
+        db.playlistDao().deleteTrack(id, trackId)
+    }
+
     suspend fun addTrackToAlbum(id: String, track: Track) {
         val current = db.albumTrackDao().observeTracks(id).first()
         db.albumTrackDao().upsertAll(listOf(AlbumTrackEntity(id, track.id, current.size)))
@@ -66,6 +70,11 @@ class MusicRepository(private val db: MusicDatabase) {
     suspend fun deleteAlbum(id: String) {
         db.albumTrackDao().deleteTracks(id)
         db.albumDao().delete(id)
+    }
+
+    suspend fun deletePlaylist(id: String) {
+        db.playlistDao().deleteTracks(id)
+        db.playlistDao().delete(id)
     }
 
 

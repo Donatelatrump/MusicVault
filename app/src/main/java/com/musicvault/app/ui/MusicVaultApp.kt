@@ -12,6 +12,11 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitTouchSlopOrCancellation
+import androidx.compose.foundation.gestures.drag
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -213,7 +218,6 @@ fun MusicVaultApp(vm: MusicVaultViewModel) {
                         }
                     }
                     when {
-                        state.selectedLocalAlbum != null -> LocalAlbumDetail(state.selectedLocalAlbum!!, state.selectedLocalAlbumTracks, isPlaying, state.selectedTrack?.id, state.playlists, state.albums, vm)
                         state.selectedRemoteAlbum != null -> RemoteAlbumDetail(
                             album = state.selectedRemoteAlbum!!,
                             tracks = state.remoteAlbumTracks,
@@ -320,17 +324,6 @@ private fun HomeScreen(state: MusicUiState, albumDownloads: Set<String>, isPlayi
                             onDownloadAll = if (album.id.contains(":release-group:")) { { vm.downloadRecommendedAlbum(album) } } else null,
                             isDownloading = album.id in albumDownloads
                         )
-                    }
-                }
-            }
-        }
-        if (state.albums.isNotEmpty()) {
-            item(key = "albums", contentType = "section") {
-                SectionTitle("Tu biblioteca")
-                Spacer(Modifier.height(10.dp))
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                    items(state.albums.take(12), key = { "album:${it.id}" }, contentType = { "album" }) { album ->
-                        AlbumCard(album = album, onClick = { vm.openLocalAlbum(album) })
                     }
                 }
             }
@@ -565,9 +558,14 @@ private fun SearchScreen(
 
     val selectedTrack = actionTrack
     when (actionAction) {
-        MoreAction.PLAYLIST -> if (selectedTrack != null) {
+        MoreAction.QUEUE -> if (selectedTrack != null) {
+            vm.addRemoteTrackToQueue(selectedTrack)
+            actionTrack = null
+            actionAction = null
+        }
+        MoreAction.ALBUM -> if (selectedTrack != null) {
             ChoiceDialog(
-                title = "Agregar a playlist",
+                title = "Agregar a álbum",
                 choices = state.playlists.map { it.id to it.title },
                 onDismiss = { actionTrack = null; actionAction = null },
                 onSelect = { id ->
@@ -575,19 +573,6 @@ private fun SearchScreen(
                     actionTrack = null
                     actionAction = null
                 }
-            )
-        }
-        MoreAction.ALBUM -> if (selectedTrack != null) {
-            AlbumChoiceDialog(
-                albums = state.albums,
-                onDismiss = { actionTrack = null; actionAction = null },
-                onSelect = { id ->
-                    vm.addRemoteTrackToAlbum(selectedTrack, id)
-                    actionTrack = null
-                    actionAction = null
-                },
-                onCreate = { showCreateAlbum = true; actionAction = null },
-                onDelete = vm::deleteAlbum
             )
         }
         MoreAction.DELETE -> if (selectedTrack != null) {
@@ -780,7 +765,7 @@ private fun LibraryScreen(state: MusicUiState, isPlaying: Boolean, vm: MusicVaul
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 StatCard("Disponibles", state.downloaded.size.toString())
-                StatCard("Álbumes", state.albums.size.toString())
+                StatCard("Álbumes", state.playlists.size.toString())
             }
         }
         items(state.downloaded, key = { it.id }) {
@@ -802,7 +787,6 @@ private fun LibraryScreen(state: MusicUiState, isPlaying: Boolean, vm: MusicVaul
 
 @Composable
 private fun PlaylistScreen(state: MusicUiState, vm: MusicVaultViewModel) {
-    var showPlaylistDialog by remember { mutableStateOf(false) }
     var showAlbumDialog by remember { mutableStateOf(false) }
     LazyColumn(
         Modifier.fillMaxSize(),
@@ -812,23 +796,26 @@ private fun PlaylistScreen(state: MusicUiState, vm: MusicVaultViewModel) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("Colecciones", color = VaultColors.TextPrimary, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.5).sp)
-                    Text("Crea tus propias listas y álbumes locales", color = VaultColors.TextSecondary, fontSize = 14.sp)
+                    Text("Álbumes", color = VaultColors.TextPrimary, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.5).sp)
+                    Text("Tus colecciones de canciones descargadas", color = VaultColors.TextSecondary, fontSize = 14.sp)
                 }
-                IconButton(onClick = { showPlaylistDialog = true }) { Icon(Icons.Default.QueueMusic, "Nueva playlist", tint = VaultColors.TextPrimary) }
-                IconButton(onClick = { showAlbumDialog = true }) { Icon(Icons.Default.Album, "Nuevo álbum", tint = VaultColors.TextPrimary) }
+                IconButton(onClick = { showAlbumDialog = true }) {
+                    Icon(Icons.Default.Add, "Nuevo álbum", tint = VaultColors.TextPrimary)
+                }
             }
         }
-        item { SectionTitle("Playlists") }
-        items(state.playlists, key = { it.id }) { PlaylistCard(it) { vm.openPlaylist(it) } }
-        item { SectionTitle("Álbumes") }
-        items(state.albums, key = { it.id }) { album -> AlbumCard(album = album, onClick = { vm.openLocalAlbum(album) }) }
-    }
-    if (showPlaylistDialog) {
-        CreateCollectionDialog("Nueva playlist", "Nombre de la playlist", state.downloaded, vm::createPlaylist) { showPlaylistDialog = false }
+        if (state.playlists.isEmpty()) {
+            item {
+                Text("Aún no tienes álbumes creados.", color = VaultColors.TextSecondary, modifier = Modifier.padding(vertical = 20.dp))
+            }
+        } else {
+            items(state.playlists, key = { it.id }) { playlist ->
+                PlaylistCard(playlist) { vm.openPlaylist(playlist) }
+            }
+        }
     }
     if (showAlbumDialog) {
-        CreateCollectionDialog("Nuevo álbum", "Nombre del álbum", state.downloaded, vm::createAlbum) { showAlbumDialog = false }
+        CreateCollectionDialog("Nuevo álbum", "Nombre del álbum", state.downloaded, vm::createPlaylist) { showAlbumDialog = false }
     }
 }
 
@@ -1190,24 +1177,28 @@ private fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean,
                     listOf(accentTop.copy(alpha = 0.78f), VaultColors.Background, VaultColors.Background)
                 )
             )
-            .padding(horizontal = 24.dp, vertical = 18.dp)
+            .padding(horizontal = 24.dp, vertical = 10.dp)
+            .navigationBarsPadding()
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = vm::closeFullPlayer) { Icon(Icons.Default.KeyboardArrowDown, "Cerrar", tint = VaultColors.TextPrimary, modifier = Modifier.size(30.dp)) }
             Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("REPRODUCIENDO", color = VaultColors.TextSecondary, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
             }
-            IconButton(onClick = vm::toggleShuffle) {
-                Icon(Icons.Default.Shuffle, "Aleatorio", tint = if (shuffle) VaultColors.Green else VaultColors.TextPrimary)
-            }
         }
-        Spacer(Modifier.height(16.dp))
-        Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+        Spacer(Modifier.height(8.dp))
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            contentAlignment = Alignment.TopCenter
+        ) {
             AsyncImage(
                 track.coverUri, track.title,
                 Modifier
                     .fillMaxWidth()
                     .aspectRatio(1f)
+                    .padding(top = 4.dp)
                     .scale(scale)
                     .shadow(elevation = 24.dp, shape = RoundedCornerShape(16.dp), ambientColor = accentTop, spotColor = accentTop)
                     .clip(RoundedCornerShape(16.dp))
@@ -1235,49 +1226,156 @@ private fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean,
             }
         }
         Spacer(Modifier.height(14.dp))
-        Slider(
-            value = sliderPosition,
-            onValueChange = { sliderDragging = true; sliderPosition = it },
-            onValueChangeFinished = { sliderDragging = false; vm.seekTo(sliderPosition.toLong()) },
-            valueRange = 0f..duration.toFloat(),
-            colors = SliderDefaults.colors(
-                thumbColor = VaultColors.TextPrimary,
-                activeTrackColor = VaultColors.Green,
-                inactiveTrackColor = VaultColors.Surface3
-            ),
-            modifier = Modifier.fillMaxWidth()
-        )
+        // Custom seek bar: compact, precise and visually lighter than the default Material slider.
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(30.dp)
+                .pointerInput(duration) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val width = size.width.toFloat().coerceAtLeast(1f)
+
+                        fun setFromX(x: Float) {
+                            sliderPosition = (x.coerceIn(0f, width) / width) * duration.toFloat()
+                        }
+
+                        val slopChange = awaitTouchSlopOrCancellation(down.id) { change, _ ->
+                            sliderDragging = true
+                            change.consume()
+                            setFromX(change.position.x)
+                        }
+
+                        if (slopChange != null) {
+                            drag(slopChange.id) { change ->
+                                change.consume()
+                                sliderDragging = true
+                                setFromX(change.position.x)
+                            }
+                        } else {
+                            setFromX(down.position.x)
+                        }
+
+                        sliderDragging = false
+                        vm.seekTo(sliderPosition.toLong())
+                    }
+                }
+        ) {
+            Canvas(Modifier.fillMaxSize()) {
+                val centerY = size.height / 2f
+                val trackHeight = 5.dp.toPx()
+                val thumbRadius = 7.dp.toPx()
+                val progressFraction = (sliderPosition / duration.toFloat()).coerceIn(0f, 1f)
+                val activeX = size.width * progressFraction
+
+                drawRoundRect(
+                    color = VaultColors.Surface3,
+                    topLeft = androidx.compose.ui.geometry.Offset(0f, centerY - trackHeight / 2f),
+                    size = androidx.compose.ui.geometry.Size(size.width, trackHeight),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(trackHeight / 2f)
+                )
+                if (activeX > 0f) {
+                    drawRoundRect(
+                        brush = Brush.horizontalGradient(
+                            listOf(VaultColors.Green.copy(alpha = 0.72f), VaultColors.Green)
+                        ),
+                        topLeft = androidx.compose.ui.geometry.Offset(0f, centerY - trackHeight / 2f),
+                        size = androidx.compose.ui.geometry.Size(activeX, trackHeight),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(trackHeight / 2f)
+                    )
+                }
+                drawCircle(
+                    color = VaultColors.Green.copy(alpha = 0.16f),
+                    radius = thumbRadius * 1.9f,
+                    center = androidx.compose.ui.geometry.Offset(activeX, centerY)
+                )
+                drawCircle(
+                    color = VaultColors.TextPrimary,
+                    radius = thumbRadius,
+                    center = androidx.compose.ui.geometry.Offset(activeX, centerY)
+                )
+            }
+        }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(formatTime(if (sliderDragging) sliderPosition.toLong() else position), color = VaultColors.TextSecondary, fontSize = 12.sp)
             Text(formatTime(duration), color = VaultColors.TextSecondary, fontSize = 12.sp)
         }
         Spacer(Modifier.height(6.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = vm::previousTrack, modifier = Modifier.size(58.dp)) {
-                Icon(Icons.Default.SkipPrevious, "Anterior", tint = VaultColors.TextPrimary, modifier = Modifier.size(36.dp))
-            }
-            Spacer(Modifier.width(14.dp))
+        // Transport controls: Play is anchored exactly at screen center.
+        // Previous/Next are equally spaced from Play; Shuffle continues the same spacing.
+        Box(
+            Modifier.fillMaxWidth().height(72.dp)
+        ) {
             val playScale by animateFloatAsState(
                 if (isPlaying) 1f else 0.92f,
                 spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
                 label = "playButtonScale"
             )
+
+            // Play is the absolute center of the available screen width.
             FilledIconButton(
                 onClick = vm::togglePlayback,
-                modifier = Modifier.size(74.dp).graphicsLayer { scaleX = playScale; scaleY = playScale },
-                colors = IconButtonDefaults.filledIconButtonColors(containerColor = VaultColors.TextPrimary, contentColor = Color.Black)
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .size(72.dp)
+                    .graphicsLayer { scaleX = playScale; scaleY = playScale },
+                colors = IconButtonDefaults.filledIconButtonColors(
+                    containerColor = VaultColors.TextPrimary,
+                    contentColor = Color.Black
+                )
             ) {
-                Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, null, modifier = Modifier.size(38.dp))
+                Icon(
+                    if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    null,
+                    modifier = Modifier.size(38.dp)
+                )
             }
-            Spacer(Modifier.width(14.dp))
-            IconButton(onClick = vm::nextTrack, modifier = Modifier.size(58.dp)) {
-                Icon(Icons.Default.SkipNext, "Siguiente", tint = VaultColors.TextPrimary, modifier = Modifier.size(36.dp))
+
+            // Same center-to-center distance on both sides of Play.
+            IconButton(
+                onClick = vm::previousTrack,
+                modifier = Modifier.align(Alignment.Center).offset(x = (-54).dp).size(54.dp)
+            ) {
+                Icon(Icons.Default.SkipPrevious, "Anterior", tint = VaultColors.TextPrimary, modifier = Modifier.size(34.dp))
+            }
+
+            IconButton(
+                onClick = vm::nextTrack,
+                modifier = Modifier.align(Alignment.Center).offset(x = 54.dp).size(54.dp)
+            ) {
+                Icon(Icons.Default.SkipNext, "Siguiente", tint = VaultColors.TextPrimary, modifier = Modifier.size(34.dp))
+            }
+
+            // Shuffle uses exactly the same spacing from Next as Next uses from Play.
+            IconButton(
+                onClick = vm::toggleShuffle,
+                modifier = Modifier.align(Alignment.Center).offset(x = 108.dp).size(54.dp)
+            ) {
+                Icon(
+                    Icons.Default.Shuffle,
+                    "Aleatorio",
+                    tint = if (shuffle) VaultColors.Green else VaultColors.TextPrimary,
+                    modifier = Modifier.size(25.dp)
+                )
             }
         }
-        Spacer(Modifier.height(4.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            IconButton(onClick = { showQueue = true }) {
-                Icon(Icons.Default.QueueMusic, "Cola de reproducción", tint = VaultColors.TextSecondary)
+        // The queue button is independent from the centered transport controls.
+        // It stays at the lower-right edge and respects the navigation gesture area.
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(44.dp)
+        ) {
+            IconButton(
+                onClick = { showQueue = true },
+                modifier = Modifier.align(Alignment.CenterEnd).size(42.dp)
+            ) {
+                Icon(
+                    Icons.Default.QueueMusic,
+                    "Cola de reproducción",
+                    tint = VaultColors.TextSecondary,
+                    modifier = Modifier.size(25.dp)
+                )
             }
         }
     }
@@ -1362,7 +1460,7 @@ private fun QueueBottomSheet(queue: List<Track>, currentIndex: Int, vm: MusicVau
                 Text("La cola está vacía.", color = VaultColors.TextSecondary, modifier = Modifier.padding(vertical = 24.dp))
             } else {
                 LazyColumn(Modifier.fillMaxWidth().heightIn(max = 520.dp)) {
-                    itemsIndexed(queue, key = { _, track -> track.id }) { index, track ->
+                    itemsIndexed(queue, key = { index, track -> "${index}_${track.id}" }) { index, track ->
                         Row(
                             Modifier.fillMaxWidth().animateItem().padding(vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically
@@ -1427,7 +1525,7 @@ private fun BottomBar(section: AppSection, onSelect: (AppSection) -> Unit) {
         NavigationBarItem(
             section == AppSection.PLAYLISTS, { onSelect(AppSection.PLAYLISTS) },
             icon = { Icon(if (section == AppSection.PLAYLISTS) Icons.Default.QueueMusic else Icons.Outlined.QueueMusic, null) },
-            label = { Text("Listas", fontWeight = if (section == AppSection.PLAYLISTS) FontWeight.Bold else FontWeight.Normal) },
+            label = { Text("Álbumes", fontWeight = if (section == AppSection.PLAYLISTS) FontWeight.Bold else FontWeight.Normal) },
             colors = itemColors
         )
     }
@@ -1507,7 +1605,7 @@ private fun PlaylistCard(playlist: Playlist, onClick: () -> Unit) {
                 .clip(RoundedCornerShape(8.dp))
                 .background(Brush.linearGradient(listOf(top, bottom))),
             contentAlignment = Alignment.Center
-        ) { Icon(Icons.Default.QueueMusic, null, tint = VaultColors.TextPrimary.copy(alpha = 0.9f), modifier = Modifier.size(40.dp)) }
+        ) { Icon(Icons.Default.Album, null, tint = VaultColors.TextPrimary.copy(alpha = 0.9f), modifier = Modifier.size(40.dp)) }
         Spacer(Modifier.height(12.dp))
         Text(playlist.title, color = VaultColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         Text(playlist.description, color = VaultColors.TextSecondary, fontSize = 12.sp, maxLines = 2)
@@ -1585,20 +1683,34 @@ private fun TrackRow(
 }
 
 @Composable
-private fun TrackActionsMenu(track: Track, playlists: List<Playlist>, albums: List<Album>, vm: MusicVaultViewModel, favorite: Boolean = false) {
+private fun TrackActionsMenu(
+    track: Track,
+    playlists: List<Playlist>,
+    albums: List<Album>,
+    vm: MusicVaultViewModel,
+    favorite: Boolean = false
+) {
     val currentFavorite = vm.isFavorite(track.id)
     var expanded by remember { mutableStateOf(false) }
-    var showPlaylists by remember { mutableStateOf(false) }
     var showAlbums by remember { mutableStateOf(false) }
     var showCreateAlbum by remember { mutableStateOf(false) }
     var newAlbumName by remember { mutableStateOf("") }
     var confirmDelete by remember { mutableStateOf(false) }
 
     Box {
-        IconButton(onClick = { expanded = true }) { Icon(Icons.Default.MoreVert, "Más opciones", tint = VaultColors.TextPrimary) }
+        IconButton(onClick = { expanded = true }) {
+            Icon(Icons.Default.MoreVert, "Más opciones", tint = VaultColors.TextPrimary)
+        }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            DropdownMenuItem(leadingIcon = { Icon(if (currentFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder, null) }, text = { Text(if (currentFavorite) "Quitar de Me gusta" else "Me gusta") }, onClick = { vm.toggleFavorite(track); expanded = false })
-            DropdownMenuItem(text = { Text("Agregar a lista de reproducción") }, onClick = { expanded = false; showPlaylists = true })
+            DropdownMenuItem(
+                text = { Text("Agregar a cola de reproducción") },
+                onClick = { vm.addToQueue(track); expanded = false }
+            )
+            DropdownMenuItem(
+                leadingIcon = { Icon(if (currentFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder, null) },
+                text = { Text(if (currentFavorite) "Quitar de Me gusta" else "Me gusta") },
+                onClick = { vm.toggleFavorite(track); expanded = false }
+            )
             DropdownMenuItem(text = { Text("Agregar a álbum") }, onClick = { expanded = false; showAlbums = true })
             if (track.isDownloaded) {
                 DropdownMenuItem(
@@ -1615,26 +1727,18 @@ private fun TrackActionsMenu(track: Track, playlists: List<Playlist>, albums: Li
             onDismissRequest = { confirmDelete = false },
             title = { Text("Eliminar canción") },
             text = { Text("¿Quieres eliminar \"${track.title}\" de las descargas de MusicVault?") },
-            confirmButton = {
-                TextButton(onClick = { vm.deleteTrack(track); confirmDelete = false }) { Text("Eliminar", color = MaterialTheme.colorScheme.error) }
-            },
+            confirmButton = { TextButton(onClick = { vm.deleteTrack(track); confirmDelete = false }) { Text("Eliminar", color = MaterialTheme.colorScheme.error) } },
             dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancelar") } }
         )
     }
 
-    if (showPlaylists) {
-        ChoiceDialog("Agregar a playlist", playlists.map { it.id to it.title }, onDismiss = { showPlaylists = false }) { id ->
-            vm.addTrackToPlaylist(track, id)
-            showPlaylists = false
-        }
-    }
     if (showAlbums) {
         AlbumChoiceDialog(
-            albums = albums,
+            albums = playlists.map { Album(it.id, it.title, "custom", it.description, 0, null) },
             onDismiss = { showAlbums = false },
-            onSelect = { id -> vm.addTrackToAlbum(track, id); showAlbums = false },
+            onSelect = { id -> vm.addTrackToPlaylist(track, id); showAlbums = false },
             onCreate = { showCreateAlbum = true; showAlbums = false },
-            onDelete = { id -> vm.deleteAlbum(id) }
+            onDelete = { id -> vm.deletePlaylist(id) }
         )
     }
     if (showCreateAlbum) {
@@ -1644,7 +1748,7 @@ private fun TrackActionsMenu(track: Track, playlists: List<Playlist>, albums: Li
             text = { OutlinedTextField(newAlbumName, { newAlbumName = it }, label = { Text("Nombre") }, singleLine = true) },
             confirmButton = {
                 TextButton(enabled = newAlbumName.isNotBlank(), onClick = {
-                    vm.createAlbum(newAlbumName, listOf(track))
+                    vm.createPlaylist(newAlbumName, listOf(track))
                     showCreateAlbum = false
                     newAlbumName = ""
                 }) { Text("Crear y agregar") }
@@ -1663,19 +1767,21 @@ private fun RemoteAlbumDetailActionsMenu(
     expanded: Boolean,
     onDismiss: () -> Unit
 ) {
-    var showPlaylists by remember { mutableStateOf(false) }
     var showAlbums by remember { mutableStateOf(false) }
     var showCreateAlbum by remember { mutableStateOf(false) }
     var newAlbumName by remember { mutableStateOf("") }
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
-        DropdownMenuItem(text = { Text("Agregar a lista de reproducción") }, onClick = { onDismiss(); showPlaylists = true })
+        DropdownMenuItem(text = { Text("Agregar a cola de reproducción") }, onClick = { onDismiss(); vm.addRemoteTrackToQueue(track) })
         DropdownMenuItem(text = { Text("Agregar a álbum") }, onClick = { onDismiss(); showAlbums = true })
     }
-    if (showPlaylists) {
-        ChoiceDialog("Agregar a playlist", playlists.map { it.id to it.title }, { showPlaylists = false }) { id -> vm.addRemoteTrackToPlaylist(track, id); showPlaylists = false }
-    }
     if (showAlbums) {
-        AlbumChoiceDialog(albums, { showAlbums = false }, { id -> vm.addRemoteTrackToAlbum(track, id); showAlbums = false }, { showCreateAlbum = true; showAlbums = false }, { id -> vm.deleteAlbum(id) })
+        AlbumChoiceDialog(
+            albums = playlists.map { Album(it.id, it.title, "custom", it.description, 0, null) },
+            onDismiss = { showAlbums = false },
+            onSelect = { id -> vm.addRemoteTrackToPlaylist(track, id); showAlbums = false },
+            onCreate = { showCreateAlbum = true; showAlbums = false },
+            onDelete = { id -> vm.deletePlaylist(id) }
+        )
     }
     if (showCreateAlbum) {
         AlertDialog(
@@ -1691,7 +1797,7 @@ private fun RemoteAlbumDetailActionsMenu(
 @Composable
 private fun ChoiceDialog(title: String, choices: List<Pair<String, String>>, onDismiss: () -> Unit, onSelect: (String) -> Unit) {
     AlertDialog(onDismissRequest = onDismiss, title = { Text(title) }, text = {
-        if (choices.isEmpty()) Text("No tienes listas creadas.") else LazyColumn(Modifier.heightIn(max = 360.dp)) {
+        if (choices.isEmpty()) Text("No tienes álbumes creados.") else LazyColumn(Modifier.heightIn(max = 360.dp)) {
             items(choices, key = { it.first }) { (id, label) ->
                 Text(label, Modifier.fillMaxWidth().clickable { onSelect(id) }.padding(14.dp))
             }
@@ -1715,7 +1821,9 @@ private fun AlbumChoiceDialog(
                 items(albums, key = { it.id }) { album ->
                     Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text(album.title, Modifier.weight(1f).clickable { onSelect(album.id) }.padding(10.dp))
-                        IconButton(onClick = { deleteId = album.id }) { Icon(Icons.Default.DeleteOutline, "Eliminar álbum") }
+                        if (album.id != "playlist:favorites") {
+                            IconButton(onClick = { deleteId = album.id }) { Icon(Icons.Default.DeleteOutline, "Eliminar álbum") }
+                        }
                     }
                 }
             }

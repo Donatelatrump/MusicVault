@@ -41,7 +41,7 @@ sealed interface RemoteResultItem {
     }
 }
 
-enum class MoreAction { PLAYLIST, ALBUM, DELETE }
+enum class MoreAction { QUEUE, ALBUM, DELETE }
 
 class RemoteResultsAdapter(
     private val onAlbumClick: (CatalogAlbum) -> Unit,
@@ -377,7 +377,7 @@ class RemoteResultsAdapter(
                 }
             })
         }
-        addItem("Agregar a lista de reproducción", MoreAction.PLAYLIST)
+        addItem("Agregar a cola de reproducción", MoreAction.QUEUE)
         addItem("Agregar a álbum", MoreAction.ALBUM)
         val localId = "${track.provider}:recording:${track.id}"
         if (localId in downloadedIds) {

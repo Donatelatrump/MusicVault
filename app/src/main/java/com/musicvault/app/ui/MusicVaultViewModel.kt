@@ -25,7 +25,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.first
 
-enum class AppSection(val label: String) { HOME("Inicio"), SEARCH("Buscar"), LIBRARY("Biblioteca"), PLAYLISTS("Playlists") }
+enum class AppSection(val label: String) { HOME("Inicio"), SEARCH("Buscar"), LIBRARY("Biblioteca"), PLAYLISTS("Álbumes") }
 
 data class MusicUiState(
     val section: AppSection = AppSection.HOME,
@@ -62,6 +62,7 @@ class MusicVaultViewModel(
     private val database: MusicDatabase
 ) : ViewModel() {
     private val repository = MusicRepository(database)
+    private val favoritesAlbumId = "playlist:favorites"
     private val catalog = CatalogRepository(MetadataCatalogProvider(), database)
     private val player = PlayerController(appContext)
     private val equalizer = NativeEqualizer()
@@ -98,6 +99,10 @@ class MusicVaultViewModel(
     private var searchGeneration: Long = 0L
     private var playlistJob: Job? = null
     private var activePlaylistId: String? = null
+    // True only when the user explicitly created/selected a playback queue.
+    // A normal single-track play also creates a Media3 item, but that must not
+    // force Next to stay on a one-item queue.
+    private var explicitQueueMode = false
     private var albumJob: Job? = null
     private var historyJob: Job? = null
     private var lastHistoryUpdateAt = 0L
@@ -193,6 +198,11 @@ class MusicVaultViewModel(
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MusicUiState())
 
     init {
+        viewModelScope.launch(Dispatchers.IO) {
+            // Favorites is a permanent user collection backed by the existing playlist tables.
+            // Creating it with a stable id makes it available immediately and preserves it across launches.
+            repository.createPlaylist(favoritesAlbumId, "Favoritos", "Canciones que te gustan")
+        }
         player.setCrossfadeSeconds(_crossfadeSeconds.value)
         historyJob = viewModelScope.launch {
             launch {
@@ -302,6 +312,7 @@ class MusicVaultViewModel(
 
     fun selectTrack(track: Track) {
         activePlaylistId = null
+        explicitQueueMode = false
         _selectedTrack.value = track
         if (track.audioUri != null && track.isDownloaded) {
             player.play(track)
@@ -449,6 +460,7 @@ class MusicVaultViewModel(
                 return@launch
             }
             activePlaylistId = playlist.id
+            explicitQueueMode = true
             _selectedPlaylist.value = playlist
             _selectedPlaylistTracks.value = tracks
             _shuffle.value = shuffle
@@ -474,6 +486,7 @@ class MusicVaultViewModel(
                 return@launch
             }
             activePlaylistId = playlist.id
+            explicitQueueMode = true
             _selectedPlaylist.value = playlist
             _selectedPlaylistTracks.value = tracks
             _shuffle.value = shuffle
@@ -493,10 +506,41 @@ class MusicVaultViewModel(
     }
 
     fun toggleFavorite(track: Track) {
-        viewModelScope.launch(Dispatchers.IO) { repository.toggleFavorite(track.id) }
+        viewModelScope.launch(Dispatchers.IO) {
+            val nowFavorite = repository.toggleFavorite(track.id)
+            if (nowFavorite) {
+                repository.addTrackToPlaylist(favoritesAlbumId, track)
+            } else {
+                repository.removeTrackFromPlaylist(favoritesAlbumId, track.id)
+            }
+        }
     }
 
     fun isFavorite(trackId: String): Boolean = state.value.favoriteIds.contains(trackId)
+
+    fun addToQueue(track: Track) {
+        if (!track.isDownloaded || track.audioUri == null) {
+            _providerMessage.value = "Descarga la canción antes de agregarla a la cola."
+            return
+        }
+        explicitQueueMode = true
+        player.append(track)
+    }
+
+    fun addRemoteTrackToQueue(track: CatalogTrack) {
+        val localId = "${track.provider}:recording:${track.id}"
+        val local = state.value.tracks.firstOrNull { it.id == localId && it.isDownloaded && it.audioUri != null }
+        if (local != null) {
+            explicitQueueMode = true
+            player.append(local)
+            return
+        }
+        _providerMessage.value = "Descargando \"${track.title}\" para añadirla a la cola..."
+        requestRemoteDownload(track, autoPlay = false) { ready ->
+            explicitQueueMode = true
+            player.append(ready)
+        }
+    }
 
     fun removeFromQueue(index: Int) = player.removeQueueItem(index)
 
@@ -511,7 +555,11 @@ class MusicVaultViewModel(
 
     fun nextTrack() {
         val current = _selectedTrack.value ?: return
-        if (activePlaylistId != null && queue.value.size > 1) {
+
+        // The explicit player queue always has priority over album/library
+        // navigation. Once the user has built a queue, Next must stay inside
+        // that queue and must never fall back to the device library.
+        if (explicitQueueMode && queue.value.isNotEmpty()) {
             player.next()
             return
         }
@@ -568,7 +616,8 @@ class MusicVaultViewModel(
 
     fun previousTrack() {
         val current = _selectedTrack.value ?: return
-        if (activePlaylistId != null && queue.value.size > 1) {
+        // Keep Previous inside the explicit queue too.
+        if (explicitQueueMode && queue.value.isNotEmpty()) {
             player.previous()
             return
         }
@@ -670,20 +719,18 @@ class MusicVaultViewModel(
         }
     }
 
+    // User-created "albums" are stored using the playlist tables. This keeps the
+    // existing database compatible while making Albums the only user collection UI.
     fun createAlbum(title: String, tracks: List<Track>) {
-        if (title.isBlank()) return
-        viewModelScope.launch(Dispatchers.IO) {
-            repository.createAlbum("album:custom:${java.util.UUID.randomUUID()}", title.trim(), tracks)
-        }
+        createPlaylist(title, tracks)
     }
-
 
     fun createAlbumFromRemote(title: String, track: CatalogTrack) {
         if (title.isBlank()) return
-        val albumId = "album:custom:${java.util.UUID.randomUUID()}"
         viewModelScope.launch(Dispatchers.IO) {
-            database.albumDao().upsertAll(listOf(AlbumEntity(albumId, title.trim(), track.artistId, track.artistName, 0, track.coverUri)))
-            addRemoteTrackToAlbum(track, albumId)
+            val id = "playlist:custom:${java.util.UUID.randomUUID()}"
+            repository.createPlaylist(id, title.trim(), "Álbum creado por ti")
+            addRemoteTrackToPlaylist(track, id)
         }
     }
 
@@ -738,6 +785,7 @@ class MusicVaultViewModel(
             _selectedTrack.value = null
             _fullPlayer.value = false
             activePlaylistId = null
+            explicitQueueMode = false
         }
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
@@ -760,6 +808,7 @@ class MusicVaultViewModel(
 
     fun clearSelection() {
         activePlaylistId = null
+        explicitQueueMode = false
         _selectedTrack.value = null
         _selectedPlaylist.value = null
         _selectedPlaylistTracks.value = emptyList()
@@ -884,6 +933,14 @@ class MusicVaultViewModel(
 
     fun deleteAlbum(albumId: String) {
         viewModelScope.launch(Dispatchers.IO) { repository.deleteAlbum(albumId) }
+    }
+
+    fun deletePlaylist(playlistId: String) {
+        if (playlistId == favoritesAlbumId) {
+            _providerMessage.value = "El álbum Favoritos no se puede eliminar."
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) { repository.deletePlaylist(playlistId) }
     }
 
     private fun requestDownloadInternal(id: String, name: String, author: String, onSuccess: suspend (ProviderResult) -> Unit) {

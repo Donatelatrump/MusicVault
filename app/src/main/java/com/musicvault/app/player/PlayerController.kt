@@ -212,8 +212,15 @@ class PlayerController(context: Context) {
     fun pause() = withController { controller -> controller.pause(); publishProgress(controller) }
 
     fun next() = withController { controller ->
-        if (controller.hasNextMediaItem()) controller.seekToNextMediaItem()
-        controller.play()
+        if (controller.hasNextMediaItem()) {
+            controller.seekToNextMediaItem()
+            controller.play()
+        } else {
+            // Do not escape the explicit queue when it reaches its last item.
+            // Keep the queue intact and simply pause at the end.
+            controller.pause()
+        }
+        publishQueue(controller)
         publishProgress(controller)
     }
 
