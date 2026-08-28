@@ -7,7 +7,16 @@ import kotlinx.coroutines.flow.Flow
 interface TrackDao {
     @Query("SELECT * FROM tracks ORDER BY title") fun observeAll(): Flow<List<TrackEntity>>
     @Query("SELECT COUNT(*) FROM tracks") suspend fun count(): Int
-    @Query("SELECT * FROM tracks WHERE title LIKE '%' || :query || '%' OR artistName LIKE '%' || :query || '%' OR albumTitle LIKE '%' || :query || '%' ORDER BY title") fun search(query: String): Flow<List<TrackEntity>>
+    @Query(
+        """
+        SELECT * FROM tracks
+        WHERE title LIKE '%' || REPLACE(REPLACE(:query, '%', '\\%'), '_', '\\_') || '%' ESCAPE '\\'
+        OR artistName LIKE '%' || REPLACE(REPLACE(:query, '%', '\\%'), '_', '\\_') || '%' ESCAPE '\\'
+        OR albumTitle LIKE '%' || REPLACE(REPLACE(:query, '%', '\\%'), '_', '\\_') || '%' ESCAPE '\\'
+        ORDER BY title
+        """
+    )
+    fun search(query: String): Flow<List<TrackEntity>>
     @Query("SELECT * FROM tracks WHERE id = :id LIMIT 1") suspend fun get(id: String): TrackEntity?
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertAll(items: List<TrackEntity>)
     @Query("DELETE FROM tracks WHERE id LIKE 'local:%'") suspend fun deleteLocalScannedTracks()
@@ -29,6 +38,8 @@ interface AlbumDao {
 interface AlbumTrackDao {
     @Query("SELECT t.* FROM tracks t INNER JOIN album_tracks at ON at.trackId=t.id WHERE at.albumId=:albumId ORDER BY at.position")
     fun observeTracks(albumId: String): Flow<List<TrackEntity>>
+    @Query("SELECT t.* FROM tracks t INNER JOIN album_tracks at ON at.trackId=t.id WHERE at.albumId=:albumId ORDER BY at.position")
+    suspend fun getTracks(albumId: String): List<TrackEntity>
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertAll(items: List<AlbumTrackEntity>)
     @Query("DELETE FROM album_tracks WHERE albumId=:albumId") suspend fun deleteTracks(albumId: String)
 }

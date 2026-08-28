@@ -1,6 +1,10 @@
 package com.musicvault.app.ui
 
+import kotlin.math.roundToInt
+
+import kotlinx.coroutines.flow.Flow
 import android.Manifest
+import android.content.Context
 import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -54,8 +58,12 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.invisibleToUser
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.Color
@@ -217,36 +225,86 @@ fun MusicVaultApp(vm: MusicVaultViewModel) {
                             )
                         }
                     }
-                    when {
-                        state.selectedRemoteAlbum != null -> RemoteAlbumDetail(
-                            album = state.selectedRemoteAlbum!!,
-                            tracks = state.remoteAlbumTracks,
-                            albumDownloads = albumDownloads,
-                            isPlaying = isPlaying,
-                            selectedTrackId = state.selectedTrack?.id,
-                            loading = state.isLoadingRemoteAlbum,
-                            localTracks = state.tracks,
-                            playlists = state.playlists,
-                            albums = state.albums,
-                            vm = vm
-                        )
-                        state.selectedPlaylist != null -> PlaylistDetail(
-                            playlist = state.selectedPlaylist!!,
-                            tracks = state.selectedPlaylistTracks,
-                            isPlaying = isPlaying,
-                            selectedTrackId = state.selectedTrack?.id,
-                            playlists = state.playlists,
-                            albums = state.albums,
-                            vm = vm
-                        )
-                        else -> when (state.section) {
-                            AppSection.HOME -> HomeScreen(state, albumDownloads, isPlaying, vm)
-                            AppSection.SEARCH -> SearchScreen(state, isPlaying, vm)
-                            AppSection.LIBRARY -> LibraryScreen(state, isPlaying, vm)
-                            AppSection.PLAYLISTS -> PlaylistScreen(state, vm)
+                    // Keep all four main screens mounted. Switching sections only changes
+                    // which already-created tree is visible, so RecyclerViews/adapters are
+                    // not destroyed and recreated on every bottom-bar tap.
+                    Box(Modifier.fillMaxSize()) {
+                        PersistentSection(
+                            active = state.section == AppSection.HOME,
+                            label = "Inicio"
+                        ) {
+                            HomeScreen(state, albumDownloads, isPlaying, vm)
                         }
+                        PersistentSection(
+                            active = state.section == AppSection.SEARCH,
+                            label = "Buscar"
+                        ) {
+                            SearchScreen(state, isPlaying, vm)
+                        }
+                        PersistentSection(
+                            active = state.section == AppSection.LIBRARY,
+                            label = "Biblioteca"
+                        ) {
+                            LibraryScreen(state, isPlaying, vm)
+                        }
+                        PersistentSection(
+                            active = state.section == AppSection.PLAYLISTS,
+                            label = "Álbumes"
+                        ) {
+                            PlaylistScreen(state, vm)
+                        }
+
                     }
                 }
+            }
+
+            // Detail screens are true full-content overlays. They must cover the
+            // section header and the underlying Albums/Favorites list as well;
+            // otherwise the persistent section remains visible around the detail.
+            if (state.selectedLocalAlbum != null || state.selectedRemoteAlbum != null || state.selectedPlaylist != null) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .zIndex(20f)
+                        .background(VaultColors.Background)
+                ) {
+                state.selectedLocalAlbum?.let { album ->
+                    LocalAlbumDetail(
+                        album = album,
+                        tracks = state.selectedLocalAlbumTracks,
+                        isPlaying = isPlaying,
+                        selectedTrackId = state.selectedTrack?.id,
+                        playlists = state.playlists,
+                        albums = state.albums,
+                        vm = vm
+                    )
+                }
+                state.selectedRemoteAlbum?.let { album ->
+                    RemoteAlbumDetail(
+                        album = album,
+                        tracks = state.remoteAlbumTracks,
+                        albumDownloads = albumDownloads,
+                        isPlaying = isPlaying,
+                        selectedTrackId = state.selectedTrack?.id,
+                        loading = state.isLoadingRemoteAlbum,
+                        localTracks = state.tracks,
+                        playlists = state.playlists,
+                        albums = state.albums,
+                        vm = vm
+                    )
+                }
+                state.selectedPlaylist?.let { playlist ->
+                    PlaylistDetail(
+                        playlist = playlist,
+                        tracks = state.selectedPlaylistTracks,
+                        isPlaying = isPlaying,
+                        selectedTrackId = state.selectedTrack?.id,
+                        playlists = state.playlists,
+                        albums = state.albums,
+                        vm = vm
+                    )
+                }
+            }
             }
         }
         AnimatedVisibility(
@@ -280,93 +338,89 @@ fun MusicVaultApp(vm: MusicVaultViewModel) {
 }
 
 @Composable
-private fun HomeScreen(state: MusicUiState, albumDownloads: Set<String>, isPlaying: Boolean, vm: MusicVaultViewModel) {
-    val downloadProgress by vm.downloadProgress.collectAsState()
-    val recommendationTracks = state.recommendedTracks
-    val recommendationAlbums = state.recommendedAlbums
-    LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(20.dp),
-        verticalArrangement = Arrangement.spacedBy(18.dp)
+private fun PersistentSection(
+    active: Boolean,
+    label: String,
+    content: @Composable () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .zIndex(if (active) 1f else 0f)
+            .graphicsLayer {
+                alpha = if (active) 1f else 0f
+            }
+            .semantics {
+                if (!active) invisibleToUser()
+            }
     ) {
-        item(key = "greeting", contentType = "header") {
-            Column {
-                Text(greetingForNow(), color = VaultColors.TextPrimary, fontSize = 30.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.5).sp)
-                Text("Tu música, sin depender de streaming.", color = VaultColors.TextSecondary, fontSize = 14.sp)
-            }
-        }
-        if (recommendationTracks.isNotEmpty()) {
-            item(key = "recommended_tracks", contentType = "recommendation") {
-                SectionTitle("Para ti")
-                Spacer(Modifier.height(10.dp))
-                LazyRow(
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    contentPadding = PaddingValues(end = 8.dp)
-                ) {
-                    items(recommendationTracks, key = { "rec-track:${it.id}" }, contentType = { "track" }) { track ->
-                        RecommendationTrackCard(track, downloadProgress, state.playlists, state.albums, vm, isPlaying && state.selectedTrack?.id == track.id)
-                    }
-                }
-            }
-        }
-        if (recommendationAlbums.isNotEmpty()) {
-            item(key = "recommended_albums", contentType = "recommendation") {
-                SectionTitle("Álbumes para ti")
-                Spacer(Modifier.height(10.dp))
-                LazyRow(
-                    horizontalArrangement = Arrangement.spacedBy(14.dp),
-                    contentPadding = PaddingValues(end = 8.dp)
-                ) {
-                    items(recommendationAlbums, key = { "rec-album:${it.id}" }, contentType = { "album" }) { album ->
-                        AlbumCard(
-                            album = album,
-                            onClick = { vm.openRecommendedAlbum(album) },
-                            onDownloadAll = if (album.id.contains(":release-group:")) { { vm.downloadRecommendedAlbum(album) } } else null,
-                            isDownloading = album.id in albumDownloads
-                        )
-                    }
-                }
-            }
-        }
-        if (state.tracks.isNotEmpty()) {
-            item(key = "songs_title", contentType = "section") { SectionTitle("Tus canciones") }
-            items(state.tracks, key = { it.id }, contentType = { "track" }) { track ->
-                TrackRow(
-                    track,
-                    onClick = { vm.selectTrack(track) },
-                    progress = downloadProgress[track.id],
-                    onCancelDownload = { vm.cancelDownload(track.id) },
-                    isPlaying = isPlaying && state.selectedTrack?.id == track.id,
-                    onPlayToggle = { if (state.selectedTrack?.id == track.id) vm.togglePlayback() else vm.selectTrack(track) },
-                    playlists = state.playlists, albums = state.albums, vm = vm
-                )
-            }
-        }
+        content()
     }
 }
 
 @Composable
-private fun RecommendationTrackCard(
+private fun HomeScreen(state: MusicUiState, albumDownloads: Set<String>, isPlaying: Boolean, vm: MusicVaultViewModel) {
+    val context = LocalContext.current
+    val adapter = remember { HomeFeedAdapter(vm) }
+    AndroidView(
+        modifier = Modifier.fillMaxSize().clipToBounds(),
+        factory = {
+            RecyclerView(context).apply {
+                layoutManager = LinearLayoutManager(context).also { lm ->
+                    lm.isItemPrefetchEnabled = true
+                    lm.initialPrefetchItemCount = 8
+                }
+                setItemViewCacheSize(12)
+                recycledViewPool.setMaxRecycledViews(1, 4)
+                recycledViewPool.setMaxRecycledViews(2, 2)
+                recycledViewPool.setMaxRecycledViews(3, 2)
+                recycledViewPool.setMaxRecycledViews(4, 2)
+                recycledViewPool.setMaxRecycledViews(5, 12)
+                itemAnimator = null
+                setHasFixedSize(false)
+                setPadding(20, 20, 20, 20)
+                clipToPadding = true
+                overScrollMode = RecyclerView.OVER_SCROLL_IF_CONTENT_SCROLLS
+                this.adapter = adapter
+            }
+        },
+        update = {
+            adapter.update(
+                tracks = state.tracks,
+                recommendedTracks = state.recommendedTracks,
+                recommendedAlbums = state.recommendedAlbums,
+                playlists = state.playlists,
+                customAlbums = state.albums.filter { it.id.startsWith("album:custom:") },
+                albumDownloads = albumDownloads,
+                selectedTrackId = state.selectedTrack?.id,
+                isPlaying = isPlaying
+            )
+        }
+    )
+}
+
+@Composable
+internal fun RecommendationTrackCard(
     track: Track,
-    downloadProgress: Map<String, Int>,
-    playlists: List<Playlist>,
-    albums: List<Album>,
-    vm: MusicVaultViewModel,
+    progressFlow: Flow<Int?>,
+    onPlay: () -> Unit,
+    actions: @Composable () -> Unit,
     isPlaying: Boolean
 ) {
-    val downloading = downloadProgress.containsKey(track.id) && !track.isDownloaded
+    val progress by progressFlow.collectAsState(initial = null)
+    val downloading = progress != null && !track.isDownloaded
     Column(Modifier.width(150.dp)) {
         Box(Modifier.size(150.dp)) {
             AsyncImage(
                 model = ImageRequest.Builder(LocalContext.current)
                     .data(track.coverUri)
-                    .size(180)
+                    .size(150)
                     .memoryCacheKey("home-track:${track.coverUri}")
                     .diskCacheKey("home-track:${track.coverUri}")
                     .crossfade(false)
                     .build(),
                 contentDescription = null,
-                modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(12.dp)).clickable { vm.playRecommendation(track) },
+                modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(12.dp)).clickable(onClick = onPlay),
                 contentScale = ContentScale.Crop,
                 imageLoader = CoverImageCache.loader(LocalContext.current)
             )
@@ -379,9 +433,9 @@ private fun RecommendationTrackCard(
             }
             when {
                 downloading -> DownloadDotsSpinner(modifier = Modifier.size(34.dp))
-                track.isDownloaded -> TrackActionsMenu(track, playlists, albums.filter { it.id.startsWith("album:custom:") }, vm, vm.isFavorite(track.id))
+                track.isDownloaded -> actions()
                 else -> {
-                    IconButton(onClick = { vm.playRecommendation(track) }, modifier = Modifier.size(38.dp)) {
+                    IconButton(onClick = onPlay, modifier = Modifier.size(38.dp)) {
                         Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, if (isPlaying) "Pausar" else "Descargar y reproducir", tint = VaultColors.TextPrimary)
                     }
                 }
@@ -415,7 +469,7 @@ private fun DownloadDotsSpinner(modifier: Modifier = Modifier, dotColor: Color =
     }
 }
 
-private fun greetingForNow(): String {
+internal fun greetingForNow(): String {
     val hour = java.time.LocalTime.now().hour
     return when {
         hour < 12 -> "Buenos días"
@@ -515,7 +569,7 @@ private fun SearchScreen(
         Spacer(Modifier.height(16.dp))
 
         AndroidView(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxWidth().weight(1f).clipToBounds(),
             factory = { context ->
                 RecyclerView(context).apply {
                     layoutManager = LinearLayoutManager(context).apply {
@@ -663,7 +717,7 @@ private fun CachedCover(
 @Composable
 private fun RemoteTrackRow(
     track: com.musicvault.app.catalog.CatalogTrack,
-    progress: Int?,
+    progressFlow: Flow<Int?>,
     downloaded: Boolean,
     onClick: () -> Unit,
     onCancelDownload: () -> Unit = {},
@@ -672,7 +726,7 @@ private fun RemoteTrackRow(
     onPlayToggle: () -> Unit = onClick,
     modifier: Modifier = Modifier
 ) {
-    val displayedProgress = progress
+    val displayedProgress by progressFlow.collectAsState(initial = null)
     val progressFraction = ((displayedProgress ?: 0) / 100f).coerceIn(0f, 1f)
     val downloading = displayedProgress != null && !downloaded
     Row(
@@ -728,96 +782,86 @@ private fun RemoteTrackRow(
 
 @Composable
 private fun LibraryScreen(state: MusicUiState, isPlaying: Boolean, vm: MusicVaultViewModel) {
-    val downloadProgress by vm.downloadProgress.collectAsState()
-    val context = androidx.compose.ui.platform.LocalContext.current
+    val context = LocalContext.current
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) vm.scanLocalAudio(context)
     }
+    val adapter = remember { LibraryFeedAdapter(vm) }
 
-    LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(20.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        item {
-            Text("Biblioteca", color = VaultColors.TextPrimary, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.5).sp)
-            Text("Archivos locales y contenido descargado", color = VaultColors.TextSecondary, fontSize = 14.sp)
-        }
-        item {
-            Button(
-                onClick = {
-                    val permission = if (Build.VERSION.SDK_INT >= 33)
-                        Manifest.permission.READ_MEDIA_AUDIO
-                    else
-                        Manifest.permission.READ_EXTERNAL_STORAGE
-                    launcher.launch(permission)
-                },
-                shape = RoundedCornerShape(50),
-                colors = ButtonDefaults.buttonColors(containerColor = VaultColors.Green, contentColor = Color.Black)
-            ) {
-                Icon(Icons.Default.Sync, null)
-                Spacer(Modifier.width(8.dp))
-                Text(if (state.isScanning) "Escaneando..." else "Escanear música del dispositivo", fontWeight = FontWeight.Bold)
+    AndroidView(
+        modifier = Modifier.fillMaxSize().clipToBounds(),
+        factory = {
+            RecyclerView(context).apply {
+                layoutManager = LinearLayoutManager(context).also { lm ->
+                    lm.isItemPrefetchEnabled = true
+                    lm.initialPrefetchItemCount = 10
+                }
+                setItemViewCacheSize(12)
+                recycledViewPool.setMaxRecycledViews(1, 12)
+                itemAnimator = null
+                setHasFixedSize(false)
+                setPadding(20, 20, 20, 20)
+                clipToPadding = true
+                overScrollMode = RecyclerView.OVER_SCROLL_IF_CONTENT_SCROLLS
+                this.adapter = adapter
             }
-        }
-        item {
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                StatCard("Disponibles", state.downloaded.size.toString())
-                StatCard("Álbumes", state.playlists.size.toString())
-            }
-        }
-        items(state.downloaded, key = { it.id }) {
-            TrackRow(
-                track = it,
-                onClick = { vm.selectTrack(it) },
-                progress = downloadProgress[it.id],
-                isPlaying = isPlaying && state.selectedTrack?.id == it.id,
-                onPlayToggle = { if (state.selectedTrack?.id == it.id) vm.togglePlayback() else vm.selectTrack(it) },
-                onCancelDownload = { vm.cancelDownload(it.id) },
+        },
+        update = {
+            adapter.update(
+                tracks = state.downloaded,
                 playlists = state.playlists,
-                albums = state.albums,
-                vm = vm,
-                modifier = Modifier.animateItem()
+                customAlbums = state.albums.filter { a -> a.id.startsWith("album:custom:") },
+                selectedTrackId = state.selectedTrack?.id,
+                isPlaying = isPlaying
             )
         }
-    }
+    )
 }
 
 @Composable
 private fun PlaylistScreen(state: MusicUiState, vm: MusicVaultViewModel) {
     var showAlbumDialog by remember { mutableStateOf(false) }
-    LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(20.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
-        item {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Álbumes", color = VaultColors.TextPrimary, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.5).sp)
-                    Text("Tus colecciones de canciones descargadas", color = VaultColors.TextSecondary, fontSize = 14.sp)
+    val context = LocalContext.current
+    val adapter = remember { AlbumFeedAdapter(vm) }
+
+    AndroidView(
+        modifier = Modifier.fillMaxSize(),
+        factory = {
+            RecyclerView(context).apply {
+                layoutManager = LinearLayoutManager(context).also { lm ->
+                    lm.isItemPrefetchEnabled = true
+                    lm.initialPrefetchItemCount = 8
                 }
-                IconButton(onClick = { showAlbumDialog = true }) {
-                    Icon(Icons.Default.Add, "Nuevo álbum", tint = VaultColors.TextPrimary)
-                }
+                setItemViewCacheSize(10)
+                recycledViewPool.setMaxRecycledViews(AlbumFeedAdapter.TYPE_HEADER, 2)
+                recycledViewPool.setMaxRecycledViews(AlbumFeedAdapter.TYPE_ALBUM, 10)
+                itemAnimator = null
+                setHasFixedSize(false)
+                setPadding(dp(context, 20), dp(context, 20), dp(context, 20), dp(context, 20))
+                clipToPadding = false
+                overScrollMode = RecyclerView.OVER_SCROLL_IF_CONTENT_SCROLLS
+                this.adapter = adapter
             }
+        },
+        update = {
+            adapter.update(state.playlists)
         }
-        if (state.playlists.isEmpty()) {
-            item {
-                Text("Aún no tienes álbumes creados.", color = VaultColors.TextSecondary, modifier = Modifier.padding(vertical = 20.dp))
-            }
-        } else {
-            items(state.playlists, key = { it.id }) { playlist ->
-                PlaylistCard(playlist) { vm.openPlaylist(playlist) }
-            }
-        }
-    }
+    )
+
     if (showAlbumDialog) {
-        CreateCollectionDialog("Nuevo álbum", "Nombre del álbum", state.downloaded, vm::createPlaylist) { showAlbumDialog = false }
+        CreateCollectionDialog("Nuevo álbum", "Nombre del álbum", state.downloaded, vm::createPlaylist) {
+            showAlbumDialog = false
+        }
     }
+
+    // The add button lives in the header holder; keep the dialog callback in sync.
+    adapter.onAddAlbum = { showAlbumDialog = true }
 }
+
+private fun dp(context: Context, value: Int): Int =
+    (value * context.resources.displayMetrics.density).roundToInt()
 
 @Composable
 private fun CreateCollectionDialog(
@@ -858,47 +902,46 @@ private fun CreateCollectionDialog(
 }
 
 @Composable
-private fun LocalAlbumDetail(album: Album, tracks: List<Track>, isPlaying: Boolean, selectedTrackId: String?, playlists: List<Playlist>, albums: List<Album>, vm: MusicVaultViewModel) {
-    val downloadProgress by vm.downloadProgress.collectAsState()
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        item {
-            IconButton(onClick = vm::closeLocalAlbum) { Icon(Icons.Default.ArrowBack, "Atrás", tint = VaultColors.TextPrimary) }
-            val (top, bottom) = remember(album.id) { gradientFor(album.id) }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    Modifier
-                        .size(150.dp)
-                        .shadow(12.dp, RoundedCornerShape(12.dp), ambientColor = top.copy(alpha = 0.5f))
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(Brush.linearGradient(listOf(top, bottom))),
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (album.coverUri != null) AsyncImage(album.coverUri, album.title, Modifier.fillMaxSize()) else Icon(Icons.Default.Album, null, tint = VaultColors.TextPrimary.copy(alpha = 0.85f), modifier = Modifier.size(56.dp))
+private fun LocalAlbumDetail(
+    album: Album,
+    tracks: List<Track>,
+    isPlaying: Boolean,
+    selectedTrackId: String?,
+    playlists: List<Playlist>,
+    albums: List<Album>,
+    vm: MusicVaultViewModel
+) {
+    val context = LocalContext.current
+    val albumAdapter = remember(vm) { LocalAlbumDetailAdapter(vm) }
+
+    AndroidView(
+        modifier = Modifier.fillMaxSize(),
+        factory = { ctx ->
+            RecyclerView(ctx).apply {
+                layoutManager = LinearLayoutManager(ctx).also {
+                    it.isItemPrefetchEnabled = true
+                    it.initialPrefetchItemCount = 6
                 }
-                Spacer(Modifier.width(16.dp))
-                Column {
-                    Text(album.title, color = VaultColors.TextPrimary, fontSize = 24.sp, fontWeight = FontWeight.ExtraBold)
-                    Text(album.artistName, color = VaultColors.TextSecondary)
-                    if (album.year > 0) Text(album.year.toString(), color = VaultColors.TextTertiary)
-                }
+                setHasFixedSize(false)
+                setItemViewCacheSize(10)
+                recycledViewPool.setMaxRecycledViews(LocalAlbumDetailAdapter.TYPE_TRACK, 12)
+                itemAnimator = null
+                adapter = albumAdapter
             }
-            Spacer(Modifier.height(18.dp))
-        }
-        items(tracks, key = { it.id }) { track ->
-            TrackRow(
-                track = track,
-                onClick = { vm.selectTrack(track) },
-                progress = downloadProgress[track.id],
-                isPlaying = isPlaying && selectedTrackId == track.id,
-                onPlayToggle = { if (selectedTrackId == track.id) vm.togglePlayback() else vm.selectTrack(track) },
-                onCancelDownload = { vm.cancelDownload(track.id) },
+        },
+        update = { rv ->
+            albumAdapter.update(
+                album = album,
+                tracks = tracks,
                 playlists = playlists,
-                albums = albums,
-                vm = vm,
-                modifier = Modifier.animateItem()
+                albums = albums.filter { it.id.startsWith("album:custom:") },
+                selectedTrackId = selectedTrackId,
+                isPlaying = isPlaying,
+                onBack = vm::closeLocalAlbum
             )
+            if (rv.adapter !== albumAdapter) rv.adapter = albumAdapter
         }
-    }
+    )
 }
 
 @Composable
@@ -914,7 +957,6 @@ private fun RemoteAlbumDetail(
     albums: List<Album>,
     vm: MusicVaultViewModel
 ) {
-    val downloadProgress by vm.downloadProgress.collectAsState()
     val downloadedIds = remember(localTracks) {
         localTracks.filter { it.isDownloaded }.mapTo(HashSet()) { it.id }
     }
@@ -996,7 +1038,7 @@ private fun RemoteAlbumDetail(
             val downloaded = localId in downloadedIds
             RemoteTrackRow(
                 track = track,
-                progress = downloadProgress[localId],
+                progressFlow = remember(localId) { vm.downloadProgressFor(localId) },
                 downloaded = downloaded,
                 onClick = { vm.playRemote(track) },
                 onCancelDownload = { vm.cancelDownload(localId) },
@@ -1033,7 +1075,6 @@ private fun PlaylistDetail(
     albums: List<Album>,
     vm: MusicVaultViewModel
 ) {
-    val downloadProgress by vm.downloadProgress.collectAsState()
     LazyColumn(
         Modifier.fillMaxSize(),
         contentPadding = PaddingValues(20.dp)
@@ -1070,16 +1111,14 @@ private fun PlaylistDetail(
             items = tracks,
             key = { it.id }
         ) { track ->
-            TrackRow(
+            TrackRowWithProgress(
                 track = track,
+                progressFlow = remember(track.id) { vm.downloadProgressFor(track.id) },
                 onClick = { vm.selectTrack(track) },
-                progress = downloadProgress[track.id],
                 isPlaying = isPlaying && selectedTrackId == track.id,
                 onPlayToggle = { if (selectedTrackId == track.id) vm.togglePlayback() else vm.selectTrack(track) },
                 onCancelDownload = { vm.cancelDownload(track.id) },
-                playlists = playlists,
-                albums = albums,
-                vm = vm,
+                actions = { TrackActionsMenu(track, playlists, albums.filter { it.id.startsWith("album:custom:") }, vm, vm.isFavorite(track.id)) },
                 modifier = Modifier.animateItem()
             )
         }
@@ -1460,7 +1499,7 @@ private fun QueueBottomSheet(queue: List<Track>, currentIndex: Int, vm: MusicVau
                 Text("La cola está vacía.", color = VaultColors.TextSecondary, modifier = Modifier.padding(vertical = 24.dp))
             } else {
                 LazyColumn(Modifier.fillMaxWidth().heightIn(max = 520.dp)) {
-                    itemsIndexed(queue, key = { index, track -> "${index}_${track.id}" }) { index, track ->
+                    itemsIndexed(queue, key = { _, track -> track.id }) { index, track ->
                         Row(
                             Modifier.fillMaxWidth().animateItem().padding(vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically
@@ -1532,12 +1571,12 @@ private fun BottomBar(section: AppSection, onSelect: (AppSection) -> Unit) {
 }
 
 @Composable
-private fun SectionTitle(text: String) {
+internal fun SectionTitle(text: String) {
     Text(text, color = VaultColors.TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.3).sp)
 }
 
 @Composable
-private fun AlbumCard(
+internal fun AlbumCard(
     album: Album,
     onClick: () -> Unit = {},
     onDownloadAll: (() -> Unit)? = null,
@@ -1556,7 +1595,7 @@ private fun AlbumCard(
         ) {
             if (album.coverUri != null) {
                 AsyncImage(
-                    model = ImageRequest.Builder(LocalContext.current).data(album.coverUri).size(180).memoryCacheKey("home-album:${album.coverUri}").diskCacheKey("home-album:${album.coverUri}").crossfade(false).build(),
+                    model = ImageRequest.Builder(LocalContext.current).data(album.coverUri).size(150).memoryCacheKey("home-album:${album.coverUri}").diskCacheKey("home-album:${album.coverUri}").crossfade(false).build(),
                     contentDescription = album.title,
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Crop
@@ -1613,16 +1652,38 @@ private fun PlaylistCard(playlist: Playlist, onClick: () -> Unit) {
 }
 
 @Composable
-private fun TrackRow(
+internal fun TrackRowWithProgress(
+    track: Track,
+    progressFlow: Flow<Int?>,
+    onClick: () -> Unit,
+    isPlaying: Boolean = false,
+    onPlayToggle: () -> Unit = onClick,
+    onCancelDownload: () -> Unit = {},
+    actions: @Composable () -> Unit = {},
+    modifier: Modifier = Modifier
+) {
+    val progress by progressFlow.collectAsState(initial = null)
+    TrackRow(
+        track = track,
+        onClick = onClick,
+        progress = progress,
+        isPlaying = isPlaying,
+        onPlayToggle = onPlayToggle,
+        onCancelDownload = onCancelDownload,
+        actions = actions,
+        modifier = modifier
+    )
+}
+
+@Composable
+internal fun TrackRow(
     track: Track,
     onClick: () -> Unit,
     progress: Int? = null,
     isPlaying: Boolean = false,
     onPlayToggle: () -> Unit = onClick,
     onCancelDownload: () -> Unit = {},
-    playlists: List<Playlist> = emptyList(),
-    albums: List<Album> = emptyList(),
-    vm: MusicVaultViewModel? = null,
+    actions: @Composable () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val displayedProgress = progress
@@ -1667,7 +1728,7 @@ private fun TrackRow(
                 }
             }
             track.isDownloaded -> {
-                if (vm != null) TrackActionsMenu(track, playlists, albums.filter { it.id.startsWith("album:custom:") }, vm, vm.isFavorite(track.id))
+                actions()
             }
             else -> {
                 IconButton(onClick = onPlayToggle) {
@@ -1683,7 +1744,7 @@ private fun TrackRow(
 }
 
 @Composable
-private fun TrackActionsMenu(
+internal fun TrackActionsMenu(
     track: Track,
     playlists: List<Playlist>,
     albums: List<Album>,

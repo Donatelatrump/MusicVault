@@ -1,18 +1,27 @@
 package com.musicvault.app.data
 
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.emptyFlow
 
 class MusicRepository(private val db: MusicDatabase) {
     fun tracks(): Flow<List<Track>> =
-        db.trackDao().observeAll().map { list -> list.map(::toTrack) }
+        db.trackDao().observeAll().map { list -> list.map(::toTrack) }.flowOn(Dispatchers.IO)
 
-    fun search(query: String): Flow<List<Track>> =
-        db.trackDao().search(query).map { list -> list.map(::toTrack) }
+    fun search(query: String): Flow<List<Track>> {
+        val ftsQuery = query.trim().split(Regex("\\s+"))
+            .filter { it.isNotBlank() }
+            .joinToString(" AND ") { token ->
+                "\"${token.replace("\"", "\"\"")}\"*"
+            }
+        return if (ftsQuery.isBlank()) emptyFlow()
+        else db.trackDao().search(ftsQuery).map { list -> list.map(::toTrack) }.flowOn(Dispatchers.IO)
+    }
 
     fun downloaded(): Flow<List<Track>> =
-        db.trackDao().observeDownloaded().map { list -> list.map(::toTrack) }
+        db.trackDao().observeDownloaded().map { list -> list.map(::toTrack) }.flowOn(Dispatchers.IO)
 
     fun albums(): Flow<List<Album>> =
         db.albumDao().observeAll().map { list ->
@@ -22,10 +31,10 @@ class MusicRepository(private val db: MusicDatabase) {
         }
 
     fun customAlbumTracks(id: String): Flow<List<Track>> =
-        db.albumTrackDao().observeTracks(id).map { list -> list.map(::toTrack) }
+        db.albumTrackDao().observeTracks(id).map { list -> list.map(::toTrack) }.flowOn(Dispatchers.IO)
 
     suspend fun getAlbumTracks(id: String): List<Track> =
-        db.albumTrackDao().observeTracks(id).first().map(::toTrack)
+        db.albumTrackDao().getTracks(id).map(::toTrack)
 
     fun playlists(): Flow<List<Playlist>> =
         db.playlistDao().observeAll().map { list ->
@@ -33,7 +42,7 @@ class MusicRepository(private val db: MusicDatabase) {
         }
 
     fun playlistTracks(id: String): Flow<List<Track>> =
-        db.playlistDao().observeTracks(id).map { list -> list.map(::toTrack) }
+        db.playlistDao().observeTracks(id).map { list -> list.map(::toTrack) }.flowOn(Dispatchers.IO)
 
     suspend fun getPlaylistTracks(id: String): List<Track> =
         db.playlistDao().getTracks(id).map(::toTrack)
@@ -49,9 +58,8 @@ class MusicRepository(private val db: MusicDatabase) {
 
     suspend fun addTracksToPlaylist(id: String, tracks: List<Track>) {
         if (tracks.isEmpty()) return
-        val existing = db.playlistDao().observeTracks(id)
         // Preserve the existing ordering by appending after the current count.
-        val current = existing.first()
+        val current = db.playlistDao().getTracks(id)
         val start = current.size
         db.playlistDao().upsertTracks(tracks.mapIndexed { index, track -> PlaylistTrackEntity(id, track.id, start + index) })
     }
@@ -63,7 +71,7 @@ class MusicRepository(private val db: MusicDatabase) {
     }
 
     suspend fun addTrackToAlbum(id: String, track: Track) {
-        val current = db.albumTrackDao().observeTracks(id).first()
+        val current = db.albumTrackDao().getTracks(id)
         db.albumTrackDao().upsertAll(listOf(AlbumTrackEntity(id, track.id, current.size)))
     }
 

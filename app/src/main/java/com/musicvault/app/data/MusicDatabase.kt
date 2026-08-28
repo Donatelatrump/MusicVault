@@ -19,7 +19,7 @@ import androidx.room.RoomDatabase
         DownloadRecordEntity::class,
         CatalogSearchCacheEntity::class
     ],
-    version = 5,
+    version = 9,
     exportSchema = false
 )
 abstract class MusicDatabase : RoomDatabase() {
@@ -57,6 +57,31 @@ abstract class MusicDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_catalog_search_cache_savedAt ON catalog_search_cache(savedAt)")
             }
         }
+        val MIGRATION_5_6 = object : androidx.room.migration.Migration(5, 6) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_play_history_trackId ON play_history(trackId)")
+            }
+        }
+        val MIGRATION_6_7 = object : androidx.room.migration.Migration(6, 7) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_tracks_isDownloaded ON tracks(isDownloaded)")
+            }
+        }
+        // 7 -> 8 is kept as a no-op for databases created by V15.
+        // The previous V16 build introduced an external-content FTS table that can
+        // crash Room at startup on databases whose tracks table uses a String PK.
+        val MIGRATION_7_8 = object : androidx.room.migration.Migration(7, 8) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                // Intentionally empty.
+            }
+        }
+
+        // Remove the experimental FTS table from databases created by the broken V16.
+        val MIGRATION_8_9 = object : androidx.room.migration.Migration(8, 9) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("DROP TABLE IF EXISTS tracks_fts")
+            }
+        }
         @Volatile private var INSTANCE: MusicDatabase? = null
 
         fun get(context: Context): MusicDatabase =
@@ -65,7 +90,7 @@ abstract class MusicDatabase : RoomDatabase() {
                     context.applicationContext,
                     MusicDatabase::class.java,
                     "musicvault.db"
-                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5).build().also { INSTANCE = it }
+                ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9).build().also { INSTANCE = it }
             }
     }
 }

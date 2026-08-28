@@ -1,5 +1,8 @@
 package com.musicvault.app.catalog
 
+import androidx.compose.runtime.Immutable
+
+@Immutable
 data class CatalogTrack(
     val id: String,
     val title: String,
@@ -12,6 +15,7 @@ data class CatalogTrack(
     val provider: String = "musicbrainz"
 )
 
+@Immutable
 data class CatalogArtist(
     val id: String,
     val name: String,
@@ -19,6 +23,7 @@ data class CatalogArtist(
     val disambiguation: String? = null
 )
 
+@Immutable
 data class CatalogAlbum(
     val id: String,
     val title: String,

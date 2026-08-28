@@ -1,6 +1,7 @@
 package com.musicvault.app.data
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 
 @Entity(tableName = "artists")
@@ -16,7 +17,7 @@ data class AlbumEntity(
     val coverUri: String? = null
 )
 
-@Entity(tableName = "tracks")
+@Entity(tableName = "tracks", indices = [Index(value = ["isDownloaded"])])
 data class TrackEntity(
     @PrimaryKey val id: String,
     val title: String,
@@ -42,7 +43,12 @@ data class PlaylistTrackEntity(val playlistId: String, val trackId: String, val 
 @Entity(tableName = "album_tracks", primaryKeys = ["albumId", "trackId"])
 data class AlbumTrackEntity(val albumId: String, val trackId: String, val position: Int)
 
-@Entity(tableName = "play_history")
+@Entity(
+    tableName = "play_history",
+    indices = [
+        Index(value = ["trackId"])
+    ]
+)
 data class PlayHistoryEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val trackId: String,

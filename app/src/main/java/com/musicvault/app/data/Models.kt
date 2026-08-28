@@ -1,10 +1,14 @@
 package com.musicvault.app.data
 
+import androidx.compose.runtime.Immutable
+
+@Immutable
 data class Artist(
     val id: String,
     val name: String
 )
 
+@Immutable
 data class Album(
     val id: String,
     val title: String,
@@ -14,6 +18,7 @@ data class Album(
     val coverUri: String? = null
 )
 
+@Immutable
 data class Track(
     val id: String,
     val title: String,
@@ -26,6 +31,7 @@ data class Track(
     val coverUri: String? = null
 )
 
+@Immutable
 data class Playlist(
     val id: String,
     val title: String,

@@ -8,11 +8,15 @@ import com.yausername.youtubedl_android.YoutubeDLRequest
 import com.yausername.youtubedl_android.YoutubeDL.UpdateChannel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import java.io.File
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Single integration point for the future/actual download provider.
@@ -32,13 +36,24 @@ object Providers {
     private var initialized = false
 
     private val activeProcesses = ConcurrentHashMap<String, String>()
-    // Two concurrent yt-dlp/FFmpeg jobs keep the queue responsive without
-    // saturating CPU/RAM on typical Android devices.
-    private val downloadSlots = Semaphore(2)
+    // Three concurrent yt-dlp/FFmpeg jobs improve album download throughput
+    // while keeping CPU/RAM usage reasonable on typical Android devices.
+    private val downloadSlots = Semaphore(3)
     private val updateLock = Any()
+    private val updateStarted = AtomicBoolean(false)
+    private val providerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     fun init(context: Context) {
-        appContext = context.applicationContext
+        val app = context.applicationContext
+        appContext = app
+        // Initialization and yt-dlp maintenance stay off the UI thread.
+        // Both are also kept outside the critical path of individual downloads.
+        if (updateStarted.compareAndSet(false, true)) {
+            providerScope.launch {
+                runCatching { ensureInitialized(app) }
+                runCatching { synchronized(updateLock) { updateYtDlpIfNeeded(app) } }
+            }
+        }
     }
 
     fun isInitialized(): Boolean = appContext != null
@@ -91,10 +106,7 @@ object Providers {
 
             try {
                 ensureInitialized(context)
-                // Only one update check can run at a time. Other downloads use
-                // the already bundled/current binary instead of waiting on a
-                // network check of their own.
-                val ytDlpVersion = synchronized(updateLock) { updateYtDlpIfNeeded(context) }
+                val ytDlpVersion = runCatching { YoutubeDL.getInstance().versionName(context) }.getOrNull()
 
                 val rootDir = File(
                     context.getExternalFilesDir("Music") ?: context.filesDir,
@@ -120,7 +132,7 @@ object Providers {
                 // audio containers directly.
                 request.addOption("-f", "bestaudio/best")
                 request.addOption("--no-mtime")
-                request.addOption("-N", "4")
+                request.addOption("-N", "8")
                 request.addOption("-o", outputTemplate)
 
                 val processId = "musicvault-$requestKey"
@@ -160,14 +172,18 @@ object Providers {
                 val safeTitle = sanitizeFileName(name).ifBlank { "MusicVault Track" }
                 val finalFile = uniqueFile(rootDir, safeTitle, extension)
 
-                if (!downloadedFile.renameTo(finalFile)) {
-                    downloadedFile.copyTo(finalFile, overwrite = false)
-                    if (!downloadedFile.delete()) {
-                        stagingDir.deleteRecursively()
-                        return@withContext ProviderResult.Error(
-                            "El audio se descargó, pero no se pudo finalizar el archivo \"${finalFile.name}\""
-                        )
+                try {
+                    if (!downloadedFile.renameTo(finalFile)) {
+                        downloadedFile.copyTo(finalFile, overwrite = false)
+                        if (!downloadedFile.delete()) {
+                            stagingDir.deleteRecursively()
+                            return@withContext ProviderResult.Error(
+                                "El audio se descargó, pero no se pudo finalizar el archivo \"${finalFile.name}\""
+                            )
+                        }
                     }
+                } finally {
+                    releaseFileReservation(finalFile)
                 }
                 stagingDir.deleteRecursively()
 
@@ -203,14 +219,22 @@ object Providers {
         .trimEnd('.', ' ')
         .take(120)
 
-    private fun uniqueFile(directory: File, title: String, extension: String): File {
+    private val fileReservationLock = Any()
+    private val reservedFiles = mutableSetOf<String>()
+
+    private fun uniqueFile(directory: File, title: String, extension: String): File = synchronized(fileReservationLock) {
         var candidate = File(directory, "$title.$extension")
         var index = 2
-        while (candidate.exists()) {
+        while (candidate.exists() || candidate.absolutePath in reservedFiles) {
             candidate = File(directory, "$title ($index).$extension")
             index++
         }
-        return candidate
+        reservedFiles.add(candidate.absolutePath)
+        candidate
+    }
+
+    private fun releaseFileReservation(file: File) {
+        synchronized(fileReservationLock) { reservedFiles.remove(file.absolutePath) }
     }
 
     private val AUDIO_EXTENSIONS = setOf(

@@ -1,5 +1,7 @@
 package com.musicvault.app.ui
 
+import androidx.compose.runtime.Immutable
+
 import android.content.Context
 import android.content.SharedPreferences
 import androidx.lifecycle.ViewModel
@@ -17,6 +19,8 @@ import com.musicvault.app.player.PlayerController
 import com.musicvault.app.providers.ProviderResult
 import com.musicvault.app.providers.Providers
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
@@ -24,9 +28,11 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.first
+import kotlin.coroutines.resume
 
 enum class AppSection(val label: String) { HOME("Inicio"), SEARCH("Buscar"), LIBRARY("Biblioteca"), PLAYLISTS("Álbumes") }
 
+@Immutable
 data class MusicUiState(
     val section: AppSection = AppSection.HOME,
     val search: String = "",
@@ -255,7 +261,9 @@ class MusicVaultViewModel(
 
         // Every keystroke cancels and restarts the full debounce window.
         // This is intentionally 1.5s: typing must never be interrupted by an
-        // intermediate network request.
+        // intermediate network request. Keep this explicit so UI changes cannot
+        // accidentally shorten the search debounce.
+        val searchDebounceMs = 1_500L
         searchJob?.cancel()
         closeRemoteAlbum()
         _remoteTracks.value = emptyList()
@@ -265,7 +273,7 @@ class MusicVaultViewModel(
         if (value.isBlank()) return
 
         searchJob = viewModelScope.launch {
-            delay(1_500L)
+            delay(searchDebounceMs)
 
             // A newer keystroke may have arrived while this coroutine was waiting.
             if (generation != searchGeneration) return@launch
@@ -313,22 +321,21 @@ class MusicVaultViewModel(
     fun selectTrack(track: Track) {
         activePlaylistId = null
         explicitQueueMode = false
-        _selectedTrack.value = track
         if (track.audioUri != null && track.isDownloaded) {
+            _selectedTrack.value = track
             player.play(track)
             viewModelScope.launch {
                 repository.recordPlay(track, 0f)
                 enqueueSmartNext(track)
             }
         } else {
-            _providerMessage.value = "Preparando \"${track.title}\"..."
+            // A remote/non-downloaded track is a download action, not a playback action.
+            // Do not select it in the player and do not autoplay when the download finishes.
+            _providerMessage.value = "Descargando \"${track.title}\"..."
             requestDownloadInternal(track.id, track.title, track.artistName) { result ->
                 if (result is ProviderResult.Success) {
                     val updated = track.copy(audioUri = result.audioUri, isDownloaded = true)
                     database.trackDao().upsertAll(listOf(TrackEntity(updated.id, updated.title, updated.artistName, updated.albumId, updated.albumTitle, updated.durationMs, updated.audioUri, true, updated.coverUri)))
-                    player.play(updated)
-                    repository.recordPlay(updated, 0f)
-                    enqueueSmartNext(updated)
                 }
             }
         }
@@ -341,9 +348,10 @@ class MusicVaultViewModel(
             selectTrack(local)
             return
         }
-        _selectedTrack.value = Track(localId, track.title, track.artistName, track.albumId?.let { "${track.provider}:release:$it" } ?: "unknown", track.albumTitle ?: "Álbum desconocido", track.durationMs, null, false, track.coverUri)
-        _providerMessage.value = "Descargando \"${track.title}\" para reproducir..."
-        requestRemoteDownload(track, autoPlay = true)
+        // A remote track that is not downloaded must never enter the player automatically.
+        // The first click downloads it; a later click on the now-downloaded track plays it.
+        _providerMessage.value = "Descargando \"${track.title}\"..."
+        requestRemoteDownload(track, autoPlay = false)
     }
 
     fun playRecommendation(track: Track) {
@@ -385,10 +393,9 @@ class MusicVaultViewModel(
                     return@launch
                 }
                 _providerMessage.value = "Descargando álbum \"${album.title}\" (${albumTracks.size} canciones)..."
-                albumTracks.forEach { track -> requestRemoteDownload(track, autoPlay = false) }
-                while (albumTracks.any { _downloadProgress.value.containsKey("${it.provider}:recording:${it.id}") }) {
-                    delay(120)
-                }
+                albumTracks.map { track ->
+                    async { awaitRemoteDownload(track) }
+                }.let { jobs -> jobs.awaitAll() }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -410,10 +417,9 @@ class MusicVaultViewModel(
                     return@launch
                 }
                 _providerMessage.value = "Descargando álbum \"${album.title}\" (${albumTracks.size} canciones)..."
-                albumTracks.forEach { track -> requestRemoteDownload(track, autoPlay = false) }
-                while (albumTracks.any { _downloadProgress.value.containsKey("${it.provider}:recording:${it.id}") }) {
-                    delay(120)
-                }
+                albumTracks.map { track ->
+                    async { awaitRemoteDownload(track) }
+                }.let { jobs -> jobs.awaitAll() }
             } finally {
                 withContext(Dispatchers.Main.immediate) { _albumDownloads.value = _albumDownloads.value - albumKey }
             }
@@ -627,6 +633,10 @@ class MusicVaultViewModel(
     }
 
     private suspend fun enqueueSmartNext(current: Track) {
+        // Smart-next is only allowed for an actively selected track.
+        // A manual download must never start downloading neighboring album tracks.
+        if (_selectedTrack.value?.id != current.id) return
+
         val localAlbumTracks = when {
             _selectedLocalAlbum.value != null -> _selectedLocalAlbumTracks.value
             current.albumId.startsWith("album:custom:") -> repository.getAlbumTracks(current.albumId)
@@ -695,6 +705,10 @@ class MusicVaultViewModel(
     }
 
     fun openLocalAlbum(album: Album) {
+        // Album detail, playlist detail and remote album detail are mutually exclusive
+        // overlays. Close any previous detail before opening this one.
+        closePlaylist()
+        closeRemoteAlbum()
         _selectedLocalAlbum.value = album
         albumJob?.cancel()
         albumJob = viewModelScope.launch {
@@ -735,6 +749,9 @@ class MusicVaultViewModel(
     }
 
     fun openRemoteAlbum(album: CatalogAlbum) {
+        // Only one detail overlay may be visible at a time.
+        closeLocalAlbum()
+        closePlaylist()
         _selectedRemoteAlbum.value = album
         _remoteAlbumTracks.value = emptyList()
         _loadingRemoteAlbum.value = true
@@ -771,6 +788,10 @@ class MusicVaultViewModel(
     }
 
     fun openPlaylist(playlist: Playlist) {
+        // Prevent an album detail overlay from remaining underneath the playlist
+        // detail (especially noticeable when opening Favoritos from Álbumes).
+        closeLocalAlbum()
+        closeRemoteAlbum()
         _selectedPlaylist.value = playlist
         playlistJob?.cancel()
         playlistJob = viewModelScope.launch {
@@ -846,12 +867,20 @@ class MusicVaultViewModel(
 
     fun requestRemoteDownload(track: CatalogTrack) = requestRemoteDownload(track, autoPlay = false)
 
+    private suspend fun awaitRemoteDownload(track: CatalogTrack): Track? =
+        kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
+            requestRemoteDownload(track, autoPlay = false) { ready ->
+                if (continuation.isActive) continuation.resume(ready)
+            }
+        }
+
     private fun requestRemoteDownload(
         track: CatalogTrack,
         autoPlay: Boolean,
         onReady: (suspend (Track) -> Unit)? = null
     ) {
         val id = "${track.provider}:recording:${track.id}"
+        track.coverUri?.let { CoverImageCache.prefetch(appContext, listOf(it)) }
         val existing = state.value.tracks.firstOrNull { it.id == id && it.isDownloaded }
         if (existing != null) {
             viewModelScope.launch { onReady?.invoke(existing); if (autoPlay) selectTrack(existing) }
@@ -896,11 +925,8 @@ class MusicVaultViewModel(
         val localId = "${track.provider}:recording:${track.id}"
         val local = state.value.tracks.firstOrNull { it.id == localId && it.isDownloaded }
         if (local != null) addTrackToPlaylist(local, playlistId)
-        else requestRemoteDownload(track, autoPlay = false).also {
-            viewModelScope.launch {
-                while (_downloadProgress.value.containsKey(localId)) delay(200)
-                database.trackDao().get(localId)?.let { entity -> repository.addTrackToPlaylist(playlistId, Track(entity.id, entity.title, entity.artistName, entity.albumId, entity.albumTitle, entity.durationMs, entity.audioUri, entity.isDownloaded, entity.coverUri)) }
-            }
+        else viewModelScope.launch(Dispatchers.IO) {
+            awaitRemoteDownload(track)?.let { repository.addTrackToPlaylist(playlistId, it) }
         }
     }
 
@@ -923,11 +949,8 @@ class MusicVaultViewModel(
         val localId = "${track.provider}:recording:${track.id}"
         val local = state.value.tracks.firstOrNull { it.id == localId && it.isDownloaded }
         if (local != null) addTrackToAlbum(local, albumId)
-        else requestRemoteDownload(track, autoPlay = false).also {
-            viewModelScope.launch {
-                while (_downloadProgress.value.containsKey(localId)) delay(200)
-                database.trackDao().get(localId)?.let { entity -> addTrackToAlbum(Track(entity.id, entity.title, entity.artistName, entity.albumId, entity.albumTitle, entity.durationMs, entity.audioUri, entity.isDownloaded, entity.coverUri), albumId) }
-            }
+        else viewModelScope.launch(Dispatchers.IO) {
+            awaitRemoteDownload(track)?.let { addTrackToAlbum(it, albumId) }
         }
     }
 

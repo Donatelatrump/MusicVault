@@ -17,7 +17,9 @@ class CatalogRepository(
         private const val CACHE_TTL_MS = 30L * 60L * 1000L
     }
 
-    private val albumTrackCache = mutableMapOf<String, List<CatalogTrack>>()
+    private val albumTrackCache = object : LinkedHashMap<String, List<CatalogTrack>>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<CatalogTrack>>?): Boolean = size > 64
+    }
 
     /** Cached search metadata used by Home recommendations without another network request. */
     fun cachedTracks(): Flow<List<CatalogTrack>> =

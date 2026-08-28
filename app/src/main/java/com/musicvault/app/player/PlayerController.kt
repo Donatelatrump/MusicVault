@@ -100,7 +100,7 @@ class PlayerController(context: Context) {
             while (isActive && !released) {
                 publishProgress(controller)
                 maybeCrossfade(controller)
-                delay(16L)
+                delay(if (controller.isPlaying) 250L else 1000L)
             }
         }
     }
