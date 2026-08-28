@@ -56,9 +56,7 @@ class PlayerController(context: Context) {
     private val _audioSessionId = MutableStateFlow(0)
     val audioSessionId: StateFlow<Int> = _audioSessionId
     private var ticker: Job? = null
-    private var fadeJob: Job? = null
     private var released = false
-    private var lastCrossfadeTrackId: String? = null
 
     init {
         Futures.addCallback(controllerFuture, object : FutureCallback<MediaController> {
@@ -67,8 +65,6 @@ class PlayerController(context: Context) {
                 controller.addListener(object : androidx.media3.common.Player.Listener {
                     override fun onIsPlayingChanged(isPlaying: Boolean) { _isPlaying.value = isPlaying; publishProgress(controller) }
                     override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                        lastCrossfadeTrackId = null
-                        controller.setVolume(1f)
                         publishQueue(controller)
                         publishProgress(controller)
                     }
@@ -99,45 +95,8 @@ class PlayerController(context: Context) {
         ticker = scope.launch {
             while (isActive && !released) {
                 publishProgress(controller)
-                maybeCrossfade(controller)
                 delay(if (controller.isPlaying) 250L else 1000L)
             }
-        }
-    }
-
-    private fun maybeCrossfade(controller: MediaController) {
-        if (!controller.isPlaying || controller.duration <= 0L || _crossfadeSeconds.value <= 0) return
-        if (!controller.hasNextMediaItem()) return
-        val remaining = controller.duration - controller.currentPosition
-        val window = _crossfadeSeconds.value * 1000L
-        val currentId = controller.currentMediaItem?.mediaId ?: return
-        if (remaining <= window && currentId != lastCrossfadeTrackId) {
-            lastCrossfadeTrackId = currentId
-            fadeToNext(controller, max(250L, remaining))
-        }
-    }
-
-    private fun fadeToNext(controller: MediaController, durationMs: Long) {
-        fadeJob?.cancel()
-        fadeJob = scope.launch {
-            val steps = 12
-            val stepDelay = (durationMs / steps).coerceAtLeast(16L)
-            for (i in steps downTo 1) {
-                controller.setVolume(i / steps.toFloat())
-                delay(stepDelay)
-            }
-            if (!released && controller.hasNextMediaItem()) {
-                controller.seekToNextMediaItem()
-                controller.setVolume(0f)
-                controller.play()
-                for (i in 1..steps) {
-                    controller.setVolume(i / steps.toFloat())
-                    delay(70L)
-                }
-            }
-            controller.setVolume(1f)
-            publishQueue(controller)
-            publishProgress(controller)
         }
     }
 
@@ -176,7 +135,6 @@ class PlayerController(context: Context) {
     fun play(track: Track) {
         val item = mediaItem(track) ?: return
         withController { controller ->
-            fadeJob?.cancel()
             controller.setVolume(1f)
             controller.setMediaItem(item)
             controller.prepare()
@@ -192,7 +150,6 @@ class PlayerController(context: Context) {
         if (items.isEmpty()) return
         val safeIndex = startIndex.coerceIn(0, items.lastIndex)
         withController { controller ->
-            fadeJob?.cancel()
             controller.setVolume(1f)
             controller.setMediaItems(items, safeIndex, 0L)
             controller.shuffleModeEnabled = shuffle
@@ -246,7 +203,6 @@ class PlayerController(context: Context) {
     }
 
     fun clearQueue() = withController { controller ->
-        fadeJob?.cancel()
         controller.clearMediaItems()
         controller.pause()
         _queue.value = emptyList()
@@ -294,7 +250,6 @@ class PlayerController(context: Context) {
         if (released) return
         released = true
         ticker?.cancel()
-        fadeJob?.cancel()
         ticker = null
         MediaController.releaseFuture(controllerFuture)
         scope.coroutineContext[Job]?.cancel()

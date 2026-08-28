@@ -799,7 +799,7 @@ private fun LibraryScreen(state: MusicUiState, isPlaying: Boolean, vm: MusicVaul
                     lm.initialPrefetchItemCount = 10
                 }
                 setItemViewCacheSize(12)
-                recycledViewPool.setMaxRecycledViews(1, 12)
+                recycledViewPool.setMaxRecycledViews(0, 12)
                 itemAnimator = null
                 setHasFixedSize(false)
                 setPadding(20, 20, 20, 20)
@@ -1445,6 +1445,11 @@ private fun SettingsScreen(
             Text("Audio y reproducción", color = VaultColors.TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
             Text("Crossfade", color = VaultColors.TextSecondary)
+            Text(
+                if (crossfadeSeconds == 0) "Desactivado" else "Mezcla los últimos ${crossfadeSeconds}s con el inicio de la siguiente canción.",
+                color = VaultColors.TextTertiary,
+                fontSize = 12.sp
+            )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Slider(
                     value = crossfadeSeconds.toFloat(),
@@ -1454,7 +1459,18 @@ private fun SettingsScreen(
                     colors = SliderDefaults.colors(thumbColor = VaultColors.Green, activeTrackColor = VaultColors.Green, inactiveTrackColor = VaultColors.Surface3),
                     modifier = Modifier.weight(1f)
                 )
-                Text("${crossfadeSeconds}s", color = VaultColors.TextPrimary, modifier = Modifier.width(42.dp))
+                Text(if (crossfadeSeconds == 0) "Off" else "${crossfadeSeconds}s", color = VaultColors.TextPrimary, modifier = Modifier.width(42.dp))
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(VaultColors.Surface2).padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Default.GraphicEq, null, tint = VaultColors.Green, modifier = Modifier.size(22.dp))
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Crossfade real", color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold)
+                    Text("La siguiente canción comienza antes de que termine la actual.", color = VaultColors.TextTertiary, fontSize = 11.sp)
+                }
             }
         }
         item {

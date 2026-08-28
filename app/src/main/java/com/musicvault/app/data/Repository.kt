@@ -11,13 +11,9 @@ class MusicRepository(private val db: MusicDatabase) {
         db.trackDao().observeAll().map { list -> list.map(::toTrack) }.flowOn(Dispatchers.IO)
 
     fun search(query: String): Flow<List<Track>> {
-        val ftsQuery = query.trim().split(Regex("\\s+"))
-            .filter { it.isNotBlank() }
-            .joinToString(" AND ") { token ->
-                "\"${token.replace("\"", "\"\"")}\"*"
-            }
-        return if (ftsQuery.isBlank()) emptyFlow()
-        else db.trackDao().search(ftsQuery).map { list -> list.map(::toTrack) }.flowOn(Dispatchers.IO)
+        val normalizedQuery = query.trim()
+        return if (normalizedQuery.isBlank()) emptyFlow()
+        else db.trackDao().search(normalizedQuery).map { list -> list.map(::toTrack) }.flowOn(Dispatchers.IO)
     }
 
     fun downloaded(): Flow<List<Track>> =
