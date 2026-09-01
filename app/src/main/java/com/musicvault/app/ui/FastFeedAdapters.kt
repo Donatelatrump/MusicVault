@@ -15,6 +15,8 @@ import android.graphics.drawable.Drawable
 import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -66,7 +68,7 @@ internal sealed interface HomeFeedItem {
     data object Greeting : HomeFeedItem
     data object RecommendedTracks : HomeFeedItem
     data object RecommendedAlbums : HomeFeedItem
-    data object SongsHeader : HomeFeedItem
+    data class SongsHeader(val title: String) : HomeFeedItem
     data class TrackItem(val track: Track) : HomeFeedItem
 }
 
@@ -74,7 +76,7 @@ private fun HomeFeedItem.stableId(): Long = when (this) {
     HomeFeedItem.Greeting -> 1L
     HomeFeedItem.RecommendedTracks -> 2L
     HomeFeedItem.RecommendedAlbums -> 3L
-    HomeFeedItem.SongsHeader -> 4L
+    is HomeFeedItem.SongsHeader -> stableLongId("header:${title}")
     is HomeFeedItem.TrackItem -> stableLongId("track:${track.id}")
 }
 
@@ -99,17 +101,18 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
     private var selectedTrackId: String? = null
     private var recommendedTracksCache: List<Track> = emptyList()
     private var recommendedAlbumsCache: List<Album> = emptyList()
+    private var recommendationsCache: List<Track> = emptyList()
     private val progressFlows = HashMap<String, Flow<Int?>>()
 
     init { setHasStableIds(true) }
 
     override fun getItemId(position: Int): Long = getItem(position).stableId()
 
-    override fun getItemViewType(position: Int): Int = when (getItem(position)) {
+    override fun getItemViewType(position: Int): Int = when (val item = getItem(position)) {
         HomeFeedItem.Greeting -> TYPE_GREETING
         HomeFeedItem.RecommendedTracks -> TYPE_RECOMMENDED_TRACKS
         HomeFeedItem.RecommendedAlbums -> TYPE_RECOMMENDED_ALBUMS
-        HomeFeedItem.SongsHeader -> TYPE_SONGS_HEADER
+        is HomeFeedItem.SongsHeader -> TYPE_SONGS_HEADER
         is HomeFeedItem.TrackItem -> TYPE_TRACK
     }
 
@@ -118,9 +121,9 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
         else ComposeRowHolder(parent)
 
     fun update(
-        tracks: List<Track>,
         recommendedTracks: List<Track>,
         recommendedAlbums: List<Album>,
+        recommendations: List<Track>,
         playlists: List<Playlist>,
         customAlbums: List<Album>,
         albumDownloads: Set<String>,
@@ -130,9 +133,16 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
         val oldSelected = this.selectedTrackId
         val oldPlaying = this.isPlaying
         val recommendationsChanged = recommendedTracks.map { it.id } != recommendedTracksCache.map { it.id } ||
-            recommendedAlbums.map { it.id } != recommendedAlbumsCache.map { it.id }
+            recommendedAlbums.map { it.id } != recommendedAlbumsCache.map { it.id } ||
+            recommendations.map { it.id } != recommendationsCache.map { it.id }
         val auxiliaryDataChanged = this.playlists != playlists || this.customAlbums != customAlbums
         val downloadsChanged = this.albumDownloads != albumDownloads
+
+        // This update runs on every recomposition of the hosting screen (playback
+        // ticks included). Skip the item rebuild and DiffUtil when nothing changed.
+        if (!auxiliaryDataChanged && !recommendationsChanged && !downloadsChanged &&
+            oldSelected == selectedTrackId && oldPlaying == isPlaying
+        ) return
 
         this.playlists = playlists
         this.customAlbums = customAlbums
@@ -141,14 +151,19 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
         this.isPlaying = isPlaying
         recommendedTracksCache = recommendedTracks
         recommendedAlbumsCache = recommendedAlbums
+        recommendationsCache = recommendations
 
+        // The horizontal "Para ti" carousel shows the first quick picks; the
+        // vertical discovery list shows the rest so the two never duplicate.
+        val quickPickCount = 8
         val newItems = buildList {
             add(HomeFeedItem.Greeting)
             if (recommendedTracks.isNotEmpty()) add(HomeFeedItem.RecommendedTracks)
             if (recommendedAlbums.isNotEmpty()) add(HomeFeedItem.RecommendedAlbums)
-            if (tracks.isNotEmpty()) {
-                add(HomeFeedItem.SongsHeader)
-                tracks.forEach { add(HomeFeedItem.TrackItem(it)) }
+            val discoveryList = recommendations.drop(quickPickCount)
+            if (discoveryList.isNotEmpty()) {
+                add(HomeFeedItem.SongsHeader("Recomendaciones para ti"))
+                discoveryList.forEach { add(HomeFeedItem.TrackItem(it)) }
             }
         }
 
@@ -185,7 +200,7 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
             HomeFeedItem.RecommendedAlbums -> (holder as ComposeRowHolder).bind {
                 RecommendedAlbumsRow(vm, albumDownloads)
             }
-            HomeFeedItem.SongsHeader -> (holder as ComposeRowHolder).bind { SectionTitle("Tus canciones") }
+            is HomeFeedItem.SongsHeader -> (holder as ComposeRowHolder).bind { SectionTitle(item.title) }
             is HomeFeedItem.TrackItem -> (holder as NativeTrackHolder).bind(
                 item.track,
                 progressFlow(item.track.id),
@@ -215,8 +230,11 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
         if (tracks.isEmpty()) return
         Text("Para ti", color = VaultColors.TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(10.dp))
-        Row(modifier = Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            tracks.forEach { track ->
+        // Lazy row: only visible cards are composed/collected. The old
+        // horizontalScroll Row composed every card even when offscreen, which
+        // made the first Home frame noticeably slow.
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            items(tracks, key = { it.id }) { track ->
                 RecommendationTrackCard(
                     track = track,
                     progressFlow = progressFlow(track.id),
@@ -233,8 +251,8 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
         if (albums.isEmpty()) return
         Text("Álbumes para ti", color = VaultColors.TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(10.dp))
-        Row(modifier = Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-            albums.forEach { album ->
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            items(albums, key = { it.id }) { album ->
                 AlbumCard(
                     album = album,
                     onClick = { vm.openRecommendedAlbum(album) },
@@ -269,6 +287,7 @@ internal class LibraryFeedAdapter(private val vm: MusicVaultViewModel) :
     private var playlists: List<Playlist> = emptyList()
     private var customAlbums: List<Album> = emptyList()
     private var selectedTrackId: String? = null
+    private var tracksCache: List<Track> = emptyList()
     private var isPlaying = false
     private val progressFlows = HashMap<String, Flow<Int?>>()
 
@@ -279,11 +298,15 @@ internal class LibraryFeedAdapter(private val vm: MusicVaultViewModel) :
     fun update(tracks: List<Track>, playlists: List<Playlist>, customAlbums: List<Album>, selectedTrackId: String?, isPlaying: Boolean) {
         val oldSelected = this.selectedTrackId
         val oldPlaying = this.isPlaying
+        val tracksChanged = this.tracksCache != tracks
         val auxiliaryDataChanged = this.playlists != playlists || this.customAlbums != customAlbums
+        // Runs on every recomposition; skip DiffUtil when nothing visible changed.
+        if (!tracksChanged && !auxiliaryDataChanged && oldSelected == selectedTrackId && oldPlaying == isPlaying) return
         this.playlists = playlists
         this.customAlbums = customAlbums
         this.selectedTrackId = selectedTrackId
         this.isPlaying = isPlaying
+        this.tracksCache = tracks
 
         submitList(tracks) {
             if (auxiliaryDataChanged) currentList.indices.forEach { notifyItemChanged(it) }
@@ -315,6 +338,12 @@ internal class NativeTrackHolder(context: Context, private val vm: MusicVaultVie
     private val actions = itemView.findViewWithTag<ComposeView>("actions")
     private var track: Track? = null
     private var selectedId: String? = null
+    private var currentPlaylists: List<Playlist> = emptyList()
+    private var currentAlbums: List<Album> = emptyList()
+    // Dedupe key for the Compose actions menu: setContent restarts composition,
+    // so it must run once per (track, favorite, lists) combination — not on
+    // every bind nor on every download-progress tick.
+    private var lastMenuKey: Any? = null
     private var progressJob: Job? = null
     private var progressFlow: Flow<Int?>? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -329,22 +358,27 @@ internal class NativeTrackHolder(context: Context, private val vm: MusicVaultVie
 
     fun bind(value: Track, flow: Flow<Int?>, playlists: List<Playlist>, albums: List<Album>, selectedId: String?, playing: Boolean) {
         track = value
+        currentPlaylists = playlists
+        currentAlbums = albums
         this.selectedId = selectedId
         title.text = value.title
         subtitle.text = "${value.artistName} · ${value.albumTitle}"
         loadCover(itemView.context, image, value.coverUri, 56)
         play.mode = if (playing && selectedId == value.id) NativePlayButton.Mode.PAUSE else NativePlayButton.Mode.PLAY
-        title.setTextColor(if (playing && selectedId == value.id) Color.rgb(30, 215, 96) else Color.WHITE)
+        title.setTextColor(if (playing && selectedId == value.id) Color.rgb(224, 164, 88) else Color.rgb(241,234,217))
 
         if (progressFlow !== flow) {
             progressJob?.cancel()
             progressFlow = flow
             progressJob = scope.launch {
+                // Reads holder fields instead of stale bind-time captures.
                 flow.collect { p ->
-                    val downloading = p != null && !value.isDownloaded
+                    val t = track ?: return@collect
+                    val downloading = p != null && !t.isDownloaded
                     progress.visibility = if (downloading) View.VISIBLE else View.GONE
                     if (downloading) progress.progress = p!!.coerceIn(0, 100)
-                    applyActionState(value, downloading, playlists, albums)
+                    play.visibility = if (t.isDownloaded || downloading) View.GONE else View.VISIBLE
+                    actions.visibility = if (t.isDownloaded && !downloading) View.VISIBLE else View.GONE
                 }
             }
         }
@@ -353,16 +387,23 @@ internal class NativeTrackHolder(context: Context, private val vm: MusicVaultVie
         // - downloaded track -> only the 3-dot menu
         // - non-downloaded track -> only Play
         // - actively downloading -> neither action (progress is shown)
-        applyActionState(value, false, playlists, albums)
+        applyActionState(value, false)
     }
 
-    private fun applyActionState(value: Track, downloading: Boolean, playlists: List<Playlist>, albums: List<Album>) {
+    private fun applyActionState(value: Track, downloading: Boolean) {
         play.visibility = if (value.isDownloaded || downloading) View.GONE else View.VISIBLE
         actions.visibility = if (value.isDownloaded && !downloading) View.VISIBLE else View.GONE
         if (value.isDownloaded && !downloading) {
-            actions.setContent {
-                TrackActionsMenu(value, playlists, albums, vm, vm.isFavorite(value.id))
+            val favorite = vm.isFavorite(value.id)
+            val key = listOf(value.id, favorite, currentPlaylists.size, currentAlbums.size)
+            if (key != lastMenuKey) {
+                lastMenuKey = key
+                actions.setContent {
+                    TrackActionsMenu(value, currentPlaylists, currentAlbums, vm, favorite)
+                }
             }
+        } else {
+            lastMenuKey = null
         }
     }
 
@@ -371,13 +412,14 @@ internal class NativeTrackHolder(context: Context, private val vm: MusicVaultVie
         val current = track ?: return
         val active = playing && selectedId == current.id
         play.mode = if (active) NativePlayButton.Mode.PAUSE else NativePlayButton.Mode.PLAY
-        title.setTextColor(if (active) Color.rgb(30, 215, 96) else Color.WHITE)
+        title.setTextColor(if (active) Color.rgb(224, 164, 88) else Color.rgb(241,234,217))
     }
 
     fun recycle() {
         progressJob?.cancel()
         progressJob = null
         progressFlow = null
+        lastMenuKey = null
     }
 }
 
@@ -392,7 +434,7 @@ private class NativePlayButton(context: Context) : ImageButton(context) {
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         val cx = width / 2f; val cy = height / 2f; val size = minOf(width, height) * .36f
-        paint.color = if (isPressed) Color.LTGRAY else Color.WHITE; paint.style = Paint.Style.FILL
+        paint.color = if (isPressed) Color.rgb(241,234,217) else Color.rgb(241,234,217); paint.style = Paint.Style.FILL
         if (mode == Mode.PLAY) {
             path.reset(); path.moveTo(cx - size * .32f, cy - size * .55f); path.lineTo(cx + size * .55f, cy); path.lineTo(cx - size * .32f, cy + size * .55f); path.close(); canvas.drawPath(path, paint)
         } else {
@@ -412,12 +454,12 @@ private fun makeTrackRow(context: Context): LinearLayout {
         layoutParams = RecyclerView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
     }
     val image = ImageView(context).apply {
-        tag = "cover"; layoutParams = LinearLayout.LayoutParams(dp(52), dp(52)); scaleType = ImageView.ScaleType.CENTER_CROP; setBackgroundColor(Color.rgb(35,35,35)); clipToOutline = true
+        tag = "cover"; layoutParams = LinearLayout.LayoutParams(dp(52), dp(52)); scaleType = ImageView.ScaleType.CENTER_CROP; setBackgroundColor(Color.rgb(30,27,24)); clipToOutline = true
     }
     row.addView(image)
     val text = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_VERTICAL; layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(12) } }
-    text.addView(TextView(context).apply { tag="title"; setTextColor(Color.WHITE); textSize=15f; maxLines=1; ellipsize=android.text.TextUtils.TruncateAt.END; setTypeface(typeface, android.graphics.Typeface.BOLD) })
-    text.addView(TextView(context).apply { tag="subtitle"; setTextColor(Color.rgb(179,179,179)); textSize=12f; maxLines=1; ellipsize=android.text.TextUtils.TruncateAt.END })
+    text.addView(TextView(context).apply { tag="title"; setTextColor(Color.rgb(241,234,217)); textSize=15f; maxLines=1; ellipsize=android.text.TextUtils.TruncateAt.END; setTypeface(typeface, android.graphics.Typeface.BOLD) })
+    text.addView(TextView(context).apply { tag="subtitle"; setTextColor(Color.rgb(179,169,146)); textSize=12f; maxLines=1; ellipsize=android.text.TextUtils.TruncateAt.END })
     text.addView(ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal).apply { tag="progress"; visibility=View.GONE; max=100; layoutParams=LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(2)).apply { topMargin=dp(3) } })
     row.addView(text)
     row.addView(NativePlayButton(context).apply { tag="play"; layoutParams=LinearLayout.LayoutParams(dp(48), dp(48)) })
@@ -560,7 +602,7 @@ private fun makeLocalAlbumHeader(context: Context): LinearLayout {
         layoutParams = RecyclerView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
     }
     root.addView(ImageButton(context).apply {
-        tag = "back"; background = null; setImageResource(android.R.drawable.ic_media_previous); setColorFilter(Color.WHITE)
+        tag = "back"; background = null; setImageResource(android.R.drawable.ic_media_previous); setColorFilter(Color.rgb(241,234,217))
         contentDescription = "Atrás"; layoutParams = LinearLayout.LayoutParams(dp(48), dp(48))
     })
     val info = LinearLayout(context).apply {
@@ -569,22 +611,22 @@ private fun makeLocalAlbumHeader(context: Context): LinearLayout {
     }
     info.addView(ImageView(context).apply {
         tag = "cover"; layoutParams = LinearLayout.LayoutParams(dp(150), dp(150)); scaleType = ImageView.ScaleType.CENTER_CROP
-        background = android.graphics.drawable.GradientDrawable().apply { cornerRadius = dp(12).toFloat(); setColor(Color.rgb(35,35,35)) }
+        background = android.graphics.drawable.GradientDrawable().apply { cornerRadius = dp(12).toFloat(); setColor(Color.rgb(30,27,24)) }
     })
     val text = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_VERTICAL
         layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(16) }
     }
-    text.addView(TextView(context).apply { tag="title"; setTextColor(Color.WHITE); textSize=24f; setTypeface(typeface, android.graphics.Typeface.BOLD); maxLines=2; ellipsize=android.text.TextUtils.TruncateAt.END })
-    text.addView(TextView(context).apply { tag="artist"; setTextColor(Color.rgb(179,179,179)); textSize=14f; maxLines=1; ellipsize=android.text.TextUtils.TruncateAt.END; layoutParams=LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin=dp(4) } })
-    text.addView(TextView(context).apply { tag="year"; setTextColor(Color.rgb(130,130,130)); textSize=12f; layoutParams=LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin=dp(2) } })
+    text.addView(TextView(context).apply { tag="title"; setTextColor(Color.rgb(241,234,217)); textSize=24f; setTypeface(typeface, android.graphics.Typeface.BOLD); maxLines=2; ellipsize=android.text.TextUtils.TruncateAt.END })
+    text.addView(TextView(context).apply { tag="artist"; setTextColor(Color.rgb(179,169,146)); textSize=14f; maxLines=1; ellipsize=android.text.TextUtils.TruncateAt.END; layoutParams=LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin=dp(4) } })
+    text.addView(TextView(context).apply { tag="year"; setTextColor(Color.rgb(126,118,102)); textSize=12f; layoutParams=LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin=dp(2) } })
     info.addView(text)
     root.addView(info)
     return root
 }
 
 private class HeartDrawable : Drawable() {
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; style = Paint.Style.FILL }
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(241,234,217); style = Paint.Style.FILL }
     override fun draw(canvas: Canvas) {
         val w = bounds.width().toFloat(); val h = bounds.height().toFloat()
         val path = Path()
@@ -632,6 +674,7 @@ internal class AlbumFeedAdapter(private val vm: MusicVaultViewModel) :
     }
 
     fun update(items: List<Playlist>) {
+        if (currentList == items) return
         submitList(items.toList())
     }
 }
@@ -658,11 +701,11 @@ private fun makeAlbumHeader(context: Context): LinearLayout {
         layoutParams = RecyclerView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
     }
     val text = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f) }
-    text.addView(TextView(context).apply { this.text = "Álbumes"; setTextColor(Color.WHITE); textSize = 28f; setTypeface(typeface, android.graphics.Typeface.BOLD) })
-    text.addView(TextView(context).apply { this.text = "Tus colecciones de canciones descargadas"; setTextColor(Color.rgb(179,179,179)); textSize = 14f })
+    text.addView(TextView(context).apply { this.text = "Álbumes"; setTextColor(Color.rgb(241,234,217)); textSize = 28f; setTypeface(typeface, android.graphics.Typeface.BOLD) })
+    text.addView(TextView(context).apply { this.text = "Tus colecciones de canciones descargadas"; setTextColor(Color.rgb(179,169,146)); textSize = 14f })
     root.addView(text)
     root.addView(ImageButton(context).apply {
-        tag = "addAlbum"; background = null; setImageResource(android.R.drawable.ic_input_add); setColorFilter(Color.WHITE);
+        tag = "addAlbum"; background = null; setImageResource(android.R.drawable.ic_input_add); setColorFilter(Color.rgb(241,234,217));
         contentDescription = "Nuevo álbum"; layoutParams = LinearLayout.LayoutParams(dp(48), dp(48))
     })
     return root
@@ -699,19 +742,19 @@ private fun makeAlbumCard(context: Context): LinearLayout {
         setPadding(dp(4), dp(4), dp(4), dp(4))
         layoutParams = RecyclerView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(12) }
         background = android.graphics.drawable.GradientDrawable().apply {
-            cornerRadius = dp(12).toFloat(); setColor(Color.rgb(30,30,30))
+            cornerRadius = dp(12).toFloat(); setColor(Color.rgb(30,27,24))
         }
     }
     root.addView(ImageView(context).apply { tag="albumCover"; layoutParams=LinearLayout.LayoutParams(dp(92), dp(92)); scaleType=ImageView.ScaleType.CENTER_INSIDE })
     val text=LinearLayout(context).apply { orientation=LinearLayout.VERTICAL; gravity=Gravity.CENTER_VERTICAL; layoutParams=LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart=dp(14); marginEnd=dp(12) } }
-    text.addView(TextView(context).apply { tag="albumTitle"; setTextColor(Color.WHITE); textSize=16f; setTypeface(typeface, android.graphics.Typeface.BOLD); maxLines=1; ellipsize=android.text.TextUtils.TruncateAt.END })
-    text.addView(TextView(context).apply { tag="albumDescription"; setTextColor(Color.rgb(179,179,179)); textSize=13f; maxLines=2; ellipsize=android.text.TextUtils.TruncateAt.END })
+    text.addView(TextView(context).apply { tag="albumTitle"; setTextColor(Color.rgb(241,234,217)); textSize=16f; setTypeface(typeface, android.graphics.Typeface.BOLD); maxLines=1; ellipsize=android.text.TextUtils.TruncateAt.END })
+    text.addView(TextView(context).apply { tag="albumDescription"; setTextColor(Color.rgb(179,169,146)); textSize=13f; maxLines=2; ellipsize=android.text.TextUtils.TruncateAt.END })
     root.addView(text)
     return root
 }
 
 private fun loadCover(context: Context, image: ImageView, url: String?, sizePx: Int) {
-    if (url.isNullOrBlank()) { image.setImageDrawable(null); image.setBackgroundColor(Color.rgb(35,35,35)); return }
+    if (url.isNullOrBlank()) { image.setImageDrawable(null); image.setBackgroundColor(Color.rgb(30,27,24)); return }
     val request = ImageRequest.Builder(context).data(url).size(Size(sizePx, sizePx)).memoryCacheKey("musicvault:$url:$sizePx").diskCacheKey("musicvault:$url:$sizePx").crossfade(false).target(image).build()
     CoverImageCache.loader(context).enqueue(request)
 }

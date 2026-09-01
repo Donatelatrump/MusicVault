@@ -19,6 +19,9 @@ interface TrackDao {
     fun search(query: String): Flow<List<TrackEntity>>
     @Query("SELECT * FROM tracks WHERE id = :id LIMIT 1") suspend fun get(id: String): TrackEntity?
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertAll(items: List<TrackEntity>)
+    // Catalog metadata is a placeholder: it must never clobber an existing row,
+    // otherwise REPLACE would reset isDownloaded/audioUri of already downloaded tracks.
+    @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertIfAbsent(items: List<TrackEntity>)
     @Query("DELETE FROM tracks WHERE id LIKE 'local:%'") suspend fun deleteLocalScannedTracks()
     @Update suspend fun update(item: TrackEntity)
     @Query("DELETE FROM tracks WHERE id = :id") suspend fun delete(id: String)

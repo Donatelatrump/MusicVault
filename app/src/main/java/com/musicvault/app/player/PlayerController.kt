@@ -2,6 +2,7 @@ package com.musicvault.app.player
 
 import android.content.ComponentName
 import android.content.Context
+import android.content.SharedPreferences
 import android.net.Uri
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -34,6 +35,8 @@ class PlayerController(context: Context) {
         val isPlaying: Boolean = false
     )
 
+    private val settings: SharedPreferences = context.getSharedPreferences("musicvault.settings", Context.MODE_PRIVATE)
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val controllerFuture: ListenableFuture<MediaController> = MediaController.Builder(
         context.applicationContext,
@@ -45,7 +48,7 @@ class PlayerController(context: Context) {
     val progress: StateFlow<PlaybackProgress> = _progress
     private val _shuffle = MutableStateFlow(false)
     val shuffle: StateFlow<Boolean> = _shuffle
-    private val _crossfadeSeconds = MutableStateFlow(5)
+    private val _crossfadeSeconds = MutableStateFlow(settings.getInt("crossfade_seconds", 5).coerceIn(0, 12))
     val crossfadeSeconds: StateFlow<Int> = _crossfadeSeconds
     private val _queue = MutableStateFlow<List<Track>>(emptyList())
     val queue: StateFlow<List<Track>> = _queue
@@ -55,6 +58,10 @@ class PlayerController(context: Context) {
     val ended: StateFlow<Long> = _ended
     private val _audioSessionId = MutableStateFlow(0)
     val audioSessionId: StateFlow<Int> = _audioSessionId
+    // Invoked on the main thread when the current item has no successor and the
+    // app should append one (continuous playback). Without a next item the
+    // crossfade can never trigger. Not called for seeks or repeat transitions.
+    var onNextItemNeeded: ((finishedTrackId: String?) -> Unit)? = null
     private var ticker: Job? = null
     private var released = false
 
@@ -67,6 +74,11 @@ class PlayerController(context: Context) {
                     override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                         publishQueue(controller)
                         publishProgress(controller)
+                        val refillReason = reason == androidx.media3.common.Player.MEDIA_ITEM_TRANSITION_REASON_AUTO ||
+                            reason == androidx.media3.common.Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED
+                        if (refillReason && !controller.hasNextMediaItem()) {
+                            onNextItemNeeded?.invoke(mediaItem?.mediaId)
+                        }
                     }
                     override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
                         publishQueue(controller)
@@ -95,7 +107,12 @@ class PlayerController(context: Context) {
         ticker = scope.launch {
             while (isActive && !released) {
                 publishProgress(controller)
-                delay(if (controller.isPlaying) 250L else 1000L)
+                // ✅ Adaptive polling based on playback state and UI visibility
+                delay(when {
+                    !controller.isPlaying -> 2000L           // Pausado: cada 2s  
+                    controller.isPlaying -> 500L             // Reproduciendo: cada 500ms (antes 250ms)
+                    else -> 1000L                            // Otros estados: cada 1s
+                })
             }
         }
     }
@@ -235,7 +252,9 @@ class PlayerController(context: Context) {
     }
 
     fun setCrossfadeSeconds(seconds: Int) {
-        _crossfadeSeconds.value = seconds.coerceIn(0, 12)
+        val coerced = seconds.coerceIn(0, 12)
+        _crossfadeSeconds.value = coerced
+        settings.edit().putInt("crossfade_seconds", coerced).apply()
     }
 
     private fun withController(action: (MediaController) -> Unit) {

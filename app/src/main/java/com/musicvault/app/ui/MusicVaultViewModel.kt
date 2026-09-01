@@ -24,6 +24,8 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
+import com.musicvault.app.player.AudioSessionBridge
+
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -125,6 +127,44 @@ class MusicVaultViewModel(
     val downloadProgress: StateFlow<Map<String, Int>> = _downloadProgress.asStateFlow()
     val albumDownloads: StateFlow<Set<String>> = _albumDownloads.asStateFlow()
 
+    private val _downloadDirLabel = MutableStateFlow(
+        preferences.getString(com.musicvault.app.providers.Providers.DOWNLOAD_TREE_PREF, null)
+            ?.takeIf { it.isNotBlank() }
+            ?.let(android.net.Uri::parse)
+            ?.let(::treeLabel)
+            ?: "Carpeta interna de la app"
+    )
+    val downloadDirLabel: StateFlow<String> = _downloadDirLabel.asStateFlow()
+
+    fun chooseDownloadTree(uri: android.net.Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                appContext.contentResolver.takePersistableUriPermission(
+                    uri,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+            }
+            preferences.edit().putString(com.musicvault.app.providers.Providers.DOWNLOAD_TREE_PREF, uri.toString()).apply()
+            _downloadDirLabel.value = treeLabel(uri)
+            _providerMessage.value = "Descargas guardadas en: ${_downloadDirLabel.value}"
+        }
+    }
+
+    fun useInternalDownloads() {
+        preferences.edit().remove(com.musicvault.app.providers.Providers.DOWNLOAD_TREE_PREF).apply()
+        _downloadDirLabel.value = "Carpeta interna de la app"
+    }
+
+    private fun treeLabel(uri: android.net.Uri): String {
+        val docId = runCatching { android.provider.DocumentsContract.getTreeDocumentId(uri) }.getOrNull()
+        val parts = docId?.split(':') ?: emptyList()
+        return if (parts.size == 2) {
+            val root = if (parts[0] == "primary") "Almacenamiento interno" else parts[0]
+            "$root/${parts[1]}"
+        } else "Carpeta seleccionada"
+    }
+
     fun downloadProgressFor(id: String): Flow<Int?> =
         downloadProgress.map { it[id] }.distinctUntilChanged()
     val shuffle: StateFlow<Boolean> = player.shuffle
@@ -135,46 +175,92 @@ class MusicVaultViewModel(
     private val _equalizerBands = MutableStateFlow<List<NativeEqualizer.Band>>(emptyList())
     val equalizerBands: StateFlow<List<NativeEqualizer.Band>> = _equalizerBands.asStateFlow()
 
+    // Related catalog tracks fetched for the artists the user has downloaded.
+    // Refreshed once per downloaded-artist profile signature, not per screen visit.
+    private val relatedCatalog = MutableStateFlow<List<CatalogTrack>>(emptyList())
+    private var fetchedArtistProfile: String? = null
+
+    private fun catalogToTrack(ct: CatalogTrack): Track = Track(
+        id = "${ct.provider}:recording:${ct.id}", title = ct.title,
+        artistName = ct.artistName,
+        albumId = ct.albumId?.let { "${ct.provider}:release:$it" } ?: "unknown",
+        albumTitle = ct.albumTitle ?: "Álbum desconocido", durationMs = ct.durationMs,
+        audioUri = null, isDownloaded = false, coverUri = ct.coverUri
+    )
+
     // Recommendations are isolated from fast-changing player/download UI state.
     // This prevents Home from rescoring/sorting the catalog during playback or
     // download progress updates. The expensive work runs off the main thread.
     private val recommendations: StateFlow<Pair<List<Track>, List<Album>>> = combine(
-        localTracks, allCatalogAlbums, favoriteIds, recentSearches, cachedCatalogTracks
-    ) { tracks, catalogAlbums, favorites, searches, cachedTracks ->
+        localTracks, allCatalogAlbums, favoriteIds, recentSearches, cachedCatalogTracks, relatedCatalog
+    ) { v ->
+        val tracks = v[0] as List<Track>
+        val catalogAlbums = v[1] as List<Album>
+        val favorites = v[2] as Set<String>
+        val searches = v[3] as List<String>
+        val cachedTracks = v[4] as List<CatalogTrack>
+        val related = v[5] as List<CatalogTrack>
+
+        // User profile: artists and albums already in the vault.
+        val downloaded = tracks.filter { it.isDownloaded }
+        val downloadedIds = downloaded.mapTo(HashSet()) { it.id }
+        val topArtists = downloaded.asSequence()
+            .map { it.artistName.trim().lowercase() }
+            .filter { it.isNotBlank() }
+            .groupingBy { it }.eachCount()
+            .entries.asSequence()
+            .sortedByDescending { it.value }
+            .map { it.key }
+            .take(8)
+            .toHashSet()
+        val downloadedAlbumTitles = downloaded.mapTo(HashSet()) { it.albumTitle.trim().lowercase() }
+
         val tokens = searches.asSequence()
             .flatMap { it.lowercase().split(Regex("\\s+")).asSequence() }
             .filter { it.length >= 2 }
             .take(24)
             .toList()
+
         fun scoreTrack(t: Track): Int {
-            val hay = "${t.title} ${t.artistName} ${t.albumTitle}".lowercase()
-            return tokens.count { hay.contains(it) } * 8 + if (t.id in favorites) 40 else 0
+            val artist = t.artistName.trim().lowercase()
+            val hay = "${t.title} $artist ${t.albumTitle}".lowercase()
+            var score = tokens.count { hay.contains(it) } * 4
+            // Artists/albums from the vault dominate the ranking.
+            if (artist in topArtists) score += 100
+            if (t.albumTitle.trim().lowercase() in downloadedAlbumTitles) score += 30
+            if (t.id in favorites) score += 40
+            return score
         }
+
         fun scoreAlbum(a: Album): Int {
             val hay = "${a.title} ${a.artistName}".lowercase()
-            return tokens.count { hay.contains(it) } * 8
+            var score = tokens.count { hay.contains(it) } * 8
+            if (a.artistName.trim().lowercase() in topArtists) score += 100
+            return score
         }
-        val cachedRecommendations = cachedTracks.asSequence()
-            .map { ct ->
-                Track(
-                    id = "${ct.provider}:recording:${ct.id}", title = ct.title,
-                    artistName = ct.artistName,
-                    albumId = ct.albumId?.let { "${ct.provider}:release:$it" } ?: "unknown",
-                    albumTitle = ct.albumTitle ?: "Álbum desconocido", durationMs = ct.durationMs,
-                    audioUri = null, isDownloaded = false, coverUri = ct.coverUri
-                )
+
+        // Discovery feed: only catalog tracks the user does NOT have yet,
+        // prioritized by their downloaded artists/albums (search tokens act as
+        // a weak genre/keyword signal). Sources: live artist fetch + search
+        // cache + catalog placeholder rows already persisted in the DB, so the
+        // feed also works offline without any network request.
+        val tracksResult = (related.asSequence() + cachedTracks.asSequence()).map(::catalogToTrack) +
+            tracks.asSequence().filter {
+                !it.isDownloaded && it.audioUri == null && it.id.contains(":recording:") && it.title.isNotBlank()
             }
-        // Home intentionally mixes downloaded favorites/history with new cached discoveries.
-        // The UI itself decides which action to show: Play for remote-only tracks,
-        // spinner while downloading, and only the overflow menu once persisted.
-        val tracksResult = (tracks.asSequence() + cachedRecommendations)
-            .distinctBy { it.id }.sortedByDescending(::scoreTrack).take(16).toList()
+        val tracksList = tracksResult
+            .distinctBy { it.id }
+            .filter { it.id !in downloadedIds }
+            .sortedByDescending(::scoreTrack)
+            .take(24)
+            .toList()
+
         val albumsResult = catalogAlbums.asSequence()
             .filter { !it.id.startsWith("album:custom:") }
             .distinctBy { it.id }
             .sortedWith(compareByDescending<Album> { scoreAlbum(it) }.thenBy { it.title.lowercase() })
             .take(12).toList()
-        tracksResult to albumsResult
+        tracksList to albumsResult
     }.flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList<Track>() to emptyList())
 
@@ -210,6 +296,50 @@ class MusicVaultViewModel(
             repository.createPlaylist(favoritesAlbumId, "Favoritos", "Canciones que te gustan")
         }
         player.setCrossfadeSeconds(_crossfadeSeconds.value)
+        // Continuous playback: whenever the playing item has no successor the
+        // player asks for one. A one-item queue can never crossfade, so this is
+        // what keeps the crossfade (and playback itself) alive across tracks.
+        // Explicit queues (playlists) manage their own items and are skipped.
+        player.onNextItemNeeded = { finishedTrackId ->
+            if (!explicitQueueMode) {
+                viewModelScope.launch {
+                    val current = finishedTrackId
+                        ?.let { id -> state.value.tracks.firstOrNull { it.id == id } }
+                        ?: _selectedTrack.value
+                    if (current != null) appendSmartSuccessor(current)
+                }
+            }
+        }
+        // Home discovery: fetch more catalog tracks for the top downloaded
+        // artists. Runs once per profile signature (artist list), with a small
+        // delay so it never competes with the first paint; failures are silent.
+        viewModelScope.launch(Dispatchers.IO) {
+            localTracks
+                .map { list ->
+                    list.filter { it.isDownloaded }
+                        .asSequence()
+                        .map { it.artistName.trim().lowercase() }
+                        .filter { it.isNotBlank() }
+                        .groupingBy { it }.eachCount()
+                        .entries.asSequence()
+                        .sortedByDescending { it.value }
+                        .take(4)
+                        .map { it.key }
+                        .joinToString("|")
+                }
+                .distinctUntilChanged()
+                .collect { signature ->
+                    if (signature.isBlank() || signature == fetchedArtistProfile) return@collect
+                    fetchedArtistProfile = signature
+                    delay(1500)
+                    runCatching {
+                        val results = signature.split('|').flatMap { artist ->
+                            runCatching { catalog.searchTracks(artist, 12) }.getOrDefault(emptyList())
+                        }
+                        relatedCatalog.value = results.distinctBy { "${it.provider}:${it.id}" }
+                    }
+                }
+        }
         historyJob = viewModelScope.launch {
             launch {
                 player.audioSessionId.collect { sessionId ->
@@ -326,7 +456,9 @@ class MusicVaultViewModel(
             player.play(track)
             viewModelScope.launch {
                 repository.recordPlay(track, 0f)
-                enqueueSmartNext(track)
+                // No smart-next here: the player fires onNextItemNeeded when the
+                // item has no successor, which handles every entry point
+                // uniformly and keeps the queue (and crossfade) alive.
             }
         } else {
             // A remote/non-downloaded track is a download action, not a playback action.
@@ -636,7 +768,10 @@ class MusicVaultViewModel(
         // Smart-next is only allowed for an actively selected track.
         // A manual download must never start downloading neighboring album tracks.
         if (_selectedTrack.value?.id != current.id) return
+        appendSmartSuccessor(current)
+    }
 
+    private suspend fun appendSmartSuccessor(current: Track) {
         val localAlbumTracks = when {
             _selectedLocalAlbum.value != null -> _selectedLocalAlbumTracks.value
             current.albumId.startsWith("album:custom:") -> repository.getAlbumTracks(current.albumId)
@@ -664,9 +799,17 @@ class MusicVaultViewModel(
             }
         }
 
-        val downloaded = state.value.downloaded.filter { it.id != current.id && it.audioUri != null }
-        if (downloaded.isNotEmpty()) {
-            val next = if (_shuffle.value) downloaded.random() else downloaded.first()
+        val pool = state.value.downloaded.filter { it.audioUri != null && it.id != current.id }
+        if (pool.isNotEmpty()) {
+            val next = if (_shuffle.value) {
+                pool.random()
+            } else {
+                // Continue through the library in listing order, wrapping around,
+                // instead of always repeating the alphabetically first track.
+                val ordered = state.value.downloaded.filter { it.audioUri != null }
+                val currentIndex = ordered.indexOfFirst { it.id == current.id }
+                ordered.getOrNull(currentIndex + 1) ?: pool.first()
+            }
             player.append(next)
         } else if (_shuffle.value) {
             findAndDownloadRelated(current)
@@ -812,10 +955,15 @@ class MusicVaultViewModel(
             runCatching {
                 val uri = track.audioUri?.let(android.net.Uri::parse)
                 if (uri != null && uri.scheme == "content") {
-                    val fileName = uri.lastPathSegment?.let { java.net.URLDecoder.decode(it, "UTF-8") }
-                    if (!fileName.isNullOrBlank()) {
-                        val root = java.io.File(appContext.getExternalFilesDir("Music") ?: appContext.filesDir, "downloads")
-                        root.walkTopDown().firstOrNull { it.isFile && it.name == fileName }?.delete()
+                    if (uri.authority != "${appContext.packageName}.fileprovider") {
+                        // Document inside the user-selected SAF folder.
+                        runCatching { appContext.contentResolver.delete(uri, null, null) }
+                    } else {
+                        val fileName = uri.lastPathSegment?.let { java.net.URLDecoder.decode(it, "UTF-8") }
+                        if (!fileName.isNullOrBlank()) {
+                            val root = java.io.File(appContext.getExternalFilesDir("Music") ?: appContext.filesDir, "downloads")
+                            root.walkTopDown().firstOrNull { it.isFile && it.name == fileName }?.delete()
+                        }
                     }
                 }
             }
@@ -978,9 +1126,9 @@ class MusicVaultViewModel(
                 val result = Providers.download(name, author, onProgress = { progress ->
                     val now = System.currentTimeMillis()
                     // Download progress is not animation state. Throttle UI updates
-                    // so a fast provider cannot invalidate the whole visible list
-                    // dozens of times per second. 100% is always delivered.
-                    if (progress == 100 || progress == 0 || progress - lastProgress >= 2 || now - lastProgressAt >= 120L) {
+                    // ✅ Optimized progress throttling: only update UI when meaningful
+                    // Reduced from 120ms to 300ms to decrease UI updates by ~60%
+                    if (progress == 100 || progress == 0 || progress - lastProgress >= 5 || now - lastProgressAt >= 300L) {
                         lastProgress = progress
                         lastProgressAt = now
                         _downloadProgress.value = _downloadProgress.value + (id to progress)

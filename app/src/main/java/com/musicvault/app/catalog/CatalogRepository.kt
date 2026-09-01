@@ -182,7 +182,10 @@ class CatalogRepository(
 
     private suspend fun persistTracks(results: List<CatalogTrack>) {
         if (results.isEmpty()) return
-        db.trackDao().upsertAll(results.map {
+        // Insert-only: if a row already exists (e.g. a track the user just downloaded),
+        // keeping it preserves isDownloaded/audioUri. REPLACE here was wiping the
+        // downloaded state and making tracks vanish from the Library.
+        db.trackDao().insertIfAbsent(results.map {
             TrackEntity(
                 id = "${it.provider}:recording:${it.id}", title = it.title, artistName = it.artistName,
                 albumId = it.albumId?.let { id -> "${it.provider}:release:$id" } ?: "unknown",

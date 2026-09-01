@@ -176,7 +176,7 @@ class RemoteResultsAdapter(
     }
 
     private class HeaderHolder(context: Context) : RecyclerView.ViewHolder(TextView(context).apply {
-        setTextColor(Color.WHITE)
+        setTextColor(Color.parseColor("#F1EAD9"))
         textSize = 16f
         setTypeface(typeface, android.graphics.Typeface.BOLD)
         gravity = Gravity.CENTER_VERTICAL
@@ -284,10 +284,10 @@ class RemoteResultsAdapter(
                 // Once persisted, the row is opened by tapping the song itself;
                 // keep only the overflow menu to avoid duplicating playback UI.
                 more.visibility = if (downloaded) View.VISIBLE else View.GONE
-                more.setDotsColor(Color.WHITE)
+                more.setDotsColor(Color.parseColor("#F1EAD9"))
                 play.mode = if (isPlaying && selectedTrackId == localId) StyledPlayButton.Mode.PAUSE else StyledPlayButton.Mode.PLAY
             }
-            title.setTextColor(if (isPlaying && selectedTrackId == localId) Color.parseColor("#1ED760") else Color.WHITE)
+            title.setTextColor(if (isPlaying && selectedTrackId == localId) Color.parseColor("#E0A458") else Color.parseColor("#F1EAD9"))
         }
     }
 
@@ -316,7 +316,7 @@ class RemoteResultsAdapter(
             val cy = height / 2f
             val size = minOf(width, height) * 0.36f
             paint.style = Paint.Style.FILL
-            paint.color = if (isPressed) Color.LTGRAY else Color.WHITE
+            paint.color = if (isPressed) Color.parseColor("#F1EAD9") else Color.parseColor("#F1EAD9")
 
             when (mode) {
                 Mode.PLAY -> {
@@ -358,14 +358,14 @@ class RemoteResultsAdapter(
         val container = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(8), dp(6), dp(8), dp(6))
-            background = rounded(Color.parseColor("#242424"), dp(12).toFloat())
+            background = rounded(Color.parseColor("#292420"), dp(12).toFloat())
             elevation = dp(8).toFloat()
         }
         var popup: PopupWindow? = null
         fun addItem(text: String, action: MoreAction) {
             container.addView(TextView(context).apply {
                 this.text = text
-                setTextColor(Color.WHITE)
+                setTextColor(Color.parseColor("#F1EAD9"))
                 textSize = 14f
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(14), 0, dp(14), 0)
@@ -397,7 +397,7 @@ class RemoteResultsAdapter(
 
     private class MoreButton(context: Context) : View(context) {
         private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        private var dotsColor: Int = Color.WHITE
+        private var dotsColor: Int = Color.parseColor("#F1EAD9")
         init {
             isClickable = true
             isFocusable = true
@@ -431,7 +431,7 @@ class RemoteResultsAdapter(
         fun stop() { animator?.cancel(); animator = null; phase = 0; invalidate() }
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas); val cx=width/2f; val cy=height/2f; val radius=minOf(width,height)*.30f; val dot=minOf(width,height)*.065f
-            for (i in 0 until 8) { val a=Math.toRadians((i*45.0)-90.0); val x=cx+Math.cos(a)*radius; val y=cy+Math.sin(a)*radius; val distance=(i-phase+8)%8; val alpha=70+(185*(8-distance)/8); paint.color=Color.argb(alpha,30,215,96); canvas.drawCircle(x.toFloat(),y.toFloat(),dot,paint) }
+            for (i in 0 until 8) { val a=Math.toRadians((i*45.0)-90.0); val x=cx+Math.cos(a)*radius; val y=cy+Math.sin(a)*radius; val distance=(i-phase+8)%8; val alpha=70+(185*(8-distance)/8); paint.color=Color.argb(alpha,224,164,88); canvas.drawCircle(x.toFloat(),y.toFloat(),dot,paint) }
         }
         override fun onDetachedFromWindow() { stop(); super.onDetachedFromWindow() }
     }
@@ -459,7 +459,7 @@ class RemoteResultsAdapter(
                 tag = "cover"
                 layoutParams = LinearLayout.LayoutParams(dp(context, 50), dp(context, 50))
                 scaleType = ImageView.ScaleType.CENTER_CROP
-                background = rounded(Color.parseColor("#232323"), dp(context, 6).toFloat())
+                background = rounded(Color.parseColor("#1E1B18"), dp(context, 6).toFloat())
                 clipToOutline = true
             }
             row.addView(image)
@@ -468,10 +468,10 @@ class RemoteResultsAdapter(
                 gravity = Gravity.CENTER_VERTICAL
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(context, 12) }
             }
-            text.addView(TextView(context).apply { tag = "title"; setTextColor(Color.WHITE); textSize = 15f; maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END; setTypeface(typeface, android.graphics.Typeface.BOLD) })
-            text.addView(TextView(context).apply { tag = "subtitle"; setTextColor(Color.parseColor("#B3B3B3")); textSize = 12f; maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END })
+            text.addView(TextView(context).apply { tag = "title"; setTextColor(Color.parseColor("#F1EAD9")); textSize = 15f; maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END; setTypeface(typeface, android.graphics.Typeface.BOLD) })
+            text.addView(TextView(context).apply { tag = "subtitle"; setTextColor(Color.parseColor("#B3A992")); textSize = 12f; maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END })
             row.addView(text)
-            row.addView(TextView(context).apply { this.text = "›"; textSize = 28f; setTextColor(Color.parseColor("#7A7A7A")); gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(dp(context, 28), dp(context, 48)) })
+            row.addView(TextView(context).apply { this.text = "›"; textSize = 28f; setTextColor(Color.parseColor("#7E7666")); gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(dp(context, 28), dp(context, 48)) })
             return row
         }
 
@@ -516,7 +516,7 @@ class RemoteResultsAdapter(
 
         private fun loadCover(context: Context, image: ImageView, url: String?, sizePx: Int) {
             if (url.isNullOrBlank()) {
-                image.setImageDrawable(rounded(Color.parseColor("#232323"), dp(context, 6).toFloat()))
+                image.setImageDrawable(rounded(Color.parseColor("#1E1B18"), dp(context, 6).toFloat()))
                 return
             }
             image.loadWithCoil(context, url, sizePx)

@@ -28,6 +28,23 @@ object Providers {
     private const val UPDATE_PREFS = "musicvault_provider"
     private const val LAST_UPDATE_CHECK = "last_ytdlp_update_check"
     private const val UPDATE_INTERVAL_MS = 24L * 60L * 60L * 1000L
+    // User-selected download destination (SAF tree), shared with the settings UI.
+    const val SETTINGS_PREFS = "musicvault.settings"
+    const val DOWNLOAD_TREE_PREF = "download_tree_uri"
+
+    private fun prefs(context: Context) =
+        context.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
+
+    private fun mimeFor(extension: String): String = when (extension) {
+        "mp3" -> "audio/mpeg"
+        "m4a" -> "audio/mp4"
+        "aac" -> "audio/aac"
+        "ogg", "opus" -> "audio/ogg"
+        "webm" -> "audio/webm"
+        "wav" -> "audio/wav"
+        "flac" -> "audio/flac"
+        else -> "audio/mpeg"
+    }
 
     @Volatile
     private var appContext: Context? = null
@@ -187,6 +204,36 @@ object Providers {
                 }
                 stagingDir.deleteRecursively()
 
+                val mime = mimeFor(extension)
+
+                // Optional user-selected destination (SAF tree). When set, the
+                // finished file is copied into the chosen folder and its
+                // content URI is returned; otherwise the app-private folder
+                // is used as before.
+                val treeUri = prefs(context).getString(DOWNLOAD_TREE_PREF, null)
+                    ?.takeIf { it.isNotBlank() }?.let(android.net.Uri::parse)
+                if (treeUri != null) {
+                    val document = runCatching {
+                        val tree = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, treeUri)
+                            ?: return@runCatching null
+                        val doc = tree.createFile(mime, finalFile.nameWithoutExtension)
+                            ?: return@runCatching null
+                        context.contentResolver.openOutputStream(doc.uri)?.use { out ->
+                            finalFile.inputStream().use { input -> input.copyTo(out) }
+                        } ?: return@runCatching null
+                        doc
+                    }.getOrNull()
+                    if (document != null) {
+                        finalFile.delete()
+                        onProgress(100)
+                        return@withContext ProviderResult.Success(
+                            document.uri.toString(),
+                            document.name ?: finalFile.name,
+                            mime
+                        )
+                    }
+                }
+
                 val audioUri = FileProvider.getUriForFile(
                     context,
                     "${context.packageName}.fileprovider",
@@ -194,7 +241,7 @@ object Providers {
                 ).toString()
 
                 onProgress(100)
-                ProviderResult.Success(audioUri, finalFile.name, android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension) ?: "audio/*")
+                ProviderResult.Success(audioUri, finalFile.name, mime)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {

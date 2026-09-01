@@ -36,7 +36,9 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
@@ -88,12 +90,14 @@ import com.musicvault.app.ui.search.RemoteResultItem
 import com.musicvault.app.ui.search.RemoteResultsAdapter
 import com.musicvault.app.ui.search.MoreAction
 import com.musicvault.app.ui.theme.VaultColors
+import com.musicvault.app.ui.theme.VaultFonts
 import kotlin.math.abs
 
-/** Deterministic gradient pair for a given key, used so album/playlist placeholders feel alive. */
+/** Deterministic spine accent for a key. Tone-on-tone pair for subtle placeholder fills. */
 private fun gradientFor(key: String): Pair<Color, Color> {
-    val idx = abs(key.hashCode()) % VaultColors.ShelfGradients.size
-    return VaultColors.ShelfGradients[idx]
+    val idx = abs(key.hashCode()) % VaultColors.SpineAccents.size
+    val accent = VaultColors.SpineAccents[idx]
+    return accent to accent.copy(alpha = 0.25f)
 }
 
 /**
@@ -126,6 +130,11 @@ fun MusicVaultApp(vm: MusicVaultViewModel) {
     val queueIndex by vm.queueIndex.collectAsState()
     val favoriteIds = state.favoriteIds
     val equalizerBands by vm.equalizerBands.collectAsState()
+    val downloadDirLabel by vm.downloadDirLabel.collectAsState()
+    // SAF directory picker for the user-selected download destination.
+    val folderPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri -> uri?.let(vm::chooseDownloadTree) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
 
     // App-level back navigation: close the full player/details before allowing
@@ -171,9 +180,12 @@ fun MusicVaultApp(vm: MusicVaultViewModel) {
                 SettingsScreen(
                     crossfadeSeconds = state.crossfadeSeconds,
                     equalizerBands = equalizerBands,
+                    downloadDirLabel = downloadDirLabel,
                     onCrossfadeChange = vm::setCrossfadeSeconds,
                     onEqualizerEnabled = vm::setEqualizerEnabled,
                     onEqualizerBand = vm::setEqualizerBand,
+                    onPickDownloadFolder = { folderPicker.launch(null) },
+                    onUseInternalFolder = vm::useInternalDownloads,
                     onClose = { showSettings = false }
                 )
             } else {
@@ -191,19 +203,21 @@ fun MusicVaultApp(vm: MusicVaultViewModel) {
                             },
                             color = VaultColors.TextPrimary,
                             fontSize = 26.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            letterSpacing = (-0.5).sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = VaultFonts.Display,
+                            letterSpacing = (-0.75).sp,
                             modifier = Modifier.weight(1f)
                         )
                         Box(
                             Modifier
                                 .size(34.dp)
                                 .clip(CircleShape)
-                                .background(VaultColors.Surface2)
+                                .background(VaultColors.Surface1)
+                                .border(1.dp, VaultColors.Divider, CircleShape)
                                 .pressScale { showSettings = true },
                             contentAlignment = Alignment.Center
                         ) {
-                            Icon(Icons.Default.Settings, "Ajustes", tint = VaultColors.TextPrimary, modifier = Modifier.size(18.dp))
+                            Icon(Icons.Default.Settings, "Ajustes", tint = VaultColors.TextSecondary, modifier = Modifier.size(18.dp))
                         }
                     }
                     AnimatedVisibility(
@@ -386,9 +400,9 @@ private fun HomeScreen(state: MusicUiState, albumDownloads: Set<String>, isPlayi
         },
         update = {
             adapter.update(
-                tracks = state.tracks,
                 recommendedTracks = state.recommendedTracks,
                 recommendedAlbums = state.recommendedAlbums,
+                recommendations = state.recommendedTracks,
                 playlists = state.playlists,
                 customAlbums = state.albums.filter { it.id.startsWith("album:custom:") },
                 albumDownloads = albumDownloads,
@@ -428,7 +442,7 @@ internal fun RecommendationTrackCard(
         Spacer(Modifier.height(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text(track.title, color = if (isPlaying) VaultColors.Green else VaultColors.TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(track.title, color = if (isPlaying) VaultColors.Accent else VaultColors.TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(track.artistName, color = VaultColors.TextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             when {
@@ -445,7 +459,7 @@ internal fun RecommendationTrackCard(
 }
 
 @Composable
-private fun DownloadDotsSpinner(modifier: Modifier = Modifier, dotColor: Color = VaultColors.Green) {
+private fun DownloadDotsSpinner(modifier: Modifier = Modifier, dotColor: Color = VaultColors.Accent) {
     val transition = rememberInfiniteTransition(label = "download-dots")
     val phase by transition.animateFloat(
         initialValue = 0f,
@@ -544,13 +558,13 @@ private fun SearchScreen(
             singleLine = true,
             shape = RoundedCornerShape(10.dp),
             colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = VaultColors.Green,
+                focusedBorderColor = VaultColors.Accent,
                 unfocusedBorderColor = VaultColors.Surface3,
                 focusedContainerColor = VaultColors.Surface1,
                 unfocusedContainerColor = VaultColors.Surface1,
                 focusedTextColor = VaultColors.TextPrimary,
                 unfocusedTextColor = VaultColors.TextPrimary,
-                cursorColor = VaultColors.Green
+                cursorColor = VaultColors.Accent
             )
         )
 
@@ -561,7 +575,7 @@ private fun SearchScreen(
         ) {
             LinearProgressIndicator(
                 Modifier.fillMaxWidth().padding(top = 12.dp),
-                color = VaultColors.Green,
+                color = VaultColors.Accent,
                 trackColor = VaultColors.Surface2
             )
         }
@@ -748,7 +762,7 @@ private fun RemoteTrackRow(
         Column(Modifier.weight(1f)) {
             Text(
                 track.title,
-                color = if (isPlaying) VaultColors.Green else VaultColors.TextPrimary,
+                color = if (isPlaying) VaultColors.Accent else VaultColors.TextPrimary,
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 15.sp,
                 maxLines = 1,
@@ -1028,7 +1042,7 @@ private fun RemoteAlbumDetail(
             }
             Spacer(Modifier.height(18.dp))
             when {
-                loading -> LinearProgressIndicator(Modifier.fillMaxWidth(), color = VaultColors.Green, trackColor = VaultColors.Surface3)
+                loading -> LinearProgressIndicator(Modifier.fillMaxWidth(), color = VaultColors.Accent, trackColor = VaultColors.Surface3)
                 tracks.isEmpty() -> Text("No hay canciones disponibles para este álbum.", color = VaultColors.TextSecondary)
             }
             Spacer(Modifier.height(10.dp))
@@ -1090,7 +1104,7 @@ private fun PlaylistDetail(
                 Button(
                     onClick = { vm.playPlaylist(playlist, shuffle = false) },
                     shape = RoundedCornerShape(50),
-                    colors = ButtonDefaults.buttonColors(containerColor = VaultColors.Green, contentColor = Color.Black)
+                    colors = ButtonDefaults.buttonColors(containerColor = VaultColors.Accent, contentColor = Color.Black)
                 ) {
                     Icon(Icons.Default.PlayArrow, null)
                     Spacer(Modifier.width(6.dp))
@@ -1142,9 +1156,11 @@ private fun MiniPlayer(
     val durationMs = playbackProgress.durationMs.coerceAtLeast(track.durationMs)
     val positionMs = playbackProgress.positionMs
     val fraction = if (durationMs > 0) (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
+    // Progress ticks every 500 ms while playing; a matching linear tween between
+    // samples renders as continuous motion instead of a sprint-and-stop retarget.
     val animatedFraction by animateFloatAsState(
         targetValue = fraction,
-        animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing),
+        animationSpec = tween(durationMillis = 500, easing = LinearEasing),
         label = "miniPlayerProgress"
     )
     val interactionSource = remember { MutableInteractionSource() }
@@ -1156,27 +1172,37 @@ private fun MiniPlayer(
     )
     Column(
         Modifier
+            .padding(horizontal = 12.dp, vertical = 6.dp)
             .fillMaxWidth()
             .graphicsLayer { scaleX = scale; scaleY = scale }
-            .background(VaultColors.Surface2)
+            .clip(RoundedCornerShape(12.dp))
+            .background(VaultColors.Surface1)
+            .border(1.dp, VaultColors.Divider, RoundedCornerShape(12.dp))
             .clickable(interactionSource = interactionSource, indication = null, onClick = onOpen)
     ) {
         LinearProgressIndicator(
             progress = { animatedFraction },
             modifier = Modifier.fillMaxWidth().height(2.dp),
-            color = VaultColors.Green,
+            color = VaultColors.Accent,
             trackColor = Color.Transparent
         )
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            AsyncImage(track.coverUri, track.title, Modifier.size(44.dp).clip(RoundedCornerShape(6.dp)))
+            AsyncImage(track.coverUri, track.title, Modifier.size(44.dp).clip(RoundedCornerShape(6.dp)).border(1.dp, VaultColors.Divider, RoundedCornerShape(6.dp)))
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
-                Text(track.title, color = VaultColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                Text(track.title, color = VaultColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, fontFamily = VaultFonts.Display)
                 Text(track.artistName, color = VaultColors.TextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
+            Text(
+                formatTime(positionMs),
+                color = VaultColors.TextTertiary,
+                fontSize = 11.sp,
+                fontFamily = VaultFonts.Mono,
+                modifier = Modifier.padding(end = 2.dp)
+            )
             IconButton(onClick = onFavorite) {
                 Icon(
                     if (favorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
@@ -1185,7 +1211,12 @@ private fun MiniPlayer(
                 )
             }
             IconButton(onClick = onToggle) {
-                Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, null, tint = VaultColors.TextPrimary)
+                Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, null, tint = VaultColors.OnAccent, modifier = Modifier
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .background(VaultColors.Accent)
+                    .padding(4.dp)
+                )
             }
         }
     }
@@ -1206,50 +1237,68 @@ private fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean,
     var showQueue by remember { mutableStateOf(false) }
     LaunchedEffect(position, track.id) { if (!sliderDragging) sliderPosition = position.toFloat() }
     val favorite = track.id in favoriteIds
-    val (accentTop, _) = remember(track.id) { gradientFor(track.id) }
+    // Deterministic archive number for the track, used as the catalog tag.
+    val catalogNumber = remember(track.id) { "VAULT-%04d".format(abs(track.id.hashCode()) % 10000) }
 
     Column(
         Modifier
             .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    listOf(accentTop.copy(alpha = 0.78f), VaultColors.Background, VaultColors.Background)
-                )
-            )
+            .background(VaultColors.Background)
             .padding(horizontal = 24.dp, vertical = 10.dp)
             .navigationBarsPadding()
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = vm::closeFullPlayer) { Icon(Icons.Default.KeyboardArrowDown, "Cerrar", tint = VaultColors.TextPrimary, modifier = Modifier.size(30.dp)) }
             Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("REPRODUCIENDO", color = VaultColors.TextSecondary, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                Text(
+                    "VAULT · FICHA DE AUDIO",
+                    color = VaultColors.TextTertiary,
+                    fontSize = 10.sp,
+                    fontFamily = VaultFonts.Mono,
+                    letterSpacing = 2.sp
+                )
             }
+            Spacer(Modifier.size(48.dp))
         }
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(6.dp))
         Box(
             Modifier
                 .fillMaxWidth()
                 .weight(1f),
             contentAlignment = Alignment.TopCenter
         ) {
-            AsyncImage(
-                track.coverUri, track.title,
+            // Hairline "mat" frame around the artwork: the archive-card signature
+            // replaces the old color-to-black glow.
+            Box(
                 Modifier
                     .fillMaxWidth()
-                    .aspectRatio(1f)
                     .padding(top = 4.dp)
                     .scale(scale)
-                    .shadow(elevation = 24.dp, shape = RoundedCornerShape(16.dp), ambientColor = accentTop, spotColor = accentTop)
-                    .clip(RoundedCornerShape(16.dp))
-            )
-        }
-        Spacer(Modifier.height(24.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(track.title, color = VaultColors.TextPrimary, fontSize = 24.sp, fontWeight = FontWeight.ExtraBold, maxLines = 2)
-                Text(track.artistName, color = VaultColors.TextSecondary, fontSize = 15.sp, maxLines = 1)
+                    .shadow(elevation = 20.dp, shape = RoundedCornerShape(16.dp), ambientColor = Color.Black, spotColor = Color.Black)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(VaultColors.Surface1)
+                    .border(1.dp, VaultColors.Divider, RoundedCornerShape(14.dp))
+                    .padding(8.dp)
+            ) {
+                AsyncImage(
+                    track.coverUri, track.title,
+                    Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(1f)
+                        .clip(RoundedCornerShape(8.dp))
+                )
             }
-            Spacer(Modifier.width(12.dp))
+        }
+        Spacer(Modifier.height(18.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                catalogNumber,
+                color = VaultColors.Accent,
+                fontSize = 11.sp,
+                fontFamily = VaultFonts.Mono,
+                letterSpacing = 1.sp
+            )
+            Spacer(Modifier.weight(1f))
             val favScale by animateFloatAsState(
                 if (favorite) 1.15f else 1f,
                 spring(dampingRatio = Spring.DampingRatioHighBouncy, stiffness = Spring.StiffnessMedium),
@@ -1264,6 +1313,11 @@ private fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean,
                 )
             }
         }
+        Text(
+            track.title, color = VaultColors.TextPrimary, fontSize = 24.sp, fontWeight = FontWeight.Bold,
+            maxLines = 2, fontFamily = VaultFonts.Display, letterSpacing = (-0.5).sp
+        )
+        Text(track.artistName, color = VaultColors.TextSecondary, fontSize = 15.sp, maxLines = 1)
         Spacer(Modifier.height(14.dp))
         // Custom seek bar: compact, precise and visually lighter than the default Material slider.
         Box(
@@ -1315,16 +1369,14 @@ private fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean,
                 )
                 if (activeX > 0f) {
                     drawRoundRect(
-                        brush = Brush.horizontalGradient(
-                            listOf(VaultColors.Green.copy(alpha = 0.72f), VaultColors.Green)
-                        ),
+                        color = VaultColors.Accent,
                         topLeft = androidx.compose.ui.geometry.Offset(0f, centerY - trackHeight / 2f),
                         size = androidx.compose.ui.geometry.Size(activeX, trackHeight),
                         cornerRadius = androidx.compose.ui.geometry.CornerRadius(trackHeight / 2f)
                     )
                 }
                 drawCircle(
-                    color = VaultColors.Green.copy(alpha = 0.16f),
+                    color = VaultColors.Accent.copy(alpha = 0.16f),
                     radius = thumbRadius * 1.9f,
                     center = androidx.compose.ui.geometry.Offset(activeX, centerY)
                 )
@@ -1336,8 +1388,8 @@ private fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean,
             }
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(formatTime(if (sliderDragging) sliderPosition.toLong() else position), color = VaultColors.TextSecondary, fontSize = 12.sp)
-            Text(formatTime(duration), color = VaultColors.TextSecondary, fontSize = 12.sp)
+            Text(formatTime(if (sliderDragging) sliderPosition.toLong() else position), color = VaultColors.TextSecondary, fontSize = 12.sp, fontFamily = VaultFonts.Mono)
+            Text(formatTime(duration), color = VaultColors.TextSecondary, fontSize = 12.sp, fontFamily = VaultFonts.Mono)
         }
         Spacer(Modifier.height(6.dp))
         // Transport controls: Play is anchored exactly at screen center.
@@ -1351,7 +1403,7 @@ private fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean,
                 label = "playButtonScale"
             )
 
-            // Play is the absolute center of the available screen width.
+            // Brass seal: the play button is the engraved stamp of the vault.
             FilledIconButton(
                 onClick = vm::togglePlayback,
                 modifier = Modifier
@@ -1359,8 +1411,8 @@ private fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean,
                     .size(72.dp)
                     .graphicsLayer { scaleX = playScale; scaleY = playScale },
                 colors = IconButtonDefaults.filledIconButtonColors(
-                    containerColor = VaultColors.TextPrimary,
-                    contentColor = Color.Black
+                    containerColor = VaultColors.Accent,
+                    contentColor = VaultColors.OnAccent
                 )
             ) {
                 Icon(
@@ -1393,7 +1445,7 @@ private fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean,
                 Icon(
                     Icons.Default.Shuffle,
                     "Aleatorio",
-                    tint = if (shuffle) VaultColors.Green else VaultColors.TextPrimary,
+                    tint = if (shuffle) VaultColors.Accent else VaultColors.TextPrimary,
                     modifier = Modifier.size(25.dp)
                 )
             }
@@ -1428,79 +1480,148 @@ private fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean,
 private fun SettingsScreen(
     crossfadeSeconds: Int,
     equalizerBands: List<com.musicvault.app.player.NativeEqualizer.Band>,
+    downloadDirLabel: String,
     onCrossfadeChange: (Int) -> Unit,
     onEqualizerEnabled: (Boolean) -> Unit,
     onEqualizerBand: (Int, Short) -> Unit,
+    onPickDownloadFolder: () -> Unit,
+    onUseInternalFolder: () -> Unit,
     onClose: () -> Unit
 ) {
     var eqEnabled by rememberSaveable { mutableStateOf(true) }
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onClose) { Icon(Icons.Default.ArrowBack, "Atrás", tint = VaultColors.TextPrimary) }
-                Text("Ajustes", color = VaultColors.TextPrimary, fontSize = 26.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.5).sp)
+                Text("Ajustes", color = VaultColors.TextPrimary, fontSize = 26.sp, fontWeight = FontWeight.Bold, fontFamily = VaultFonts.Display, letterSpacing = (-0.75).sp)
             }
         }
         item {
-            Text("Audio y reproducción", color = VaultColors.TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(8.dp))
-            Text("Crossfade", color = VaultColors.TextSecondary)
-            Text(
-                if (crossfadeSeconds == 0) "Desactivado" else "Mezcla los últimos ${crossfadeSeconds}s con el inicio de la siguiente canción.",
-                color = VaultColors.TextTertiary,
-                fontSize = 12.sp
-            )
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Slider(
-                    value = crossfadeSeconds.toFloat(),
-                    onValueChange = { onCrossfadeChange(it.toInt()) },
-                    valueRange = 0f..12f,
-                    steps = 11,
-                    colors = SliderDefaults.colors(thumbColor = VaultColors.Green, activeTrackColor = VaultColors.Green, inactiveTrackColor = VaultColors.Surface3),
-                    modifier = Modifier.weight(1f)
+            SettingsSection("REPRODUCCIÓN") {
+                Text("Crossfade", color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                Spacer(Modifier.height(4.dp))
+                // Keep the drag value local so a 60 Hz gesture never recomposes the whole
+                // app (crossfadeSeconds feeds the root state combine) nor hits prefs.
+                var dragValue by remember { mutableStateOf<Float?>(null) }
+                val shownSeconds = dragValue?.toInt() ?: crossfadeSeconds
+                Text(
+                    if (shownSeconds == 0) "Desactivado" else "Mezcla los últimos ${shownSeconds}s con el inicio de la siguiente canción.",
+                    color = VaultColors.TextTertiary,
+                    fontSize = 12.sp
                 )
-                Text(if (crossfadeSeconds == 0) "Off" else "${crossfadeSeconds}s", color = VaultColors.TextPrimary, modifier = Modifier.width(42.dp))
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(VaultColors.Surface2).padding(14.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(Icons.Default.GraphicEq, null, tint = VaultColors.Green, modifier = Modifier.size(22.dp))
-                Spacer(Modifier.width(10.dp))
-                Column(Modifier.weight(1f)) {
-                    Text("Crossfade real", color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold)
-                    Text("La siguiente canción comienza antes de que termine la actual.", color = VaultColors.TextTertiary, fontSize = 11.sp)
-                }
-            }
-        }
-        item {
-            Text("Ecualizador nativo", color = VaultColors.TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(if (equalizerBands.isEmpty()) "Esperando sesión de audio..." else "Bandas: ${equalizerBands.size}", color = VaultColors.TextSecondary, modifier = Modifier.weight(1f))
-                Switch(
-                    checked = eqEnabled,
-                    onCheckedChange = { eqEnabled = it; onEqualizerEnabled(it) },
-                    colors = SwitchDefaults.colors(checkedThumbColor = Color.Black, checkedTrackColor = VaultColors.Green)
-                )
-            }
-            equalizerBands.forEach { band ->
-                Column {
-                    Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                        Text("${band.centerFrequencyHz} Hz", color = VaultColors.TextPrimary, fontSize = 12.sp)
-                        Text("${band.level / 100f} dB", color = VaultColors.TextSecondary, fontSize = 12.sp)
-                    }
+                Spacer(Modifier.height(6.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Slider(
-                        value = band.level.toFloat(),
-                        onValueChange = { onEqualizerBand(band.index, it.toInt().toShort()) },
-                        valueRange = band.minLevel.toFloat()..band.maxLevel.toFloat(),
-                        colors = SliderDefaults.colors(thumbColor = VaultColors.Green, activeTrackColor = VaultColors.Green, inactiveTrackColor = VaultColors.Surface3)
+                        value = dragValue ?: crossfadeSeconds.toFloat(),
+                        onValueChange = { dragValue = it },
+                        onValueChangeFinished = {
+                            dragValue?.toInt()?.let(onCrossfadeChange)
+                            dragValue = null
+                        },
+                        valueRange = 0f..12f,
+                        steps = 11,
+                        colors = SliderDefaults.colors(thumbColor = VaultColors.Accent, activeTrackColor = VaultColors.Accent, inactiveTrackColor = VaultColors.Surface3),
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        if (shownSeconds == 0) "OFF" else "${shownSeconds}s",
+                        color = VaultColors.Accent,
+                        fontSize = 12.sp,
+                        fontFamily = VaultFonts.Mono,
+                        modifier = Modifier.width(48.dp),
+                        textAlign = androidx.compose.ui.text.style.TextAlign.End
                     )
                 }
             }
         }
         item {
-            Text("El ecualizador usa el efecto Equalizer nativo de Android y la sesión de audio de Media3.", color = VaultColors.TextTertiary, fontSize = 12.sp)
+            SettingsSection("ALMACENAMIENTO") {
+                Text("Ruta de descargas", color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                Spacer(Modifier.height(6.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.FolderOpen, null, tint = VaultColors.Accent, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(downloadDirLabel, color = VaultColors.Accent, fontSize = 12.sp, fontFamily = VaultFonts.Mono)
+                }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Los archivos nuevos se guardarán en esta carpeta. Los ya descargados no se mueven.",
+                    color = VaultColors.TextTertiary, fontSize = 11.sp
+                )
+                Spacer(Modifier.height(12.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(
+                        onClick = onPickDownloadFolder,
+                        shape = RoundedCornerShape(50),
+                        colors = ButtonDefaults.buttonColors(containerColor = VaultColors.Accent, contentColor = VaultColors.OnAccent),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+                    ) {
+                        Icon(Icons.Default.FolderOpen, null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Elegir carpeta", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                    }
+                    OutlinedButton(
+                        onClick = onUseInternalFolder,
+                        shape = RoundedCornerShape(50),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = VaultColors.TextPrimary)
+                    ) {
+                        Text("Usar carpeta interna", fontSize = 13.sp)
+                    }
+                }
+            }
         }
+        item {
+            SettingsSection("ECUALIZADOR") {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Ecualizador nativo", color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                        Text(
+                            if (equalizerBands.isEmpty()) "Esperando sesión de audio..." else "Bandas: ${equalizerBands.size}",
+                            color = VaultColors.TextSecondary, fontSize = 12.sp
+                        )
+                    }
+                    Switch(
+                        checked = eqEnabled,
+                        onCheckedChange = { eqEnabled = it; onEqualizerEnabled(it) },
+                        colors = SwitchDefaults.colors(checkedThumbColor = VaultColors.OnAccent, checkedTrackColor = VaultColors.Accent)
+                    )
+                }
+                equalizerBands.forEach { band ->
+                    Column {
+                        Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                            Text("${band.centerFrequencyHz} Hz", color = VaultColors.TextPrimary, fontSize = 12.sp, fontFamily = VaultFonts.Mono)
+                            Text("${band.level / 100f} dB", color = VaultColors.TextSecondary, fontSize = 12.sp, fontFamily = VaultFonts.Mono)
+                        }
+                        Slider(
+                            value = band.level.toFloat(),
+                            onValueChange = { onEqualizerBand(band.index, it.toInt().toShort()) },
+                            valueRange = band.minLevel.toFloat()..band.maxLevel.toFloat(),
+                            colors = SliderDefaults.colors(thumbColor = VaultColors.Accent, activeTrackColor = VaultColors.Accent, inactiveTrackColor = VaultColors.Surface3)
+                        )
+                    }
+                }
+                Text(
+                    "El ecualizador usa el efecto Equalizer nativo de Android y la sesión de audio de Media3.",
+                    color = VaultColors.TextTertiary, fontSize = 11.sp
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsSection(title: String, content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(VaultColors.Surface1)
+            .border(1.dp, VaultColors.Divider, RoundedCornerShape(14.dp))
+            .padding(16.dp)
+    ) {
+        Text(title, color = VaultColors.Accent, fontSize = 10.sp, fontFamily = VaultFonts.Mono, letterSpacing = 2.sp)
+        Spacer(Modifier.height(12.dp))
+        content()
     }
 }
 
@@ -1526,7 +1647,7 @@ private fun QueueBottomSheet(queue: List<Track>, currentIndex: Int, vm: MusicVau
                             Column(Modifier.weight(1f)) {
                                 Text(
                                     track.title,
-                                    color = if (index == currentIndex) VaultColors.Green else VaultColors.TextPrimary,
+                                    color = if (index == currentIndex) VaultColors.Accent else VaultColors.TextPrimary,
                                     maxLines = 1,
                                     fontWeight = FontWeight.Medium
                                 )
@@ -1551,37 +1672,81 @@ private fun formatTime(ms: Long): String {
 
 @Composable
 private fun BottomBar(section: AppSection, onSelect: (AppSection) -> Unit) {
-    val itemColors = NavigationBarItemDefaults.colors(
-        selectedIconColor = VaultColors.TextPrimary,
-        selectedTextColor = VaultColors.TextPrimary,
-        unselectedIconColor = VaultColors.TextTertiary,
-        unselectedTextColor = VaultColors.TextTertiary,
-        indicatorColor = Color.Transparent
+    // Custom "filing drawer" bar: a short brass tab marks the active section,
+    // labels are mono caps like archive drawer tags.
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(VaultColors.SurfaceBase)
+    ) {
+        HorizontalDivider(color = VaultColors.Divider, thickness = 1.dp)
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .height(66.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            BottomBarItem(AppSection.HOME, "INICIO", section, onSelect) {
+                Icon(if (section == AppSection.HOME) Icons.Default.Home else Icons.Outlined.Home, null)
+            }
+            BottomBarItem(AppSection.SEARCH, "BUSCAR", section, onSelect) {
+                Icon(if (section == AppSection.SEARCH) Icons.Default.Search else Icons.Outlined.Search, null)
+            }
+            BottomBarItem(AppSection.LIBRARY, "BIBLIOTECA", section, onSelect) {
+                Icon(if (section == AppSection.LIBRARY) Icons.Default.LibraryMusic else Icons.Outlined.LibraryMusic, null)
+            }
+            BottomBarItem(AppSection.PLAYLISTS, "ÁLBUMES", section, onSelect) {
+                Icon(if (section == AppSection.PLAYLISTS) Icons.Default.QueueMusic else Icons.Outlined.QueueMusic, null)
+            }
+        }
+    }
+}
+
+@Composable
+private fun RowScope.BottomBarItem(
+    item: AppSection,
+    label: String,
+    section: AppSection,
+    onSelect: (AppSection) -> Unit,
+    icon: @Composable () -> Unit
+) {
+    val active = section == item
+    val tabWidth by animateDpAsState(
+        targetValue = if (active) 22.dp else 0.dp,
+        animationSpec = tween(200),
+        label = "navTab"
     )
-    NavigationBar(containerColor = VaultColors.Background, tonalElevation = 0.dp) {
-        NavigationBarItem(
-            section == AppSection.HOME, { onSelect(AppSection.HOME) },
-            icon = { Icon(if (section == AppSection.HOME) Icons.Default.Home else Icons.Outlined.Home, null) },
-            label = { Text("Inicio", fontWeight = if (section == AppSection.HOME) FontWeight.Bold else FontWeight.Normal) },
-            colors = itemColors
+    Column(
+        Modifier
+            .weight(1f)
+            .fillMaxHeight()
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) { onSelect(item) },
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Box(
+            Modifier
+                .width(tabWidth)
+                .height(3.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(VaultColors.Accent)
         )
-        NavigationBarItem(
-            section == AppSection.SEARCH, { onSelect(AppSection.SEARCH) },
-            icon = { Icon(if (section == AppSection.SEARCH) Icons.Default.Search else Icons.Outlined.Search, null) },
-            label = { Text("Buscar", fontWeight = if (section == AppSection.SEARCH) FontWeight.Bold else FontWeight.Normal) },
-            colors = itemColors
-        )
-        NavigationBarItem(
-            section == AppSection.LIBRARY, { onSelect(AppSection.LIBRARY) },
-            icon = { Icon(if (section == AppSection.LIBRARY) Icons.Default.LibraryMusic else Icons.Outlined.LibraryMusic, null) },
-            label = { Text("Biblioteca", fontWeight = if (section == AppSection.LIBRARY) FontWeight.Bold else FontWeight.Normal) },
-            colors = itemColors
-        )
-        NavigationBarItem(
-            section == AppSection.PLAYLISTS, { onSelect(AppSection.PLAYLISTS) },
-            icon = { Icon(if (section == AppSection.PLAYLISTS) Icons.Default.QueueMusic else Icons.Outlined.QueueMusic, null) },
-            label = { Text("Álbumes", fontWeight = if (section == AppSection.PLAYLISTS) FontWeight.Bold else FontWeight.Normal) },
-            colors = itemColors
+        Spacer(Modifier.height(4.dp))
+        CompositionLocalProvider(LocalContentColor provides if (active) VaultColors.Accent else VaultColors.TextTertiary) {
+            icon()
+        }
+        Spacer(Modifier.height(2.dp))
+        Text(
+            label,
+            fontSize = 9.sp,
+            fontFamily = VaultFonts.Mono,
+            fontWeight = if (active) FontWeight.Medium else FontWeight.Normal,
+            color = if (active) VaultColors.TextPrimary else VaultColors.TextTertiary,
+            letterSpacing = 0.8.sp
         )
     }
 }
@@ -1722,7 +1887,7 @@ internal fun TrackRow(
         Column(Modifier.weight(1f)) {
             Text(
                 track.title,
-                color = if (isPlaying) VaultColors.Green else VaultColors.TextPrimary,
+                color = if (isPlaying) VaultColors.Accent else VaultColors.TextPrimary,
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 15.sp,
                 maxLines = 1,
