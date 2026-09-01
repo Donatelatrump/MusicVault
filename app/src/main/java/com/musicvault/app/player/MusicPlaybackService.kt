@@ -113,6 +113,9 @@ class MusicPlaybackService : MediaSessionService() {
         if (remaining > seconds * 1000L) return
         val nextIndex = player.nextMediaItemIndex
         if (nextIndex == androidx.media3.common.C.INDEX_UNSET || nextIndex == crossfadeTargetIndex) return
+        // REPEAT_ONE exposes the current window as its own successor; fading
+        // into it would restart the same track, so skip the crossfade there.
+        if (nextIndex == player.currentMediaItemIndex) return
         crossfadeTargetIndex = nextIndex
         Log.d("MusicPlaybackService", "Starting crossfade job for index $nextIndex with ${remaining}ms remaining")
         crossfadeJob = serviceScope.launch {
@@ -128,6 +131,12 @@ class MusicPlaybackService : MediaSessionService() {
         val next = buildPlayer(requestAudioFocus = false)
         attachPlayerListeners(next)
         val wasShuffled = current.shuffleModeEnabled
+        // Identity of the track being faded out. Every external control (UI,
+        // Bluetooth/AVRCP, notification) keeps acting on the session player,
+        // which is `current` until the hand-off. If its item changes mid-fade
+        // the user has taken over (picked a song from the library, skipped)
+        // and the fade must give way instead of stomping their action.
+        val fadeSourceMediaId = current.currentMediaItem?.mediaId
 
         // Build the remaining sequence starting at the ACTUAL next item by
         // walking the timeline's successor chain. This is identical for
@@ -142,24 +151,20 @@ class MusicPlaybackService : MediaSessionService() {
             result += current.getMediaItemAt(index)
             index = current.currentTimeline.getNextWindowIndex(index, current.repeatMode, current.shuffleModeEnabled)
         }
-        // Include any items not reachable from the successor chain
-        // (defensive fallback for unusual/repeat configurations).
-        if (result.size < current.mediaItemCount) {
-            for (i in 0 until current.mediaItemCount) {
-                if (seen.add(i)) result += current.getMediaItemAt(i)
-            }
-        }
+        // NOTE: no fallback re-add here. Adding items that are NOT part of the
+        // successor chain (e.g. already-played items when repeat is off) makes
+        // the hand-off queue end with the previous song, so the next fade
+        // bounces back to it and playback ping-pongs A→B→A forever while the
+        // smart-next refill never fires (a next item always exists).
 
         next.setMediaItems(result, 0, 0L)
         // Shuffle stays disabled on the hand-off player so Media3 does not
         // re-shuffle the exact sequence built above. The user's shuffle flag is
         // restored on the player right after the swap.
         next.shuffleModeEnabled = false
-        next.repeatMode = if (current.repeatMode == Player.REPEAT_MODE_OFF) {
-            Player.REPEAT_MODE_OFF
-        } else {
-            Player.REPEAT_MODE_ALL
-        }
+        // Copy the repeat mode verbatim: the old mapping turned REPEAT_ONE
+        // into ALL behind the user's back after every crossfade hand-off.
+        next.repeatMode = current.repeatMode
         next.volume = 0f
         next.prepare()
 
@@ -181,36 +186,72 @@ class MusicPlaybackService : MediaSessionService() {
         }
 
         // Abort cleanly when the situation changed while preparing: the user
-        // paused, seeked backwards, or the current item already ended and
-        // auto-advanced (its remaining time would then be a full track). In
-        // those cases a fade would start the same or an unrelated song twice.
+        // paused, seeked backwards, picked a different song, or the current
+        // item already ended and auto-advanced (its remaining time would then
+        // be a full track). In those cases a fade would start the same or an
+        // unrelated song twice.
         val remainingMs = current.duration - current.currentPosition
-        if (!current.isPlaying || remainingMs <= 0L || remainingMs > plannedDurationMs + 1500L) {
-            Log.d("MusicPlaybackService", "Crossfade aborted: playing=${current.isPlaying} remainingMs=$remainingMs plannedMs=$plannedDurationMs")
-            next.release()
-            crossfadeTargetIndex = androidx.media3.common.C.INDEX_UNSET
+        val switchedDuringPrepare = fadeSourceMediaId != null &&
+            current.currentMediaItem?.mediaId != fadeSourceMediaId
+        if (!current.isPlaying || switchedDuringPrepare || remainingMs <= 0L || remainingMs > plannedDurationMs + 1500L) {
+            Log.d("MusicPlaybackService", "Crossfade aborted: playing=${current.isPlaying} switched=$switchedDuringPrepare remainingMs=$remainingMs plannedMs=$plannedDurationMs")
+            abortCrossfade(current, next)
             return
         }
 
-        // End the fade ~300ms before the current track runs out so the ramp
+        // End the fade ~600ms before the current track runs out so the hand-off
         // always completes BEFORE a natural transition can fire on the old
         // player. The remaining time measured above is authoritative because it
         // also accounts for the preparation wait.
-        val fadeMs = (remainingMs - 300L).coerceIn(250L, plannedDurationMs)
+        val handoffMarginMs = 600L
+        val fadeMs = (remainingMs - handoffMarginMs).coerceIn(250L, plannedDurationMs)
+        val fadeStartRemaining = remainingMs
+        val fadeDeadline = System.currentTimeMillis() + fadeStartRemaining + 3000L
 
         Log.d("MusicPlaybackService", "Executing crossfade to next track index: $nextIndex, duration: ${fadeMs}ms")
         next.play()
-        // Finer ramp: 20 fixed steps made long fades (10-12s) audibly chunky.
-        val steps = (fadeMs / 50L).toInt().coerceIn(20, 60)
-        val stepDelay = fadeMs / steps
-        for (i in 1..steps) {
-            val t = i / steps.toFloat()
+        // Every external control (UI, Bluetooth/AVRCP, notification, widget)
+        // targets the session player, which is still `current` during the
+        // whole ramp. Without these guards a pause only stopped the fading-out
+        // player while the fade-in player kept playing (pause looked broken),
+        // a skip produced double audio on both players, and picking a song
+        // from the library landed on `current` only to be destroyed by the
+        // hand-off release below. User interaction always wins over the fade.
+        var lastPosition = current.currentPosition
+        while (currentCoroutineContext().isActive) {
+            val position = current.currentPosition
+            val switched = fadeSourceMediaId != null && current.currentMediaItem?.mediaId != fadeSourceMediaId
+            // A backwards jump beyond normal step advance means the user seeked
+            // (or REPEAT_ONE restarted the track) mid-fade.
+            val seekedBack = position < lastPosition - 700L
+            if (!current.isPlaying || switched || seekedBack) {
+                Log.d("MusicPlaybackService", "Crossfade interrupted by user: playing=${current.isPlaying} switched=$switched seekedBack=$seekedBack")
+                abortCrossfade(current, next)
+                return
+            }
+            lastPosition = position
+            // The playback clock drives the ramp: t is recomputed from the
+            // measured remaining time every step, so delay() overshoot can
+            // never push the fade past the track's natural end (which used to
+            // auto-advance the old player mid-fade and kill the fade-in).
+            val remaining = (current.duration - position).coerceAtLeast(0L)
+            val t = when {
+                remaining <= handoffMarginMs || System.currentTimeMillis() > fadeDeadline -> 1f
+                else -> (1f - (remaining - handoffMarginMs).toFloat() / fadeStartRemaining).coerceIn(0f, 1f)
+            }
+            if (t >= 1f) break
             current.volume = 1f - t
             next.volume = t
-            delay(stepDelay)
+            delay(40L)
         }
         if (currentCoroutineContext().isActive) {
+            current.volume = 0f
             next.volume = 1f
+            // Re-enable focus handling and swap the session BEFORE the old
+            // player is released. Releasing `current` abandons audio focus;
+            // doing that before `next` re-requests it leaves a window with no
+            // focused player that system UI/AVRCP can latch onto as "paused".
+            next.setAudioAttributes(mediaAudioAttributes, true)
             mediaSession?.setPlayer(next)
             AudioSessionBridge.sessionId = next.audioSessionId
             current.stop()
@@ -219,14 +260,21 @@ class MusicPlaybackService : MediaSessionService() {
             // Restore the user's shuffle setting on the session player so the
             // app state and future hand-offs stay consistent.
             next.shuffleModeEnabled = wasShuffled
-            // The hand-off player was built without audio focus so it could not
-            // pause the fading player. Once it owns playback it must handle
-            // focus again (calls, navigation prompts, other apps).
-            next.setAudioAttributes(mediaAudioAttributes, true)
         } else {
             next.stop()
             next.release()
         }
+        crossfadeTargetIndex = androidx.media3.common.C.INDEX_UNSET
+    }
+
+    /** Cancels a fade in progress and hands control back to [current]. */
+    private fun abortCrossfade(current: ExoPlayer, next: ExoPlayer) {
+        next.stop()
+        next.release()
+        // Restore full volume: unpausing must never come back silent, and a
+        // newly picked song must not inherit the ramped-down volume of the
+        // aborted fade.
+        current.volume = 1f
         crossfadeTargetIndex = androidx.media3.common.C.INDEX_UNSET
     }
 

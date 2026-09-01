@@ -21,11 +21,13 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -217,6 +219,12 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
 
     private fun ComposeRowHolder.bind(content: @Composable () -> Unit) {
         (itemView as ComposeView).setContent(content)
+        // The first composition applies AFTER this view has been measured, so
+        // the RecyclerView can keep the empty-composition height. Without a
+        // re-request, the grown carousel paints over the neighboring rows and
+        // the next section title ("Recomendaciones para ti") shows through the
+        // gaps between album cards.
+        itemView.post { itemView.requestLayout() }
     }
 
     @Composable private fun GreetingContent() {
@@ -228,20 +236,24 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
     @Composable private fun RecommendedTracksRow(vm: MusicVaultViewModel, playlists: List<Playlist>, albums: List<Album>, selectedId: String?, playing: Boolean) {
         val tracks = recommendedTracksCache
         if (tracks.isEmpty()) return
-        Text("Para ti", color = VaultColors.TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.height(10.dp))
-        // Lazy row: only visible cards are composed/collected. The old
-        // horizontalScroll Row composed every card even when offscreen, which
-        // made the first Home frame noticeably slow.
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            items(tracks, key = { it.id }) { track ->
-                RecommendationTrackCard(
-                    track = track,
-                    progressFlow = progressFlow(track.id),
-                    onPlay = { vm.playRecommendation(track) },
-                    actions = { TrackActionsMenu(track, playlists, albums, vm, vm.isFavorite(track.id)) },
-                    isPlaying = playing && selectedId == track.id
-                )
+        // clipToBounds: this row's height is measured while its composition is
+        // still empty; a late composition must never paint over the rows below.
+        Column(Modifier.fillMaxWidth().clipToBounds()) {
+            Text("Para ti", color = VaultColors.TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(10.dp))
+            // Lazy row: only visible cards are composed/collected. The old
+            // horizontalScroll Row composed every card even when offscreen, which
+            // made the first Home frame noticeably slow.
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                items(tracks, key = { it.id }) { track ->
+                    RecommendationTrackCard(
+                        track = track,
+                        progressFlow = progressFlow(track.id),
+                        onPlay = { vm.playRecommendation(track) },
+                        actions = { TrackActionsMenu(track, playlists, albums, vm, vm.isFavorite(track.id)) },
+                        isPlaying = playing && selectedId == track.id
+                    )
+                }
             }
         }
     }
@@ -249,16 +261,18 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
     @Composable private fun RecommendedAlbumsRow(vm: MusicVaultViewModel, albumDownloads: Set<String>) {
         val albums = recommendedAlbumsCache
         if (albums.isEmpty()) return
-        Text("Álbumes para ti", color = VaultColors.TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.height(10.dp))
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-            items(albums, key = { it.id }) { album ->
-                AlbumCard(
-                    album = album,
-                    onClick = { vm.openRecommendedAlbum(album) },
-                    onDownloadAll = if (album.id.contains(":release-group:")) ({ vm.downloadRecommendedAlbum(album) }) else null,
-                    isDownloading = album.id in albumDownloads
-                )
+        Column(Modifier.fillMaxWidth().clipToBounds()) {
+            Text("Álbumes para ti", color = VaultColors.TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(10.dp))
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                items(albums, key = { it.id }) { album ->
+                    AlbumCard(
+                        album = album,
+                        onClick = { vm.openRecommendedAlbum(album) },
+                        onDownloadAll = if (album.id.contains(":release-group:")) ({ vm.downloadRecommendedAlbum(album) }) else null,
+                        isDownloading = album.id in albumDownloads
+                    )
+                }
             }
         }
     }

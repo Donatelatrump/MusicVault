@@ -14,6 +14,8 @@ import com.musicvault.app.catalog.CoverImageCache
 import com.musicvault.app.catalog.MetadataCatalogProvider
 import com.musicvault.app.data.*
 import com.musicvault.app.library.LocalAudioScanner
+import com.musicvault.app.lyrics.LyricLine
+import com.musicvault.app.lyrics.LyricsProvider
 import com.musicvault.app.player.NativeEqualizer
 import com.musicvault.app.player.PlayerController
 import com.musicvault.app.providers.ProviderResult
@@ -33,6 +35,15 @@ import kotlinx.coroutines.flow.first
 import kotlin.coroutines.resume
 
 enum class AppSection(val label: String) { HOME("Inicio"), SEARCH("Buscar"), LIBRARY("Biblioteca"), PLAYLISTS("Álbumes") }
+
+@Immutable
+data class LyricsUiState(
+    val trackId: String? = null,
+    val loading: Boolean = false,
+    val plain: String? = null,
+    val synced: List<LyricLine> = emptyList(),
+    val notFound: Boolean = false
+)
 
 @Immutable
 data class MusicUiState(
@@ -168,12 +179,49 @@ class MusicVaultViewModel(
     fun downloadProgressFor(id: String): Flow<Int?> =
         downloadProgress.map { it[id] }.distinctUntilChanged()
     val shuffle: StateFlow<Boolean> = player.shuffle
+    val repeatMode: StateFlow<Int> = player.repeatMode
     val crossfadeSeconds: StateFlow<Int> = player.crossfadeSeconds
     val queue: StateFlow<List<Track>> = player.queue
     val queueIndex: StateFlow<Int> = player.queueIndex
     val audioSessionId: StateFlow<Int> = player.audioSessionId
     private val _equalizerBands = MutableStateFlow<List<NativeEqualizer.Band>>(emptyList())
     val equalizerBands: StateFlow<List<NativeEqualizer.Band>> = _equalizerBands.asStateFlow()
+
+    // Lyrics for the full player. One request in flight, results cached per
+    // track so re-opening the player (or replaying a track) never refetches.
+    private val _lyrics = MutableStateFlow(LyricsUiState())
+    val lyrics: StateFlow<LyricsUiState> = _lyrics.asStateFlow()
+    private var lyricsJob: Job? = null
+    private val lyricsCache = LinkedHashMap<String, LyricsUiState>()
+
+    fun loadLyrics(track: Track) {
+        if (_lyrics.value.trackId == track.id && (_lyrics.value.loading || _lyrics.value.notFound ||
+                _lyrics.value.plain != null || _lyrics.value.synced.isNotEmpty())
+        ) return
+        lyricsCache[track.id]?.let { cached ->
+            _lyrics.value = cached
+            return
+        }
+        lyricsJob?.cancel()
+        _lyrics.value = LyricsUiState(trackId = track.id, loading = true)
+        lyricsJob = viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                LyricsProvider.fetch(
+                    artist = track.artistName,
+                    title = track.title,
+                    album = track.albumTitle.takeIf { it.isNotBlank() && !it.equals("Álbum desconocido", ignoreCase = true) },
+                    durationMs = track.durationMs
+                )
+            }.getOrNull()
+            val state = when {
+                result == null || result.isEmpty -> LyricsUiState(trackId = track.id, notFound = true)
+                else -> LyricsUiState(trackId = track.id, plain = result.plain, synced = result.synced)
+            }
+            if (lyricsCache.size >= 40) lyricsCache.clear()
+            lyricsCache[track.id] = state
+            _lyrics.value = state
+        }
+    }
 
     // Related catalog tracks fetched for the artists the user has downloaded.
     // Refreshed once per downloaded-artist profile signature, not per screen visit.
@@ -588,6 +636,8 @@ class MusicVaultViewModel(
             _selectedTrack.value?.let { viewModelScope.launch { enqueueSmartNext(it) } }
         }
     }
+
+    fun cycleRepeatMode() = player.cycleRepeatMode()
 
     fun playPlaylist(playlist: Playlist, shuffle: Boolean = _shuffle.value) {
         viewModelScope.launch(Dispatchers.IO) {

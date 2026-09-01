@@ -6,6 +6,7 @@ import android.content.SharedPreferences
 import android.net.Uri
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
@@ -48,6 +49,8 @@ class PlayerController(context: Context) {
     val progress: StateFlow<PlaybackProgress> = _progress
     private val _shuffle = MutableStateFlow(false)
     val shuffle: StateFlow<Boolean> = _shuffle
+    private val _repeatMode = MutableStateFlow(Player.REPEAT_MODE_OFF)
+    val repeatMode: StateFlow<Int> = _repeatMode
     private val _crossfadeSeconds = MutableStateFlow(settings.getInt("crossfade_seconds", 5).coerceIn(0, 12))
     val crossfadeSeconds: StateFlow<Int> = _crossfadeSeconds
     private val _queue = MutableStateFlow<List<Track>>(emptyList())
@@ -60,7 +63,7 @@ class PlayerController(context: Context) {
     val audioSessionId: StateFlow<Int> = _audioSessionId
     // Invoked on the main thread when the current item has no successor and the
     // app should append one (continuous playback). Without a next item the
-    // crossfade can never trigger. Not called for seeks or repeat transitions.
+    // crossfade can never trigger.
     var onNextItemNeeded: ((finishedTrackId: String?) -> Unit)? = null
     private var ticker: Job? = null
     private var released = false
@@ -74,8 +77,19 @@ class PlayerController(context: Context) {
                     override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                         publishQueue(controller)
                         publishProgress(controller)
+                        // MEDIA_ITEM_TRANSITION_REASON_REPEAT reaches this listener
+                        // after a crossfade hand-off: MediaSession.setPlayer() re-bundles
+                        // the player info with the default transition reason whenever the
+                        // current item changed. ExoPlayer itself never emits REPEAT (a
+                        // repeat-one restart keeps the same item), so accepting it here is
+                        // safe and keeps the smart-next refill alive after the swap.
+                        // SEEK is the notification/hardware "next" button: skipping onto
+                        // the last item must refill too, otherwise the queue dead-ends
+                        // and the session hides the next button from the notification.
                         val refillReason = reason == androidx.media3.common.Player.MEDIA_ITEM_TRANSITION_REASON_AUTO ||
-                            reason == androidx.media3.common.Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED
+                            reason == androidx.media3.common.Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED ||
+                            reason == androidx.media3.common.Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT ||
+                            reason == androidx.media3.common.Player.MEDIA_ITEM_TRANSITION_REASON_SEEK
                         if (refillReason && !controller.hasNextMediaItem()) {
                             onNextItemNeeded?.invoke(mediaItem?.mediaId)
                         }
@@ -91,9 +105,11 @@ class PlayerController(context: Context) {
                         publishProgress(controller)
                         if (playbackState == androidx.media3.common.Player.STATE_ENDED) _ended.value = System.nanoTime()
                     }
+                    override fun onRepeatModeChanged(repeatMode: Int) { _repeatMode.value = repeatMode }
                 })
                 _isPlaying.value = controller.isPlaying
                 _shuffle.value = controller.shuffleModeEnabled
+                _repeatMode.value = controller.repeatMode
                 _audioSessionId.value = AudioSessionBridge.sessionId
                 publishQueue(controller)
                 startTicker(controller)
@@ -249,6 +265,17 @@ class PlayerController(context: Context) {
     fun setShuffle(enabled: Boolean) {
         _shuffle.value = enabled
         withController { controller -> controller.shuffleModeEnabled = enabled }
+    }
+
+    /** Cycles repeat: off → repeat this track once → repeat forever → off. */
+    fun cycleRepeatMode() {
+        val next = when (_repeatMode.value) {
+            Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ONE
+            Player.REPEAT_MODE_ONE -> Player.REPEAT_MODE_ALL
+            else -> Player.REPEAT_MODE_OFF
+        }
+        _repeatMode.value = next
+        withController { controller -> controller.repeatMode = next }
     }
 
     fun setCrossfadeSeconds(seconds: Int) {

@@ -37,6 +37,7 @@ object VaultColors {
     val OnAccent = Color(0xFF191207)    // tinta sobre latÃ³n
     val Error = Color(0xFFD96A55)
     val Favorite = Color(0xFFC96A5E)    // cobre rosado
+    val RepeatAll = Color(0xFF7DC4E8)   // azul claro · repetir siempre
 
     // Solid accents used for catalog spines/tags (replaces the old
     // color-to-black shelf gradients).

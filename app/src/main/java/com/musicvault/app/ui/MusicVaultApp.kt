@@ -20,7 +20,14 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.awaitTouchSlopOrCancellation
 import androidx.compose.foundation.gestures.drag
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.layout
+import androidx.media3.common.Player
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -28,6 +35,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -66,6 +74,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.zIndex
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.Color
@@ -74,6 +87,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import android.widget.LinearLayout
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -91,7 +105,13 @@ import com.musicvault.app.ui.search.RemoteResultsAdapter
 import com.musicvault.app.ui.search.MoreAction
 import com.musicvault.app.ui.theme.VaultColors
 import com.musicvault.app.ui.theme.VaultFonts
+import com.musicvault.app.lyrics.LyricLine
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.sin
 
 /** Deterministic spine accent for a key. Tone-on-tone pair for subtle placeholder fills. */
 private fun gradientFor(key: String): Pair<Color, Color> {
@@ -1164,20 +1184,12 @@ private fun MiniPlayer(
         label = "miniPlayerProgress"
     )
     val interactionSource = remember { MutableInteractionSource() }
-    val pressed by interactionSource.collectIsPressedAsState()
-    val scale by animateFloatAsState(
-        if (pressed) 0.985f else 1f,
-        spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
-        label = "miniPlayerScale"
-    )
+    // Full-bleed bar: spans the screen edge to edge above the bottom navigation,
+    // no floating margins or rounded island.
     Column(
         Modifier
-            .padding(horizontal = 12.dp, vertical = 6.dp)
             .fillMaxWidth()
-            .graphicsLayer { scaleX = scale; scaleY = scale }
-            .clip(RoundedCornerShape(12.dp))
             .background(VaultColors.Surface1)
-            .border(1.dp, VaultColors.Divider, RoundedCornerShape(12.dp))
             .clickable(interactionSource = interactionSource, indication = null, onClick = onOpen)
     ) {
         LinearProgressIndicator(
@@ -1187,7 +1199,7 @@ private fun MiniPlayer(
             trackColor = Color.Transparent
         )
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+            Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             AsyncImage(track.coverUri, track.title, Modifier.size(44.dp).clip(RoundedCornerShape(6.dp)).border(1.dp, VaultColors.Divider, RoundedCornerShape(6.dp)))
@@ -1219,23 +1231,57 @@ private fun MiniPlayer(
                 )
             }
         }
+        Box(Modifier.fillMaxWidth().height(1.dp).background(VaultColors.Divider))
     }
+}
+
+// Constant lead that compensates the audio output latency: the player's
+// position advances when samples reach the audio sink, ~100ms before the
+// user actually hears them, so synced lyrics must run slightly early.
+private const val LYRICS_LEAD_MS = 100L
+
+/**
+ * Extrapolates the controller's position snapshot with the frame clock so the
+ * synced lyrics follow playback every frame instead of every 500ms ticker
+ * update. Returned as [State] on purpose: readers resolve it inside derived
+ * state (or draw), never during composition, so nothing recomposes at 60fps.
+ */
+@Composable
+private fun rememberLyricPositionState(positionMs: Long, isPlaying: Boolean): State<Long> {
+    val state = remember { mutableLongStateOf(positionMs - LYRICS_LEAD_MS) }
+    var basePos by remember { mutableLongStateOf(positionMs) }
+    var baseNanos by remember { mutableLongStateOf(0L) }
+    if (positionMs != basePos) {
+        basePos = positionMs
+        baseNanos = System.nanoTime()
+        state.longValue = positionMs - LYRICS_LEAD_MS
+    }
+    LaunchedEffect(isPlaying) {
+        if (isPlaying) {
+            baseNanos = System.nanoTime()
+            while (true) {
+                withFrameNanos { now ->
+                    state.longValue = basePos + (now - baseNanos) / 1_000_000L - LYRICS_LEAD_MS
+                }
+            }
+        }
+    }
+    return state
 }
 
 @Composable
 private fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean, queue: List<Track>, queueIndex: Int, favoriteIds: Set<String>, vm: MusicVaultViewModel) {
     val progress by vm.playbackProgress.collectAsState()
-    val scale by animateFloatAsState(
-        if (isPlaying) 1f else 0.94f,
-        spring(dampingRatio = Spring.DampingRatioLowBouncy, stiffness = Spring.StiffnessLow),
-        label = "coverScale"
-    )
+    val lyrics by vm.lyrics.collectAsState()
+    LaunchedEffect(track.id) { vm.loadLyrics(track) }
     val duration = progress.durationMs.coerceAtLeast(track.durationMs).coerceAtLeast(1L)
     val position = progress.positionMs.coerceIn(0L, duration)
     var sliderPosition by remember(track.id) { mutableFloatStateOf(position.toFloat()) }
     var sliderDragging by remember(track.id) { mutableStateOf(false) }
     var showQueue by remember { mutableStateOf(false) }
     LaunchedEffect(position, track.id) { if (!sliderDragging) sliderPosition = position.toFloat() }
+    val lyricPosition = rememberLyricPositionState(position, isPlaying)
+    val repeatMode by vm.repeatMode.collectAsState()
     val favorite = track.id in favoriteIds
     // Deterministic archive number for the track, used as the catalog tag.
     val catalogNumber = remember(track.id) { "VAULT-%04d".format(abs(track.id.hashCode()) % 10000) }
@@ -1249,46 +1295,92 @@ private fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean,
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = vm::closeFullPlayer) { Icon(Icons.Default.KeyboardArrowDown, "Cerrar", tint = VaultColors.TextPrimary, modifier = Modifier.size(30.dp)) }
-            Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
-                    "VAULT · FICHA DE AUDIO",
-                    color = VaultColors.TextTertiary,
-                    fontSize = 10.sp,
-                    fontFamily = VaultFonts.Mono,
-                    letterSpacing = 2.sp
-                )
-            }
-            Spacer(Modifier.size(48.dp))
         }
-        Spacer(Modifier.height(6.dp))
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .weight(1f),
-            contentAlignment = Alignment.TopCenter
-        ) {
-            // Hairline "mat" frame around the artwork: the archive-card signature
-            // replaces the old color-to-black glow.
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(top = 4.dp)
-                    .scale(scale)
-                    .shadow(elevation = 20.dp, shape = RoundedCornerShape(16.dp), ambientColor = Color.Black, spotColor = Color.Black)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(VaultColors.Surface1)
-                    .border(1.dp, VaultColors.Divider, RoundedCornerShape(14.dp))
-                    .padding(8.dp)
-            ) {
-                AsyncImage(
-                    track.coverUri, track.title,
+        // Flexible stage area: the lyrics sheet peeks at the bottom; dragging it
+        // up expands the lyrics (controls rise, the vinyl fades out) and dragging
+        // it down brings the vinyl back. Both transitions are one continuous
+        // gesture because the sheet and the stage share the available height.
+        val density = LocalDensity.current
+        val peekHeight = 92.dp
+        val peekPx = with(density) { peekHeight.toPx() }
+        var areaPx by remember { mutableStateOf(0f) }
+        var fixedPx by remember { mutableStateOf(0f) }
+        val scope = rememberCoroutineScope()
+        // Plain snapshot state as the single source of truth: drag deltas write
+        // it synchronously (zero dispatch latency between finger and pixels),
+        // while the settle animation runs on the frame clock and writes it per
+        // frame. The previous Animatable + snapTo-per-event design queued every
+        // drag delta through a coroutine dispatch, adding a full frame of lag.
+        var reveal by remember { mutableFloatStateOf(0f) }
+        var settleJob by remember { mutableStateOf<Job?>(null) }
+        fun revealLyrics(target: Float, initialVelocity: Float = 0f) {
+            settleJob?.cancel()
+            settleJob = scope.launch {
+                animate(
+                    initialValue = reveal,
+                    targetValue = target,
+                    initialVelocity = initialVelocity,
+                    animationSpec = spring(stiffness = Spring.StiffnessMedium, visibilityThreshold = 0.001f)
+                ) { value, _ -> reveal = value }
+            }
+        }
+        val revealDelta = rememberDraggableState { delta ->
+            settleJob?.cancel()
+            val range = (areaPx - fixedPx - peekPx).coerceAtLeast(1f)
+            reveal = (reveal - delta / range).coerceIn(0f, 1f)
+        }
+        // Boolean projections: recomposition only happens when these flip, not
+        // on every frame of the drag (the raw value stays layout/draw-only).
+        val showVinyl by remember { derivedStateOf { reveal < 0.995f } }
+        val panelOpen by remember { derivedStateOf { reveal > 0.95f } }
+        val expanded by remember { derivedStateOf { reveal > 0.5f } }
+        val stageMaxPx = (areaPx - fixedPx - peekPx).coerceAtLeast(0f)
+
+        Box(Modifier.fillMaxWidth().weight(1f)) {
+            Column(Modifier.fillMaxSize().onSizeChanged { areaPx = it.height.toFloat() }) {
+                // Vinyl stage: shrinks while the sheet rises; the disc fades and
+                // slides down instead of being squashed. Height and the
+                // alpha/scale are resolved from the live reveal value inside the
+                // layout/draw phases, so the drag never recomposes this tree.
+                Box(
                     Modifier
                         .fillMaxWidth()
-                        .aspectRatio(1f)
-                        .clip(RoundedCornerShape(8.dp))
-                )
-            }
-        }
+                        .layout { measurable, constraints ->
+                            val h = (stageMaxPx * (1f - reveal)).roundToInt()
+                                .coerceIn(0, constraints.maxHeight)
+                            val placeable = measurable.measure(constraints.copy(minHeight = h, maxHeight = h))
+                            layout(placeable.width, h) { placeable.place(0, 0) }
+                        }
+                        .clipToBounds(),
+                    contentAlignment = Alignment.TopCenter
+                ) {
+                    if (showVinyl) {
+                        Box(
+                            Modifier
+                                .fillMaxSize()
+                                .graphicsLayer {
+                                    val r = reveal
+                                    alpha = (1f - r * 1.6f).coerceIn(0f, 1f)
+                                    val s = 1f - 0.12f * r
+                                    scaleX = s
+                                    scaleY = s
+                                }
+                        ) {
+                            VinylDisc(
+                                coverUri = track.coverUri,
+                                title = track.title,
+                                isPlaying = isPlaying,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 8.dp)
+                                    .aspectRatio(1f)
+                            )
+                        }
+                    }
+                }
+                // Fixed block: metadata, seek and transport. It rides up as the
+                // sheet below grows.
+                Column(Modifier.fillMaxWidth().onSizeChanged { fixedPx = it.height.toFloat() }) {
         Spacer(Modifier.height(18.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -1449,6 +1541,28 @@ private fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean,
                     modifier = Modifier.size(25.dp)
                 )
             }
+
+            // Repeat sits right next to Shuffle and cycles three states:
+            // off (white) → repeat once (brass) → repeat forever (light blue).
+            IconButton(
+                onClick = vm::cycleRepeatMode,
+                modifier = Modifier.align(Alignment.Center).offset(x = 162.dp).size(54.dp)
+            ) {
+                Icon(
+                    if (repeatMode == Player.REPEAT_MODE_ONE) Icons.Default.RepeatOne else Icons.Default.Repeat,
+                    when (repeatMode) {
+                        Player.REPEAT_MODE_ONE -> "Repetir una vez"
+                        Player.REPEAT_MODE_ALL -> "Repetir siempre"
+                        else -> "Repetir"
+                    },
+                    tint = when (repeatMode) {
+                        Player.REPEAT_MODE_ONE -> VaultColors.Accent
+                        Player.REPEAT_MODE_ALL -> VaultColors.RepeatAll
+                        else -> VaultColors.TextPrimary
+                    },
+                    modifier = Modifier.size(25.dp)
+                )
+            }
         }
         // The queue button is independent from the centered transport controls.
         // It stays at the lower-right edge and respects the navigation gesture area.
@@ -1469,10 +1583,344 @@ private fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean,
                 )
             }
         }
+        }
+
+        // Lyrics sheet: shows a peek of the lyrics at the bottom. Drag it up to
+        // read the full lyrics (the vinyl hides and the controls rise); drag it
+        // down to bring the vinyl back. Tap the handle toggles too.
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .layout { measurable, constraints ->
+                    val h = (peekPx + stageMaxPx * reveal).roundToInt()
+                        .coerceIn(0, constraints.maxHeight)
+                    val placeable = measurable.measure(constraints.copy(minHeight = h, maxHeight = h))
+                    layout(placeable.width, h) { placeable.place(0, 0) }
+                }
+                .background(VaultColors.Surface1)
+                .draggable(
+                    orientation = Orientation.Vertical,
+                    state = revealDelta,
+                    onDragStopped = { velocity ->
+                        val range = (areaPx - fixedPx - peekPx).coerceAtLeast(1f)
+                        val target = when {
+                            velocity < -900f -> 1f
+                            velocity > 900f -> 0f
+                            else -> if (reveal > 0.45f) 1f else 0f
+                        }
+                        revealLyrics(target, -velocity / range)
+                    }
+                )
+        ) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .pointerInput(Unit) {
+                        detectTapGestures { revealLyrics(if (reveal > 0.5f) 0f else 1f) }
+                    }
+                    .padding(horizontal = 16.dp, vertical = 9.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Letra", color = VaultColors.TextTertiary, fontSize = 11.sp, fontFamily = VaultFonts.Mono)
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .padding(horizontal = 10.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Box(
+                        Modifier
+                            .size(width = 40.dp, height = 4.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(VaultColors.Divider)
+                    )
+                }
+                Icon(
+                    if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.KeyboardArrowUp,
+                    if (expanded) "Ocultar letra" else "Ver letra",
+                    tint = VaultColors.TextSecondary,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+            Box(Modifier.fillMaxWidth().weight(1f)) {
+                if (panelOpen) {
+                    LyricsPanel(
+                        lyrics = lyrics,
+                        positionState = lyricPosition,
+                        onRetry = { vm.loadLyrics(track) },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    // Collapsed peek: the current synced line (or the opening of
+                    // the plain lyrics) invites the drag up. The line lookup runs
+                    // in derived state, so it recomposes only when the line changes.
+                    val synced = lyrics.synced
+                    val plain = lyrics.plain
+                    val peekLine by remember(synced, plain) {
+                        derivedStateOf {
+                            if (synced.isNotEmpty()) {
+                                synced.indexOfLast { it.timeMs <= lyricPosition.value }
+                                    .takeIf { it >= 0 }
+                                    ?.let { synced[it].text }
+                            } else null
+                        }
+                    }
+                    Column(
+                        Modifier.fillMaxSize().padding(horizontal = 20.dp),
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Text(
+                            peekLine
+                                ?: plain?.lineSequence()?.firstOrNull { it.isNotBlank() }
+                                ?: "Letra no disponible",
+                            color = VaultColors.TextSecondary,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        }
+        }
+        }
     }
 
     if (showQueue) {
         QueueBottomSheet(queue, queueIndex, vm) { showQueue = false }
+    }
+}
+
+/**
+ * Vinyl turntable: the record spins at 33⅓ RPM (one turn every 18s) while the
+ * song plays and freezes in place on pause. The track/album artwork is the
+ * record label; the tonearm swings onto the disc when playback starts.
+ */
+@Composable
+private fun VinylDisc(coverUri: String?, title: String, isPlaying: Boolean, modifier: Modifier = Modifier) {
+    // Angle accumulates per frame so a pause freezes the record mid-spin
+    // instead of snapping back to zero.
+    var angle by remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(isPlaying) {
+        if (!isPlaying) return@LaunchedEffect
+        var lastFrame = withFrameNanos { it }
+        while (true) {
+            withFrameNanos { now ->
+                angle = (angle + (now - lastFrame) / 1_000_000f * (360f / 18_000f)) % 360f
+                lastFrame = now
+            }
+        }
+    }
+    // Stylus tip position (fractions of the canvas). Playing lands the tip ON
+    // the grooves pointing toward the record center; paused parks it outside
+    // the disc, on the rest. Animating the tip (not a pivot angle) keeps the
+    // arm visibly over the record at all times.
+    val armTipX by animateFloatAsState(
+        if (isPlaying) 0.74f else 0.97f,
+        tween(durationMillis = 700, easing = FastOutSlowInEasing),
+        label = "armTipX"
+    )
+    val armTipY by animateFloatAsState(
+        if (isPlaying) 0.30f else 0.68f,
+        tween(durationMillis = 700, easing = FastOutSlowInEasing),
+        label = "armTipY"
+    )
+
+    Box(modifier, contentAlignment = Alignment.Center) {
+        // Record: black vinyl with concentric grooves (rotates with the disc).
+        Canvas(
+            Modifier
+                .fillMaxSize()
+                .shadow(elevation = 18.dp, shape = CircleShape, ambientColor = Color.Black, spotColor = Color.Black)
+                .graphicsLayer { rotationZ = angle }
+        ) {
+            val radius = size.minDimension / 2f
+            val labelRadius = radius * 0.31f
+            drawCircle(Color(0xFF131313), radius = radius)
+            drawCircle(Color(0xFF1E1E1E), radius = radius, style = Stroke(width = 1.dp.toPx()))
+            // Grooves: alternating faint rings between the label and the rim.
+            var grooveRadius = labelRadius + 3.dp.toPx()
+            var step = 0
+            while (grooveRadius < radius - 3.dp.toPx()) {
+                val alpha = if (step % 2 == 0) 0.055f else 0.022f
+                drawCircle(Color.White.copy(alpha = alpha), radius = grooveRadius, style = Stroke(width = 0.8.dp.toPx()))
+                grooveRadius += 2.6.dp.toPx()
+                step++
+            }
+        }
+        // Record label: the cover art, riding on the same rotation.
+        AsyncImage(
+            model = ImageRequest.Builder(LocalContext.current)
+                .data(coverUri)
+                .memoryCacheKey("vinyl:$coverUri")
+                .crossfade(true)
+                .build(),
+            contentDescription = title,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .fillMaxSize(0.62f)
+                .clip(CircleShape)
+                .border(1.dp, VaultColors.Divider, CircleShape)
+                .graphicsLayer { rotationZ = angle }
+        )
+        // Fixed light sheen (the light source does not rotate with the disc).
+        Canvas(Modifier.fillMaxSize()) {
+            val radius = size.minDimension / 2f
+            val stroke = Stroke(width = radius * 0.34f, cap = StrokeCap.Round)
+            drawArc(
+                color = Color.White.copy(alpha = 0.045f),
+                startAngle = 195f, sweepAngle = 55f, useCenter = false,
+                topLeft = Offset(radius * 0.16f, radius * 0.16f),
+                size = androidx.compose.ui.geometry.Size(size.width - radius * 0.32f, size.height - radius * 0.32f),
+                style = stroke
+            )
+            drawArc(
+                color = Color.White.copy(alpha = 0.035f),
+                startAngle = 15f, sweepAngle = 55f, useCenter = false,
+                topLeft = Offset(radius * 0.16f, radius * 0.16f),
+                size = androidx.compose.ui.geometry.Size(size.width - radius * 0.32f, size.height - radius * 0.32f),
+                style = stroke
+            )
+        }
+        // Spindle hole.
+        Box(
+            Modifier
+                .size(10.dp)
+                .clip(CircleShape)
+                .background(VaultColors.Background)
+                .border(1.dp, VaultColors.Divider, CircleShape)
+        )
+        // Tonearm: pivot at the top-right corner; the tip rests on the grooves
+        // pointing toward the record center while playing and parks outside
+        // the disc when paused.
+        Canvas(Modifier.fillMaxSize()) {
+            val pivot = Offset(size.width * 0.88f, size.height * 0.08f)
+            val tip = Offset(size.width * armTipX, size.height * armTipY)
+            val armVector = tip - pivot
+            // Counterweight stub behind the pivot, opposite the arm.
+            drawLine(
+                color = Color(0xFF8F897D),
+                start = pivot,
+                end = pivot - armVector * 0.16f,
+                strokeWidth = 5.dp.toPx(),
+                cap = StrokeCap.Round
+            )
+            drawLine(
+                color = Color(0xFFB8B2A6),
+                start = pivot,
+                end = tip,
+                strokeWidth = 3.5.dp.toPx(),
+                cap = StrokeCap.Round
+            )
+            drawCircle(Color(0xFF8F897D), radius = 7.dp.toPx(), center = pivot)
+            drawCircle(Color(0xFF3A362F), radius = 3.dp.toPx(), center = pivot)
+            drawCircle(VaultColors.Accent, radius = 5.dp.toPx(), center = tip)
+        }
+    }
+}
+
+/** Lyrics stage: synced lines with the current one highlighted, or plain text. */
+@Composable
+private fun LyricsPanel(
+    lyrics: LyricsUiState,
+    positionState: State<Long>,
+    onRetry: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    when {
+        lyrics.loading -> Column(
+            modifier.fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            CircularProgressIndicator(modifier = Modifier.size(26.dp), strokeWidth = 2.5.dp, color = VaultColors.Accent)
+            Spacer(Modifier.height(10.dp))
+            Text("Buscando letra…", color = VaultColors.TextTertiary, fontSize = 12.sp, fontFamily = VaultFonts.Mono)
+        }
+        lyrics.notFound -> Column(
+            modifier.fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text("Letra no disponible", color = VaultColors.TextSecondary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(8.dp))
+            TextButton(onClick = onRetry) {
+                Text("Reintentar", color = VaultColors.Accent, fontSize = 12.sp, fontFamily = VaultFonts.Mono)
+            }
+        }
+        lyrics.synced.isNotEmpty() -> SyncedLyricsList(lyrics.synced, positionState, modifier)
+        else -> Column(
+            modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+        ) {
+            Text(
+                lyrics.plain.orEmpty(),
+                color = VaultColors.TextSecondary,
+                fontSize = 15.sp,
+                lineHeight = 24.sp,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun SyncedLyricsList(lines: List<LyricLine>, positionState: State<Long>, modifier: Modifier = Modifier) {
+    val listState = rememberLazyListState()
+    // The lookup runs every frame against the live position, but derived state
+    // only invalidates the UI when the highlighted line actually changes.
+    val currentLine by remember(lines) {
+        derivedStateOf { lines.indexOfLast { it.timeMs <= positionState.value }.takeIf { it >= 0 } }
+    }
+    // Manual scrolling holds the auto-scroll for a few seconds so the user can
+    // browse freely before the highlight resumes steering.
+    var holdAutoScroll by remember { mutableStateOf(false) }
+    LaunchedEffect(currentLine) {
+        val target = currentLine
+        if (target != null && !holdAutoScroll) {
+            listState.animateScrollToItem(index = (target - 3).coerceAtLeast(0))
+        }
+    }
+    LaunchedEffect(holdAutoScroll) {
+        if (holdAutoScroll) {
+            delay(4_000L)
+            holdAutoScroll = false
+        }
+    }
+    LazyColumn(
+        state = listState,
+        modifier = modifier
+            .fillMaxSize()
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    holdAutoScroll = true
+                }
+            },
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+        contentPadding = PaddingValues(vertical = 40.dp)
+    ) {
+        itemsIndexed(lines) { index, line ->
+            val activeIndex = currentLine
+            val active = index == activeIndex
+            Text(
+                line.text,
+                color = when {
+                    active -> VaultColors.Accent
+                    activeIndex != null && index < activeIndex -> VaultColors.TextPrimary.copy(alpha = 0.55f)
+                    else -> VaultColors.TextSecondary
+                },
+                fontSize = if (active) 17.sp else 14.sp,
+                fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+                lineHeight = if (active) 24.sp else 20.sp,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp)
+            )
+        }
     }
 }
 
