@@ -55,7 +55,7 @@ object Providers {
     private val activeProcesses = ConcurrentHashMap<String, String>()
     // Three concurrent yt-dlp/FFmpeg jobs improve album download throughput
     // while keeping CPU/RAM usage reasonable on typical Android devices.
-    private val downloadSlots = Semaphore(3)
+    private val downloadSlots = Semaphore(Runtime.getRuntime().availableProcessors().coerceIn(1, 3))
     private val updateLock = Any()
     private val updateStarted = AtomicBoolean(false)
     private val providerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)

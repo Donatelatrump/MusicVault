@@ -2,7 +2,15 @@
     <style name="Theme.MusicVault" parent="android:style/Theme.Material.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:windowLightStatusBar">false</item>
-        <item name="android:statusBarColor">#090B0F</item>
-        <item name="android:navigationBarColor">#090B0F</item>
+        <item name="android:statusBarColor">#121110</item>
+        <item name="android:navigationBarColor">#121110</item>
+    </style>
+
+    <!-- System splash (androidx.core.splashscreen): instant branding while the
+         process starts; hands off to Theme.MusicVault when ready. -->
+    <style name="Theme.MusicVault.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">#121110</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher_round</item>
+        <item name="postSplashScreenTheme">@style/Theme.MusicVault</item>
     </style>
 </resources>

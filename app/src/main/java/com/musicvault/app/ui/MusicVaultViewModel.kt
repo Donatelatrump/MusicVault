@@ -186,6 +186,11 @@ class MusicVaultViewModel(
     val audioSessionId: StateFlow<Int> = player.audioSessionId
     private val _equalizerBands = MutableStateFlow<List<NativeEqualizer.Band>>(emptyList())
     val equalizerBands: StateFlow<List<NativeEqualizer.Band>> = _equalizerBands.asStateFlow()
+    // Persisted opt-in: the EQ is OFF unless the user enables it, so attaching
+    // the effect (app start, activity recreation) can never enable an audio
+    // effect on a live session unprompted.
+    private val _eqEnabled = MutableStateFlow(preferences.getBoolean("eq_enabled", false))
+    val eqEnabled: StateFlow<Boolean> = _eqEnabled.asStateFlow()
 
     // Lyrics for the full player. One request in flight, results cached per
     // track so re-opening the player (or replaying a track) never refetches.
@@ -358,6 +363,10 @@ class MusicVaultViewModel(
                 }
             }
         }
+        // Keep the home-screen widget in sync with playback state/track changes.
+        player.onPlaybackUiChanged = {
+            com.musicvault.app.widget.MusicWidgetProvider.push(appContext)
+        }
         // Home discovery: fetch more catalog tracks for the top downloaded
         // artists. Runs once per profile signature (artist list), with a small
         // delay so it never competes with the first paint; failures are silent.
@@ -391,7 +400,9 @@ class MusicVaultViewModel(
         historyJob = viewModelScope.launch {
             launch {
                 player.audioSessionId.collect { sessionId ->
-                    if (sessionId > 0 && equalizer.attach(sessionId)) {
+                    // The effect is created disabled unless the user opted in;
+                    // never force-enable it on a live session (see NativeEqualizer).
+                    if (sessionId > 0 && equalizer.attach(sessionId, _eqEnabled.value)) {
                         _equalizerBands.value = equalizer.bands()
                     }
                 }
@@ -438,10 +449,11 @@ class MusicVaultViewModel(
         val generation = searchGeneration
 
         // Every keystroke cancels and restarts the full debounce window.
-        // This is intentionally 1.5s: typing must never be interrupted by an
-        // intermediate network request. Keep this explicit so UI changes cannot
-        // accidentally shorten the search debounce.
-        val searchDebounceMs = 1_500L
+        // 600ms balances perceived speed (results land right after the last
+        // keystroke) with request volume: it is still long enough that fast
+        // typing never fires intermediate network calls, and every request is
+        // cached by the catalog repository.
+        val searchDebounceMs = 600L
         searchJob?.cancel()
         closeRemoteAlbum()
         _remoteTracks.value = emptyList()
@@ -734,7 +746,11 @@ class MusicVaultViewModel(
 
     fun moveQueueItem(from: Int, to: Int) = player.moveQueueItem(from, to)
 
-    fun setEqualizerEnabled(enabled: Boolean) { equalizer.setEnabled(enabled) }
+    fun setEqualizerEnabled(enabled: Boolean) {
+        preferences.edit().putBoolean("eq_enabled", enabled).apply()
+        _eqEnabled.value = enabled
+        equalizer.setEnabled(enabled)
+    }
 
     fun setEqualizerBand(index: Int, level: Short) {
         equalizer.setBandLevel(index, level)

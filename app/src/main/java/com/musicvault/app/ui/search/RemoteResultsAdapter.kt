@@ -485,22 +485,38 @@ class RemoteResultsAdapter(
                 layoutParams = LinearLayout.LayoutParams(0, 0)
             }
             text.addView(progress)
+            // Single fixed-size action column: play / spinner / more live in the
+            // same 48dp box (visibility-toggled), so every row — no matter the
+            // title length or download state — aligns its action in exactly the
+            // same place.
+            val actions = android.widget.FrameLayout(context).apply {
+                tag = "actionsBox"
+                layoutParams = LinearLayout.LayoutParams(dp(context, 48), dp(context, 48))
+            }
             val play = StyledPlayButton(context).apply {
                 tag = "play"
-                layoutParams = LinearLayout.LayoutParams(dp(context, 48), dp(context, 48))
+                layoutParams = android.widget.FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+                )
                 mode = StyledPlayButton.Mode.PLAY
                 stateListAnimator = null
             }
-            row.addView(play, 2)
-            row.addView(DownloadSpinnerView(context).apply {
+            actions.addView(play)
+            actions.addView(DownloadSpinnerView(context).apply {
                 tag = "downloadSpinner"
                 visibility = View.GONE
-                layoutParams = LinearLayout.LayoutParams(dp(context, 48), dp(context, 48))
-            }, 3)
-            row.addView(MoreButton(context).apply {
+                layoutParams = android.widget.FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            })
+            actions.addView(MoreButton(context).apply {
                 tag = "more"
-                layoutParams = LinearLayout.LayoutParams(dp(context, 44), dp(context, 48))
-            }, 4)
+                visibility = View.GONE
+                layoutParams = android.widget.FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            })
+            row.addView(actions)
             return row
         }
 

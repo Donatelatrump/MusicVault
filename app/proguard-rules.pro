@@ -1,7 +1,7 @@
 # ✅ ProGuard optimizations for MusicVault
 
 # Preserve Room database entities and DAOs
--keep class com.musicvault.app.data.** { *; }
+-keep @androidx.room.Entity class com.musicvault.app.data.** { *; }
 
 # Preserve Media3 classes for audio playback
 -keep class androidx.media3.** { *; }

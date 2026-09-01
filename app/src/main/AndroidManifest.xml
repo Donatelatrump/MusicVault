@@ -36,11 +36,21 @@
 
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:theme="@style/Theme.MusicVault.Starting">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-    <receiver android:name=".widget.MusicWidgetProvider" android:exported="false"><intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE"/></intent-filter><meta-data android:name="android.appwidget.provider" android:resource="@xml/music_widget_info"/></receiver></application>
+    <receiver android:name=".widget.MusicWidgetProvider" android:exported="false">
+        <intent-filter>
+            <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+            <action android:name="com.musicvault.app.widget.TOGGLE"/>
+            <action android:name="com.musicvault.app.widget.NEXT"/>
+            <action android:name="com.musicvault.app.widget.PREVIOUS"/>
+        </intent-filter>
+        <meta-data android:name="android.appwidget.provider" android:resource="@xml/music_widget_info"/>
+    </receiver>
+</application>
 </manifest>

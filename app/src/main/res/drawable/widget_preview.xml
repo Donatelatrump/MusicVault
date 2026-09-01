@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Widget picker preview (pre-API 31 uses previewImage; API 31+ uses
+     previewLayout). Rounded vault card with a centered play glyph. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@drawable/widget_bg"/>
+    <item
+        android:drawable="@android:drawable/ic_media_play"
+        android:gravity="center"
+        android:left="70dp"
+        android:right="70dp"
+        android:top="10dp"
+        android:bottom="10dp"/>
+</layer-list>

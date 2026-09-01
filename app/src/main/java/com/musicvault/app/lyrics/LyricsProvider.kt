@@ -19,10 +19,21 @@ data class Lyrics(val plain: String?, val synced: List<LyricLine>) {
  */
 object LyricsProvider {
     private val lrcTimestamp = Regex("""\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]""")
+    // Quality gates: LRCLib's exact /api/get endpoint can return degenerate
+    // records (single-line troll entries, "[00:00] *Rickrolling*", instrumental
+    // placeholders). Accepting them made the player show "complete" lyrics with
+    // no highlight at all. Real synced lyrics have many timed lines; real plain
+    // lyrics have real length.
+    private const val MIN_SYNCED_LINES = 5
+    private const val MIN_PLAIN_CHARS = 80
+
+    private fun isUsable(lyrics: Lyrics): Boolean =
+        lyrics.synced.size >= MIN_SYNCED_LINES || (lyrics.plain?.length ?: 0) >= MIN_PLAIN_CHARS
 
     fun fetch(artist: String, title: String, album: String? = null, durationMs: Long = 0L): Lyrics? {
         val durationSeconds = (durationMs / 1000L).takeIf { it > 0 }
-        // Exact lookup first: cheapest endpoint and the best match quality.
+        // Exact lookup first: cheapest endpoint and the best match quality —
+        // but only when the record is not degenerate (see quality gates).
         val exact = runCatching {
             val query = buildString {
                 append("https://lrclib.net/api/get?artist_name=").append(URLEncoder.encode(artist.trim(), "UTF-8"))
@@ -33,10 +44,11 @@ object LyricsProvider {
             getBody(query)
         }.getOrNull()
         val direct = exact?.let { body -> runCatching { toLyrics(JSONObject(body)) }.getOrNull() }
-        if (direct != null && !direct.isEmpty) return direct
+        if (direct != null && isUsable(direct)) return direct
 
-        // Fallback: free-text search, best record wins (synced beats plain,
-        // then closest duration to the local track).
+        // Fallback: free-text search, best record wins. Only quality-gated
+        // records compete: synced (≥5 timed lines) beats plain, then the
+        // closest duration to the local track.
         val searchQuery = "https://lrclib.net/api/search?q=" +
             URLEncoder.encode("${title.trim()} ${artist.trim()}".trim(), "UTF-8")
         val candidates = runCatching {
@@ -46,17 +58,21 @@ object LyricsProvider {
                 runCatching { array.getJSONObject(i) }.getOrNull()
             }
         }.getOrNull() ?: emptyList()
-        val best = candidates
-            .filter { it.optString("plainLyrics").isNotBlank() || it.optString("syncedLyrics").isNotBlank() }
-            .minByOrNull { record ->
-                val syncedPenalty = if (record.optString("syncedLyrics").isNotBlank()) 0 else 60_000
-                val remoteDuration = record.optLong("duration", 0L) * 1000L
-                val durationPenalty = if (durationSeconds != null && remoteDuration > 0) {
-                    kotlin.math.abs(remoteDuration - durationMs)
+        return candidates
+            .asSequence()
+            .mapNotNull { record ->
+                val lyrics = runCatching { toLyrics(record) }.getOrNull() ?: return@mapNotNull null
+                val remoteMs = record.optLong("duration", 0L) * 1000L
+                lyrics to remoteMs
+            }
+            .filter { (lyrics, _) -> isUsable(lyrics) }
+            .minByOrNull { (lyrics, remoteMs) ->
+                val syncedPenalty = if (lyrics.synced.size >= MIN_SYNCED_LINES) 0 else 60_000
+                val durationPenalty = if (durationSeconds != null && remoteMs > 0) {
+                    kotlin.math.abs(remoteMs - durationMs)
                 } else 0L
                 syncedPenalty + durationPenalty
-            } ?: return null
-        return toLyrics(best)?.takeIf { !it.isEmpty }
+            }?.first
     }
 
     private fun toLyrics(record: JSONObject): Lyrics? = runCatching {

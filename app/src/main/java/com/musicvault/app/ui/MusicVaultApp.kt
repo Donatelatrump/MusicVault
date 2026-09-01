@@ -48,6 +48,7 @@ import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
@@ -59,8 +60,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.Home
-import androidx.compose.material.icons.outlined.LibraryMusic
-import androidx.compose.material.icons.outlined.QueueMusic
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -77,6 +76,7 @@ import androidx.compose.ui.zIndex
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.lerp
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.Brush
@@ -104,6 +104,7 @@ import com.musicvault.app.ui.search.RemoteResultItem
 import com.musicvault.app.ui.search.RemoteResultsAdapter
 import com.musicvault.app.ui.search.MoreAction
 import com.musicvault.app.ui.theme.VaultColors
+import com.musicvault.app.ui.theme.VaultIcons
 import com.musicvault.app.ui.theme.VaultFonts
 import com.musicvault.app.lyrics.LyricLine
 import kotlinx.coroutines.Job
@@ -150,6 +151,7 @@ fun MusicVaultApp(vm: MusicVaultViewModel) {
     val queueIndex by vm.queueIndex.collectAsState()
     val favoriteIds = state.favoriteIds
     val equalizerBands by vm.equalizerBands.collectAsState()
+    val eqEnabled by vm.eqEnabled.collectAsState()
     val downloadDirLabel by vm.downloadDirLabel.collectAsState()
     // SAF directory picker for the user-selected download destination.
     val folderPicker = rememberLauncherForActivityResult(
@@ -200,6 +202,7 @@ fun MusicVaultApp(vm: MusicVaultViewModel) {
                 SettingsScreen(
                     crossfadeSeconds = state.crossfadeSeconds,
                     equalizerBands = equalizerBands,
+                    eqEnabled = eqEnabled,
                     downloadDirLabel = downloadDirLabel,
                     onCrossfadeChange = vm::setCrossfadeSeconds,
                     onEqualizerEnabled = vm::setEqualizerEnabled,
@@ -410,7 +413,7 @@ private fun HomeScreen(state: MusicUiState, albumDownloads: Set<String>, isPlayi
                 recycledViewPool.setMaxRecycledViews(3, 2)
                 recycledViewPool.setMaxRecycledViews(4, 2)
                 recycledViewPool.setMaxRecycledViews(5, 12)
-                itemAnimator = null
+                itemAnimator = androidx.recyclerview.widget.DefaultItemAnimator().apply { supportsChangeAnimations = false }
                 setHasFixedSize(false)
                 setPadding(20, 20, 20, 20)
                 clipToPadding = true
@@ -470,7 +473,7 @@ internal fun RecommendationTrackCard(
                 track.isDownloaded -> actions()
                 else -> {
                     IconButton(onClick = onPlay, modifier = Modifier.size(38.dp)) {
-                        Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, if (isPlaying) "Pausar" else "Descargar y reproducir", tint = VaultColors.TextPrimary)
+                        Icon(if (isPlaying) VaultIcons.Pause else Icons.Default.PlayArrow, if (isPlaying) "Pausar" else "Descargar y reproducir", tint = VaultColors.TextPrimary)
                     }
                 }
             }
@@ -602,46 +605,60 @@ private fun SearchScreen(
 
         Spacer(Modifier.height(16.dp))
 
-        AndroidView(
-            modifier = Modifier.fillMaxWidth().weight(1f).clipToBounds(),
-            factory = { context ->
-                RecyclerView(context).apply {
-                    layoutManager = LinearLayoutManager(context).apply {
-                        isItemPrefetchEnabled = true
-                        initialPrefetchItemCount = 8
-                    }
-                    this.adapter = adapter
-                    setHasFixedSize(true)
-                    itemAnimator = null
-                    setItemViewCacheSize(12)
-                    recycledViewPool.setMaxRecycledViews(1, 8)
-                    recycledViewPool.setMaxRecycledViews(2, 12)
-                    recycledViewPool.setMaxRecycledViews(3, 18)
-                    overScrollMode = RecyclerView.OVER_SCROLL_IF_CONTENT_SCROLLS
+        Box(Modifier.fillMaxWidth().weight(1f)) {
+            // Skeleton placeholders while the search is in flight and no rows
+            // exist yet: the shape of the final content instead of a blank gap.
+            if (state.isSearching && state.remoteTracks.isEmpty() && state.remoteAlbums.isEmpty()) {
+                Column(Modifier.fillMaxSize().padding(horizontal = 4.dp)) {
+                    repeat(7) { SkeletonRow() }
                 }
-            },
-            update = { recyclerView ->
-                adapter.updateItems(resultItems)
-
-                // Use the repository's authoritative downloaded list. Its IDs are
-                // already the exact provider:recording:<id> keys used by remote
-                // downloads, so search rows switch to the post-download state as
-                // soon as persistence completes. Do not guess a provider here.
-                val downloadedIds = state.downloaded
-                    .asSequence()
-                    .filter { it.isDownloaded }
-                    .map { it.id }
-                    .toSet()
-
-                adapter.updateState(
-                    downloadedIds = downloadedIds,
-                    progress = downloadProgress,
-                    selectedTrackId = state.selectedTrack?.id,
-                    isPlaying = isPlaying
-                )
-                recyclerView.itemAnimator = null
             }
-        )
+            AndroidView(
+                modifier = Modifier.fillMaxSize().clipToBounds(),
+                factory = { context ->
+                    RecyclerView(context).apply {
+                        layoutManager = LinearLayoutManager(context).apply {
+                            isItemPrefetchEnabled = true
+                            initialPrefetchItemCount = 8
+                        }
+                        this.adapter = adapter
+                        setHasFixedSize(true)
+                        itemAnimator = androidx.recyclerview.widget.DefaultItemAnimator().apply { supportsChangeAnimations = false }
+                        setItemViewCacheSize(12)
+                        recycledViewPool.setMaxRecycledViews(1, 8)
+                        recycledViewPool.setMaxRecycledViews(2, 12)
+                        recycledViewPool.setMaxRecycledViews(3, 18)
+                        overScrollMode = RecyclerView.OVER_SCROLL_IF_CONTENT_SCROLLS
+                    }
+                },
+                update = { recyclerView ->
+                    adapter.updateItems(resultItems)
+
+                    // Skip state pushes while the tab is hidden (alpha 0): the
+                    // screen keeps observing flows (download progress ticks),
+                    // but pushing state into a hidden RecyclerView is wasted
+                    // work. The first update after reactivation repushes all.
+                    if (state.section == AppSection.SEARCH) {
+                        // Use the repository's authoritative downloaded list. Its IDs are
+                        // already the exact provider:recording:<id> keys used by remote
+                        // downloads, so search rows switch to the post-download state as
+                        // soon as persistence completes. Do not guess a provider here.
+                        val downloadedIds = state.downloaded
+                            .asSequence()
+                            .filter { it.isDownloaded }
+                            .map { it.id }
+                            .toSet()
+
+                        adapter.updateState(
+                            downloadedIds = downloadedIds,
+                            progress = downloadProgress,
+                            selectedTrackId = state.selectedTrack?.id,
+                            isPlaying = isPlaying
+                        )
+                    }
+                }
+            )
+        }
     }
 
     val selectedTrack = actionTrack
@@ -725,8 +742,8 @@ private fun CachedCover(
     targetSizePx: Int
 ) {
     if (url.isNullOrBlank()) {
-        Box(modifier, contentAlignment = Alignment.Center) {
-            Icon(Icons.Default.Album, null, tint = VaultColors.TextTertiary)
+    Box(modifier.padding(10.dp), contentAlignment = Alignment.Center) {
+            Icon(VaultIcons.Album, null, tint = VaultColors.TextTertiary)
         }
         return
     }
@@ -807,7 +824,7 @@ private fun RemoteTrackRow(
             }
             else -> {
                 IconButton(onClick = onPlayToggle) {
-                    Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, if (isPlaying) "Pausar" else "Reproducir", tint = VaultColors.TextPrimary)
+                    Icon(if (isPlaying) VaultIcons.Pause else Icons.Default.PlayArrow, if (isPlaying) "Pausar" else "Reproducir", tint = VaultColors.TextPrimary)
                 }
             }
         }
@@ -834,7 +851,7 @@ private fun LibraryScreen(state: MusicUiState, isPlaying: Boolean, vm: MusicVaul
                 }
                 setItemViewCacheSize(12)
                 recycledViewPool.setMaxRecycledViews(0, 12)
-                itemAnimator = null
+                itemAnimator = androidx.recyclerview.widget.DefaultItemAnimator().apply { supportsChangeAnimations = false }
                 setHasFixedSize(false)
                 setPadding(20, 20, 20, 20)
                 clipToPadding = true
@@ -871,7 +888,7 @@ private fun PlaylistScreen(state: MusicUiState, vm: MusicVaultViewModel) {
                 setItemViewCacheSize(10)
                 recycledViewPool.setMaxRecycledViews(AlbumFeedAdapter.TYPE_HEADER, 2)
                 recycledViewPool.setMaxRecycledViews(AlbumFeedAdapter.TYPE_ALBUM, 10)
-                itemAnimator = null
+                itemAnimator = androidx.recyclerview.widget.DefaultItemAnimator().apply { supportsChangeAnimations = false }
                 setHasFixedSize(false)
                 setPadding(dp(context, 20), dp(context, 20), dp(context, 20), dp(context, 20))
                 clipToPadding = false
@@ -959,7 +976,7 @@ private fun LocalAlbumDetail(
                 setHasFixedSize(false)
                 setItemViewCacheSize(10)
                 recycledViewPool.setMaxRecycledViews(LocalAlbumDetailAdapter.TYPE_TRACK, 12)
-                itemAnimator = null
+                itemAnimator = androidx.recyclerview.widget.DefaultItemAnimator().apply { supportsChangeAnimations = false }
                 adapter = albumAdapter
             }
         },
@@ -1026,7 +1043,7 @@ private fun RemoteAlbumDetail(
                             targetSizePx = 360
                         )
                     } else {
-                        Icon(Icons.Default.Album, null, tint = VaultColors.TextPrimary.copy(alpha = 0.85f), modifier = Modifier.size(48.dp))
+                        Icon(VaultIcons.Album, null, tint = VaultColors.TextPrimary.copy(alpha = 0.85f), modifier = Modifier.size(48.dp))
                     }
                 }
                 Spacer(Modifier.width(16.dp))
@@ -1054,7 +1071,7 @@ private fun RemoteAlbumDetail(
                     if (albumDownloading) {
                         DownloadDotsSpinner(modifier = Modifier.size(24.dp))
                     } else {
-                        Icon(Icons.Default.Download, contentDescription = null)
+                        Icon(VaultIcons.Download, contentDescription = null)
                     }
                     Spacer(Modifier.width(6.dp))
                     Text(if (albumDownloading) "Descargando álbum" else "Descargar álbum", fontWeight = FontWeight.Bold)
@@ -1062,7 +1079,9 @@ private fun RemoteAlbumDetail(
             }
             Spacer(Modifier.height(18.dp))
             when {
-                loading -> LinearProgressIndicator(Modifier.fillMaxWidth(), color = VaultColors.Accent, trackColor = VaultColors.Surface3)
+                loading -> Column(Modifier.fillMaxWidth()) {
+                    repeat(4) { SkeletonRow() }
+                }
                 tracks.isEmpty() -> Text("No hay canciones disponibles para este álbum.", color = VaultColors.TextSecondary)
             }
             Spacer(Modifier.height(10.dp))
@@ -1134,7 +1153,7 @@ private fun PlaylistDetail(
                     onClick = { vm.playPlaylist(playlist, shuffle = true) },
                     shape = RoundedCornerShape(50)
                 ) {
-                    Icon(Icons.Default.Shuffle, null, tint = VaultColors.TextPrimary)
+                    Icon(VaultIcons.Shuffle, null, tint = VaultColors.TextPrimary)
                     Spacer(Modifier.width(6.dp))
                     Text("Aleatorio", color = VaultColors.TextPrimary, fontWeight = FontWeight.Bold)
                 }
@@ -1223,7 +1242,7 @@ private fun MiniPlayer(
                 )
             }
             IconButton(onClick = onToggle) {
-                Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, null, tint = VaultColors.OnAccent, modifier = Modifier
+                Icon(if (isPlaying) VaultIcons.Pause else Icons.Default.PlayArrow, null, tint = VaultColors.OnAccent, modifier = Modifier
                     .size(34.dp)
                     .clip(CircleShape)
                     .background(VaultColors.Accent)
@@ -1241,29 +1260,72 @@ private fun MiniPlayer(
 private const val LYRICS_LEAD_MS = 100L
 
 /**
- * Extrapolates the controller's position snapshot with the frame clock so the
- * synced lyrics follow playback every frame instead of every 500ms ticker
- * update. Returned as [State] on purpose: readers resolve it inside derived
- * state (or draw), never during composition, so nothing recomposes at 60fps.
+ * Extrapolates the controller's position with the frame clock so the synced
+ * lyrics follow playback every frame instead of every 500ms ticker update.
+ *
+ * The anchor is the controller's own measurement timestamp
+ * (PlaybackProgress.sampledAtElapsed, elapsedRealtimeNanos). The previous
+ * design anchored "now" at recomposition time, so every sample drifted by the
+ * scheduling latency between the measurement and the next frame — lyrics ran
+ * ahead on some songs and behind on others. Anchoring on the sample clock and
+ * re-anchoring on every published snapshot keeps sync exact for play, pause,
+ * seek, track changes and background playback.
  */
 @Composable
-private fun rememberLyricPositionState(positionMs: Long, isPlaying: Boolean): State<Long> {
-    val state = remember { mutableLongStateOf(positionMs - LYRICS_LEAD_MS) }
-    var basePos by remember { mutableLongStateOf(positionMs) }
-    var baseNanos by remember { mutableLongStateOf(0L) }
-    if (positionMs != basePos) {
-        basePos = positionMs
-        baseNanos = System.nanoTime()
-        state.longValue = positionMs - LYRICS_LEAD_MS
+private fun rememberLyricPositionState(
+    progress: com.musicvault.app.player.PlayerController.PlaybackProgress,
+    isPlaying: Boolean
+): State<Long> {
+    val state = remember { mutableLongStateOf(0L) }
+    var anchorPos by remember { mutableLongStateOf(0L) }
+    var anchorElapsed by remember { mutableLongStateOf(0L) }
+    var anchorSample by remember { mutableLongStateOf(-1L) }
+    // Re-anchor whenever a fresher sample arrives (covers play, seek, track
+    // change and returning from the background). Small deviations between the
+    // sample and the frame-clock extrapolation are ABSORBED (no visual snap):
+    // snapping every 500ms made the position jitter backwards across stanza
+    // boundaries, which flickered the highlight.
+    if (progress.sampledAtElapsed != anchorSample) {
+        val nowElapsed = android.os.SystemClock.elapsedRealtimeNanos()
+        val extrapolated = anchorPos + (nowElapsed - anchorElapsed) / 1_000_000L
+        val jumped = kotlin.math.abs(progress.positionMs - extrapolated) > 400L
+        anchorSample = progress.sampledAtElapsed
+        if (jumped || !isPlaying) {
+            // Real discontinuity (seek, track change, pause): snap to the sample.
+            anchorPos = progress.positionMs
+            anchorElapsed = progress.sampledAtElapsed
+            state.longValue = (progress.positionMs - LYRICS_LEAD_MS).coerceAtLeast(0L)
+        } else {
+            // Clock noise: keep the extrapolation continuous but gently pull it
+            // toward the sampled truth (⅓ per sample) — no visible snap, no
+            // permanent drift/lag.
+            anchorPos = extrapolated + (progress.positionMs - extrapolated) / 3
+            anchorElapsed = nowElapsed
+        }
     }
     LaunchedEffect(isPlaying) {
         if (isPlaying) {
-            baseNanos = System.nanoTime()
+            // Resume: anchor at the currently frozen position, then extrapolate
+            // per frame until the next sample re-anchors. All math uses the
+            // elapsedRealtimeNanos clock: withFrameNanos reports the frame in a
+            // DIFFERENT epoch (System.nanoTime), so mixing both clocks made the
+            // extrapolated position garbage and froze the lyrics until the next
+            // seek/pause.
+            anchorElapsed = android.os.SystemClock.elapsedRealtimeNanos()
             while (true) {
-                withFrameNanos { now ->
-                    state.longValue = basePos + (now - baseNanos) / 1_000_000L - LYRICS_LEAD_MS
+                withFrameNanos {
+                    val nowElapsed = android.os.SystemClock.elapsedRealtimeNanos()
+                    val next = (anchorPos + (nowElapsed - anchorElapsed) / 1_000_000L - LYRICS_LEAD_MS)
+                        .coerceAtLeast(0L)
+                    // Monotonic while playing: lyrics never step back, so the
+                    // highlight cannot flicker at a stanza boundary.
+                    if (next >= state.longValue) state.longValue = next
                 }
             }
+        } else {
+            // Pause: freeze. Store the raw position (without the lead) so a
+            // later resume extrapolates from the right anchor.
+            anchorPos = state.longValue + LYRICS_LEAD_MS
         }
     }
     return state
@@ -1280,7 +1342,7 @@ private fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean,
     var sliderDragging by remember(track.id) { mutableStateOf(false) }
     var showQueue by remember { mutableStateOf(false) }
     LaunchedEffect(position, track.id) { if (!sliderDragging) sliderPosition = position.toFloat() }
-    val lyricPosition = rememberLyricPositionState(position, isPlaying)
+    val lyricPosition = rememberLyricPositionState(progress, isPlaying)
     val repeatMode by vm.repeatMode.collectAsState()
     val favorite = track.id in favoriteIds
     // Deterministic archive number for the track, used as the catalog tag.
@@ -1295,13 +1357,21 @@ private fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean,
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = vm::closeFullPlayer) { Icon(Icons.Default.KeyboardArrowDown, "Cerrar", tint = VaultColors.TextPrimary, modifier = Modifier.size(30.dp)) }
+            Spacer(Modifier.weight(1f))
+            // Queue integrated in the header (mirrors the close button) instead
+            // of a floating button at the bottom edge.
+            IconButton(onClick = { showQueue = true }) {
+                Icon(VaultIcons.QueueMusic, "Cola de reproducción", tint = VaultColors.TextSecondary, modifier = Modifier.size(26.dp))
+            }
+            Spacer(Modifier.width(6.dp))
         }
         // Flexible stage area: the lyrics sheet peeks at the bottom; dragging it
         // up expands the lyrics (controls rise, the vinyl fades out) and dragging
         // it down brings the vinyl back. Both transitions are one continuous
         // gesture because the sheet and the stage share the available height.
         val density = LocalDensity.current
-        val peekHeight = 92.dp
+        // Two 2-line stanzas need more room than the old 1-line peek.
+        val peekHeight = 122.dp
         val peekPx = with(density) { peekHeight.toPx() }
         var areaPx by remember { mutableStateOf(0f) }
         var fixedPx by remember { mutableStateOf(0f) }
@@ -1484,103 +1554,75 @@ private fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean,
             Text(formatTime(duration), color = VaultColors.TextSecondary, fontSize = 12.sp, fontFamily = VaultFonts.Mono)
         }
         Spacer(Modifier.height(6.dp))
-        // Transport controls: Play is anchored exactly at screen center.
-        // Previous/Next are equally spaced from Play; Shuffle continues the same spacing.
-        Box(
-            Modifier.fillMaxWidth().height(72.dp)
+        // Transport controls: five equal slots keep the layout balanced on any
+        // screen width — the old center-offset design pushed Repeat/Queue off
+        // screen on narrow devices. Shuffle and Repeat show a clearly muted
+        // inactive state and the accent when active.
+        Row(
+            Modifier.fillMaxWidth().height(76.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
             val playScale by animateFloatAsState(
                 if (isPlaying) 1f else 0.92f,
                 spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
                 label = "playButtonScale"
             )
-
-            // Brass seal: the play button is the engraved stamp of the vault.
-            FilledIconButton(
-                onClick = vm::togglePlayback,
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .size(72.dp)
-                    .graphicsLayer { scaleX = playScale; scaleY = playScale },
-                colors = IconButtonDefaults.filledIconButtonColors(
-                    containerColor = VaultColors.Accent,
-                    contentColor = VaultColors.OnAccent
-                )
-            ) {
-                Icon(
-                    if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                    null,
-                    modifier = Modifier.size(38.dp)
-                )
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                IconButton(onClick = vm::toggleShuffle, modifier = Modifier.size(44.dp)) {
+                    Icon(
+                        VaultIcons.Shuffle,
+                        "Aleatorio",
+                        tint = if (shuffle) VaultColors.Accent else VaultColors.TextTertiary,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
             }
-
-            // Same center-to-center distance on both sides of Play.
-            IconButton(
-                onClick = vm::previousTrack,
-                modifier = Modifier.align(Alignment.Center).offset(x = (-54).dp).size(54.dp)
-            ) {
-                Icon(Icons.Default.SkipPrevious, "Anterior", tint = VaultColors.TextPrimary, modifier = Modifier.size(34.dp))
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                IconButton(onClick = vm::previousTrack, modifier = Modifier.size(48.dp)) {
+                    Icon(VaultIcons.SkipPrevious, "Anterior", tint = VaultColors.TextPrimary, modifier = Modifier.size(32.dp))
+                }
             }
-
-            IconButton(
-                onClick = vm::nextTrack,
-                modifier = Modifier.align(Alignment.Center).offset(x = 54.dp).size(54.dp)
-            ) {
-                Icon(Icons.Default.SkipNext, "Siguiente", tint = VaultColors.TextPrimary, modifier = Modifier.size(34.dp))
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                // Brass seal: the play button is the engraved stamp of the vault.
+                FilledIconButton(
+                    onClick = vm::togglePlayback,
+                    modifier = Modifier
+                        .size(64.dp)
+                        .graphicsLayer { scaleX = playScale; scaleY = playScale },
+                    colors = IconButtonDefaults.filledIconButtonColors(
+                        containerColor = VaultColors.Accent,
+                        contentColor = VaultColors.OnAccent
+                    )
+                ) {
+                    Icon(
+                        if (isPlaying) VaultIcons.Pause else Icons.Default.PlayArrow,
+                        null,
+                        modifier = Modifier.size(34.dp)
+                    )
+                }
             }
-
-            // Shuffle uses exactly the same spacing from Next as Next uses from Play.
-            IconButton(
-                onClick = vm::toggleShuffle,
-                modifier = Modifier.align(Alignment.Center).offset(x = 108.dp).size(54.dp)
-            ) {
-                Icon(
-                    Icons.Default.Shuffle,
-                    "Aleatorio",
-                    tint = if (shuffle) VaultColors.Accent else VaultColors.TextPrimary,
-                    modifier = Modifier.size(25.dp)
-                )
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                IconButton(onClick = vm::nextTrack, modifier = Modifier.size(48.dp)) {
+                    Icon(VaultIcons.SkipNext, "Siguiente", tint = VaultColors.TextPrimary, modifier = Modifier.size(32.dp))
+                }
             }
-
-            // Repeat sits right next to Shuffle and cycles three states:
-            // off (white) → repeat once (brass) → repeat forever (light blue).
-            IconButton(
-                onClick = vm::cycleRepeatMode,
-                modifier = Modifier.align(Alignment.Center).offset(x = 162.dp).size(54.dp)
-            ) {
-                Icon(
-                    if (repeatMode == Player.REPEAT_MODE_ONE) Icons.Default.RepeatOne else Icons.Default.Repeat,
-                    when (repeatMode) {
-                        Player.REPEAT_MODE_ONE -> "Repetir una vez"
-                        Player.REPEAT_MODE_ALL -> "Repetir siempre"
-                        else -> "Repetir"
-                    },
-                    tint = when (repeatMode) {
-                        Player.REPEAT_MODE_ONE -> VaultColors.Accent
-                        Player.REPEAT_MODE_ALL -> VaultColors.RepeatAll
-                        else -> VaultColors.TextPrimary
-                    },
-                    modifier = Modifier.size(25.dp)
-                )
-            }
-        }
-        // The queue button is independent from the centered transport controls.
-        // It stays at the lower-right edge and respects the navigation gesture area.
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(44.dp)
-        ) {
-            IconButton(
-                onClick = { showQueue = true },
-                modifier = Modifier.align(Alignment.CenterEnd).size(42.dp)
-            ) {
-                Icon(
-                    Icons.Default.QueueMusic,
-                    "Cola de reproducción",
-                    tint = VaultColors.TextSecondary,
-                    modifier = Modifier.size(25.dp)
-                )
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                IconButton(onClick = vm::cycleRepeatMode, modifier = Modifier.size(44.dp)) {
+                    Icon(
+                        if (repeatMode == Player.REPEAT_MODE_ONE) VaultIcons.RepeatOne else VaultIcons.Repeat,
+                        when (repeatMode) {
+                            Player.REPEAT_MODE_ONE -> "Repetir una vez"
+                            Player.REPEAT_MODE_ALL -> "Repetir siempre"
+                            else -> "Repetir"
+                        },
+                        tint = when (repeatMode) {
+                            Player.REPEAT_MODE_ONE -> VaultColors.Accent
+                            Player.REPEAT_MODE_ALL -> VaultColors.RepeatAll
+                            else -> VaultColors.TextTertiary
+                        },
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
             }
         }
         }
@@ -1651,34 +1693,67 @@ private fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean,
                         modifier = Modifier.fillMaxSize()
                     )
                 } else {
-                    // Collapsed peek: the current synced line (or the opening of
-                    // the plain lyrics) invites the drag up. The line lookup runs
-                    // in derived state, so it recomposes only when the line changes.
+                    // Collapsed peek: a compact synced view — the current line
+                    // enlarged and highlighted with the previous and next lines
+                    // dimmed around it. The lookup runs in derived state, so it
+                    // only recomposes when the line actually changes.
                     val synced = lyrics.synced
                     val plain = lyrics.plain
-                    val peekLine by remember(synced, plain) {
+                    val peek by remember(synced, plain) {
                         derivedStateOf {
-                            if (synced.isNotEmpty()) {
-                                synced.indexOfLast { it.timeMs <= lyricPosition.value }
-                                    .takeIf { it >= 0 }
-                                    ?.let { synced[it].text }
-                            } else null
+                            if (synced.isEmpty()) null
+                            else {
+                                val index = synced.indexOfLast { it.timeMs <= lyricPosition.value }
+                                // Mini view: current + upcoming only. The already
+                                // sung line is dropped so both stanzas get two
+                                // full lines (long stanzas are never truncated).
+                                synced.getOrNull(index)?.text to synced.getOrNull(index + 1)?.text
+                            }
                         }
                     }
                     Column(
                         Modifier.fillMaxSize().padding(horizontal = 20.dp),
-                        verticalArrangement = Arrangement.Center
+                        verticalArrangement = Arrangement.Center,
+                        horizontalAlignment = Alignment.CenterHorizontally
                     ) {
-                        Text(
-                            peekLine
-                                ?: plain?.lineSequence()?.firstOrNull { it.isNotBlank() }
-                                ?: "Letra no disponible",
-                            color = VaultColors.TextSecondary,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Medium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        val view = peek
+                        when {
+                            view != null -> {
+                                Text(
+                                    view.first ?: " ",
+                                    color = VaultColors.Accent,
+                                    fontSize = 17.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    lineHeight = 22.sp,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                )
+                                Text(
+                                    view.second ?: " ",
+                                    color = VaultColors.TextSecondary,
+                                    fontSize = 12.sp,
+                                    lineHeight = 16.sp,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                )
+                            }
+                            plain != null -> Text(
+                                plain.lineSequence().firstOrNull { it.isNotBlank() } ?: "Letra no disponible",
+                                color = VaultColors.TextSecondary,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            else -> Text(
+                                "Letra no disponible",
+                                color = VaultColors.TextSecondary,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
                     }
                 }
             }
@@ -1689,6 +1764,26 @@ private fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean,
 
     if (showQueue) {
         QueueBottomSheet(queue, queueIndex, vm) { showQueue = false }
+    }
+}
+
+@Composable
+private fun SkeletonRow(modifier: Modifier = Modifier) {
+    // Ghost row with the shape of a real result row (cover + two text lines).
+    val pulse by rememberInfiniteTransition(label = "skeleton").animateFloat(
+        initialValue = 0.5f,
+        targetValue = 0.9f,
+        animationSpec = infiniteRepeatable(tween(700, easing = LinearEasing), RepeatMode.Reverse),
+        label = "skeletonPulse"
+    )
+    Row(modifier.fillMaxWidth().padding(vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(50.dp).clip(RoundedCornerShape(6.dp)).background(VaultColors.Surface2.copy(alpha = pulse)))
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Box(Modifier.fillMaxWidth(0.68f).height(13.dp).clip(RoundedCornerShape(4.dp)).background(VaultColors.Surface2.copy(alpha = pulse)))
+            Spacer(Modifier.height(6.dp))
+            Box(Modifier.fillMaxWidth(0.42f).height(10.dp).clip(RoundedCornerShape(4.dp)).background(VaultColors.Surface2.copy(alpha = pulse)))
+        }
     }
 }
 
@@ -1716,54 +1811,71 @@ private fun VinylDisc(coverUri: String?, title: String, isPlaying: Boolean, modi
     // the grooves pointing toward the record center; paused parks it outside
     // the disc, on the rest. Animating the tip (not a pivot angle) keeps the
     // arm visibly over the record at all times.
-    val armTipX by animateFloatAsState(
-        if (isPlaying) 0.74f else 0.97f,
+    // One animated fraction drives the arm: 0 = tip resting on the grooves,
+    // 1 = parked clearly off the disc. The tip positions themselves are
+    // computed in disc-radius units inside the Canvas so they stay correct on
+    // any stage aspect ratio.
+    val armParked by animateFloatAsState(
+        if (isPlaying) 0f else 1f,
         tween(durationMillis = 700, easing = FastOutSlowInEasing),
-        label = "armTipX"
+        label = "armParked"
     )
-    val armTipY by animateFloatAsState(
-        if (isPlaying) 0.30f else 0.68f,
-        tween(durationMillis = 700, easing = FastOutSlowInEasing),
-        label = "armTipY"
-    )
-
     Box(modifier, contentAlignment = Alignment.Center) {
-        // Record: black vinyl with concentric grooves (rotates with the disc).
-        Canvas(
+        // ONE rotating GPU layer: the vinyl face and the artwork ride on a
+        // single graphicsLayer so they rotate together as one composition
+        // layer instead of two independent ones.
+        Box(
             Modifier
                 .fillMaxSize()
-                .shadow(elevation = 18.dp, shape = CircleShape, ambientColor = Color.Black, spotColor = Color.Black)
                 .graphicsLayer { rotationZ = angle }
         ) {
-            val radius = size.minDimension / 2f
-            val labelRadius = radius * 0.31f
-            drawCircle(Color(0xFF131313), radius = radius)
-            drawCircle(Color(0xFF1E1E1E), radius = radius, style = Stroke(width = 1.dp.toPx()))
-            // Grooves: alternating faint rings between the label and the rim.
-            var grooveRadius = labelRadius + 3.dp.toPx()
-            var step = 0
-            while (grooveRadius < radius - 3.dp.toPx()) {
-                val alpha = if (step % 2 == 0) 0.055f else 0.022f
-                drawCircle(Color.White.copy(alpha = alpha), radius = grooveRadius, style = Stroke(width = 0.8.dp.toPx()))
-                grooveRadius += 2.6.dp.toPx()
-                step++
+            // Groove geometry depends only on the disc size — computed once per
+            // size via onSizeChanged instead of rebuilding the ring loop on
+            // every structural recomposition/redraw.
+            var grooveRadii by remember { mutableStateOf<List<Float>>(emptyList()) }
+            val grooveStart = with(LocalDensity.current) { 3.dp.toPx() }
+            val grooveStep = with(LocalDensity.current) { 2.6.dp.toPx() }
+            Canvas(
+                Modifier
+                    .fillMaxSize()
+                    .onSizeChanged { size ->
+                        val radius = minOf(size.width, size.height) / 2f
+                        val radii = ArrayList<Float>()
+                        var r = radius * 0.31f + grooveStart
+                        while (r < radius - grooveStart) {
+                            radii += r
+                            r += grooveStep
+                        }
+                        grooveRadii = radii
+                    }
+                    .shadow(elevation = 18.dp, shape = CircleShape, ambientColor = Color.Black, spotColor = Color.Black)
+            ) {
+                val radius = size.minDimension / 2f
+                val grooveStroke = 0.8.dp.toPx()
+                drawCircle(Color(0xFF131313), radius = radius)
+                drawCircle(Color(0xFF1E1E1E), radius = radius, style = Stroke(width = 1.dp.toPx()))
+                // Grooves: alternating faint rings between the label and the rim.
+                grooveRadii.forEachIndexed { step, r ->
+                    val alpha = if (step % 2 == 0) 0.055f else 0.022f
+                    drawCircle(Color.White.copy(alpha = alpha), radius = r, style = Stroke(width = grooveStroke))
+                }
             }
+            // Record label: the cover art, riding on the same rotation.
+            AsyncImage(
+                model = ImageRequest.Builder(LocalContext.current)
+                    .data(coverUri)
+                    .memoryCacheKey("vinyl:$coverUri")
+                    .crossfade(true)
+                    .build(),
+                contentDescription = title,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .fillMaxSize(0.62f)
+                    .clip(CircleShape)
+                    .border(1.dp, VaultColors.Divider, CircleShape)
+            )
         }
-        // Record label: the cover art, riding on the same rotation.
-        AsyncImage(
-            model = ImageRequest.Builder(LocalContext.current)
-                .data(coverUri)
-                .memoryCacheKey("vinyl:$coverUri")
-                .crossfade(true)
-                .build(),
-            contentDescription = title,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier
-                .fillMaxSize(0.62f)
-                .clip(CircleShape)
-                .border(1.dp, VaultColors.Divider, CircleShape)
-                .graphicsLayer { rotationZ = angle }
-        )
         // Fixed light sheen (the light source does not rotate with the disc).
         Canvas(Modifier.fillMaxSize()) {
             val radius = size.minDimension / 2f
@@ -1791,12 +1903,32 @@ private fun VinylDisc(coverUri: String?, title: String, isPlaying: Boolean, modi
                 .background(VaultColors.Background)
                 .border(1.dp, VaultColors.Divider, CircleShape)
         )
-        // Tonearm: pivot at the top-right corner; the tip rests on the grooves
-        // pointing toward the record center while playing and parks outside
-        // the disc when paused.
+        // Tonearm: rotates around its own pivot (top-right corner) with
+        // CONSTANT length — like a real tonearm. At 0° the tip rests on the
+        // grooves (0.62R from the record center, along the pivot→center line);
+        // parked, it swings by an angle solved from the law of cosines so the
+        // tip clears the rim (≥1.10R) on any stage aspect ratio. The disc is
+        // drawn slightly inset so the swing always has room.
         Canvas(Modifier.fillMaxSize()) {
+            val center = Offset(size.width / 2f, size.height / 2f)
+            val radius = size.minDimension / 2f
             val pivot = Offset(size.width * 0.88f, size.height * 0.08f)
-            val tip = Offset(size.width * armTipX, size.height * armTipY)
+            val toCenter = center - pivot
+            val pivotToCenter = kotlin.math.sqrt(toCenter.x * toCenter.x + toCenter.y * toCenter.y)
+            val armUnit = toCenter / pivotToCenter
+            val armLength = pivotToCenter - radius * 0.62f
+            // Swing angle needed so the parked tip sits at 1.10R from the
+            // record center (law of cosines), clamped to ±40°.
+            val clearance = radius * 1.10f
+            val cosSwing = (pivotToCenter * pivotToCenter + armLength * armLength - clearance * clearance) /
+                (2f * pivotToCenter * armLength)
+            val maxSwing = (40f * Math.PI.toFloat() / 180f)
+            val swing = kotlin.math.acos(cosSwing.coerceIn(-1f, 1f)).coerceIn(0f, maxSwing)
+            val angle = swing * armParked
+            val cosA = kotlin.math.cos(angle)
+            val sinA = kotlin.math.sin(angle)
+            val armDir = Offset(armUnit.x * cosA - armUnit.y * sinA, armUnit.x * sinA + armUnit.y * cosA)
+            val tip = pivot + armDir * armLength
             val armVector = tip - pivot
             // Counterweight stub behind the pivot, opposite the arm.
             drawLine(
@@ -1907,18 +2039,28 @@ private fun SyncedLyricsList(lines: List<LyricLine>, positionState: State<Long>,
         itemsIndexed(lines) { index, line ->
             val activeIndex = currentLine
             val active = index == activeIndex
+            // Karaoke zoom: the active stanza scales up and takes the accent;
+            // sung lines fade back.
+            val scale by animateFloatAsState(
+                if (active) 1f else 0.94f,
+                spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
+                label = "lyricScale"
+            )
             Text(
                 line.text,
                 color = when {
                     active -> VaultColors.Accent
-                    activeIndex != null && index < activeIndex -> VaultColors.TextPrimary.copy(alpha = 0.55f)
+                    activeIndex != null && index < activeIndex -> VaultColors.TextPrimary.copy(alpha = 0.4f)
                     else -> VaultColors.TextSecondary
                 },
-                fontSize = if (active) 17.sp else 14.sp,
+                fontSize = if (active) 22.sp else 15.sp,
                 fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
-                lineHeight = if (active) 24.sp else 20.sp,
+                lineHeight = if (active) 30.sp else 22.sp,
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp)
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = if (active) 10.dp else 6.dp)
+                    .graphicsLayer { scaleX = scale; scaleY = scale }
             )
         }
     }
@@ -1928,6 +2070,7 @@ private fun SyncedLyricsList(lines: List<LyricLine>, positionState: State<Long>,
 private fun SettingsScreen(
     crossfadeSeconds: Int,
     equalizerBands: List<com.musicvault.app.player.NativeEqualizer.Band>,
+    eqEnabled: Boolean,
     downloadDirLabel: String,
     onCrossfadeChange: (Int) -> Unit,
     onEqualizerEnabled: (Boolean) -> Unit,
@@ -1936,7 +2079,6 @@ private fun SettingsScreen(
     onUseInternalFolder: () -> Unit,
     onClose: () -> Unit
 ) {
-    var eqEnabled by rememberSaveable { mutableStateOf(true) }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1987,7 +2129,7 @@ private fun SettingsScreen(
                 Text("Ruta de descargas", color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
                 Spacer(Modifier.height(6.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.FolderOpen, null, tint = VaultColors.Accent, modifier = Modifier.size(20.dp))
+                    Icon(VaultIcons.FolderOpen, null, tint = VaultColors.Accent, modifier = Modifier.size(20.dp))
                     Spacer(Modifier.width(8.dp))
                     Text(downloadDirLabel, color = VaultColors.Accent, fontSize = 12.sp, fontFamily = VaultFonts.Mono)
                 }
@@ -2004,7 +2146,7 @@ private fun SettingsScreen(
                         colors = ButtonDefaults.buttonColors(containerColor = VaultColors.Accent, contentColor = VaultColors.OnAccent),
                         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
                     ) {
-                        Icon(Icons.Default.FolderOpen, null, modifier = Modifier.size(18.dp))
+                        Icon(VaultIcons.FolderOpen, null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
                         Text("Elegir carpeta", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                     }
@@ -2030,7 +2172,7 @@ private fun SettingsScreen(
                     }
                     Switch(
                         checked = eqEnabled,
-                        onCheckedChange = { eqEnabled = it; onEqualizerEnabled(it) },
+                        onCheckedChange = { onEqualizerEnabled(it) },
                         colors = SwitchDefaults.colors(checkedThumbColor = VaultColors.OnAccent, checkedTrackColor = VaultColors.Accent)
                     )
                 }
@@ -2089,7 +2231,7 @@ private fun QueueBottomSheet(queue: List<Track>, currentIndex: Int, vm: MusicVau
                             Modifier.fillMaxWidth().animateItem().padding(vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(Icons.Default.DragHandle, "Reordenar", tint = VaultColors.TextTertiary)
+                            Icon(VaultIcons.DragHandle, "Reordenar", tint = VaultColors.TextTertiary)
                             AsyncImage(track.coverUri, track.title, Modifier.size(44.dp).clip(RoundedCornerShape(6.dp)))
                             Spacer(Modifier.width(10.dp))
                             Column(Modifier.weight(1f)) {
@@ -2103,7 +2245,7 @@ private fun QueueBottomSheet(queue: List<Track>, currentIndex: Int, vm: MusicVau
                             }
                             IconButton(enabled = index > 0, onClick = { vm.moveQueueItem(index, index - 1) }) { Icon(Icons.Default.KeyboardArrowUp, "Subir", tint = VaultColors.TextPrimary) }
                             IconButton(enabled = index < queue.lastIndex, onClick = { vm.moveQueueItem(index, index + 1) }) { Icon(Icons.Default.KeyboardArrowDown, "Bajar", tint = VaultColors.TextPrimary) }
-                            IconButton(onClick = { vm.removeFromQueue(index) }) { Icon(Icons.Default.DeleteOutline, "Quitar", tint = VaultColors.Error) }
+                            IconButton(onClick = { vm.removeFromQueue(index) }) { Icon(VaultIcons.DeleteOutline, "Quitar", tint = VaultColors.Error) }
                         }
                     }
                 }
@@ -2142,10 +2284,10 @@ private fun BottomBar(section: AppSection, onSelect: (AppSection) -> Unit) {
                 Icon(if (section == AppSection.SEARCH) Icons.Default.Search else Icons.Outlined.Search, null)
             }
             BottomBarItem(AppSection.LIBRARY, "BIBLIOTECA", section, onSelect) {
-                Icon(if (section == AppSection.LIBRARY) Icons.Default.LibraryMusic else Icons.Outlined.LibraryMusic, null)
+                Icon(if (section == AppSection.LIBRARY) VaultIcons.LibraryMusic else VaultIcons.LibraryMusicOutline, null)
             }
             BottomBarItem(AppSection.PLAYLISTS, "ÁLBUMES", section, onSelect) {
-                Icon(if (section == AppSection.PLAYLISTS) Icons.Default.QueueMusic else Icons.Outlined.QueueMusic, null)
+                Icon(if (section == AppSection.PLAYLISTS) VaultIcons.QueueMusic else VaultIcons.QueueMusicOutline, null)
             }
         }
     }
@@ -2230,7 +2372,7 @@ internal fun AlbumCard(
                     contentScale = ContentScale.Crop
                 )
             } else {
-                Icon(Icons.Default.Album, null, tint = VaultColors.TextPrimary.copy(alpha = 0.85f), modifier = Modifier.size(54.dp))
+                Icon(VaultIcons.Album, null, tint = VaultColors.TextPrimary.copy(alpha = 0.85f), modifier = Modifier.size(54.dp))
             }
             if (onDownloadAll != null) {
                 Surface(
@@ -2243,7 +2385,7 @@ internal fun AlbumCard(
                         if (isDownloading) {
                             DownloadDotsSpinner(modifier = Modifier.size(26.dp), dotColor = VaultColors.TextPrimary)
                         } else {
-                            Icon(Icons.Default.Download, contentDescription = "Descargar álbum", tint = VaultColors.TextPrimary)
+                            Icon(VaultIcons.Download, contentDescription = "Descargar álbum", tint = VaultColors.TextPrimary)
                         }
                     }
                 }
@@ -2273,7 +2415,7 @@ private fun PlaylistCard(playlist: Playlist, onClick: () -> Unit) {
                 .clip(RoundedCornerShape(8.dp))
                 .background(Brush.linearGradient(listOf(top, bottom))),
             contentAlignment = Alignment.Center
-        ) { Icon(Icons.Default.Album, null, tint = VaultColors.TextPrimary.copy(alpha = 0.9f), modifier = Modifier.size(40.dp)) }
+        ) { Icon(VaultIcons.Album, null, tint = VaultColors.TextPrimary.copy(alpha = 0.9f), modifier = Modifier.size(40.dp)) }
         Spacer(Modifier.height(12.dp))
         Text(playlist.title, color = VaultColors.TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         Text(playlist.description, color = VaultColors.TextSecondary, fontSize = 12.sp, maxLines = 2)
@@ -2362,7 +2504,7 @@ internal fun TrackRow(
             else -> {
                 IconButton(onClick = onPlayToggle) {
                     Icon(
-                        if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                        if (isPlaying) VaultIcons.Pause else Icons.Default.PlayArrow,
                         if (isPlaying) "Pausar" else "Reproducir",
                         tint = VaultColors.TextPrimary
                     )
@@ -2404,7 +2546,7 @@ internal fun TrackActionsMenu(
             DropdownMenuItem(text = { Text("Agregar a álbum") }, onClick = { expanded = false; showAlbums = true })
             if (track.isDownloaded) {
                 DropdownMenuItem(
-                    leadingIcon = { Icon(Icons.Default.DeleteOutline, null, tint = MaterialTheme.colorScheme.error) },
+                    leadingIcon = { Icon(VaultIcons.DeleteOutline, null, tint = MaterialTheme.colorScheme.error) },
                     text = { Text("Eliminar canción", color = MaterialTheme.colorScheme.error) },
                     onClick = { expanded = false; confirmDelete = true }
                 )
@@ -2512,7 +2654,7 @@ private fun AlbumChoiceDialog(
                     Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text(album.title, Modifier.weight(1f).clickable { onSelect(album.id) }.padding(10.dp))
                         if (album.id != "playlist:favorites") {
-                            IconButton(onClick = { deleteId = album.id }) { Icon(Icons.Default.DeleteOutline, "Eliminar álbum") }
+                            IconButton(onClick = { deleteId = album.id }) { Icon(VaultIcons.DeleteOutline, "Eliminar álbum") }
                         }
                     }
                 }

@@ -85,7 +85,11 @@ implementation("androidx.recyclerview:recyclerview:1.4.0")
     implementation("androidx.compose.ui:ui-tooling-preview")
     debugImplementation("androidx.compose.ui:ui-tooling")
     implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-extended")
+    implementation("androidx.compose.material:material-icons-core")
+    // Baseline profile installer: ships the hand-authored startup profile in
+    // app/src/main/baseline-prof.txt so ART can AOT-compile the cold-start path.
+    implementation("androidx.profileinstaller:profileinstaller:1.4.1")
+    implementation("androidx.core:core-splashscreen:1.0.1")
 
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")

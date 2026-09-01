@@ -1,0 +1,60 @@
+# Hand-authored baseline profile for MusicVault cold start.
+# Human-readable format consumed by ART via androidx.profileinstaller at first
+# install (JIT/AOT decisions). Lines the platform cannot parse are skipped
+# safely, so this file can never break a build or an install.
+# Startup-critical classes: activity entry, root Composables, theme/fonts,
+# view-model + state, database + DAOs, player facade/service, providers and
+# the home/search feed adapters.
+
+HSPLcom/musicvault/app/MainActivity;->**(**)**
+Lcom/musicvault/app/MainActivity;
+HSPLcom/musicvault/app/ui/MusicVaultAppKt;->**(**)**
+Lcom/musicvault/app/ui/MusicVaultAppKt;
+HSPLcom/musicvault/app/ui/MusicVaultViewModel;->**(**)**
+Lcom/musicvault/app/ui/MusicVaultViewModel;
+HSPLcom/musicvault/app/ui/MusicVaultViewModel$MusicUiState;->**(**)**
+Lcom/musicvault/app/ui/MusicVaultViewModel$MusicUiState;
+HSPLcom/musicvault/app/ui/MusicVaultViewModel$Factory;->**(**)**
+Lcom/musicvault/app/ui/MusicVaultViewModel$Factory;
+HSPLcom/musicvault/app/ui/AppSection;->**(**)**
+Lcom/musicvault/app/ui/AppSection;
+HSPLcom/musicvault/app/ui/theme/ThemeKt;->**(**)**
+Lcom/musicvault/app/ui/theme/ThemeKt;
+HSPLcom/musicvault/app/ui/theme/VaultColors;->**(**)**
+Lcom/musicvault/app/ui/theme/VaultColors;
+HSPLcom/musicvault/app/ui/theme/VaultFonts;->**(**)**
+Lcom/musicvault/app/ui/theme/VaultFonts;
+HSPLcom/musicvault/app/ui/theme/VaultIcons;->**(**)**
+Lcom/musicvault/app/ui/theme/VaultIcons;
+HSPLcom/musicvault/app/data/MusicDatabase;->**(**)**
+Lcom/musicvault/app/data/MusicDatabase;
+HSPLcom/musicvault/app/data/MusicDatabase$Companion;->**(**)**
+Lcom/musicvault/app/data/MusicDatabase$Companion;
+HSPLcom/musicvault/app/data/MusicDatabase_Impl;->**(**)**
+Lcom/musicvault/app/data/MusicDatabase_Impl;
+HSPLcom/musicvault/app/data/TrackDao;->**(**)**
+Lcom/musicvault/app/data/TrackDao;
+HSPLcom/musicvault/app/data/AlbumDao;->**(**)**
+Lcom/musicvault/app/data/AlbumDao;
+HSPLcom/musicvault/app/data/PlaylistDao;->**(**)**
+Lcom/musicvault/app/data/PlaylistDao;
+HSPLcom/musicvault/app/data/EntitiesKt;->**(**)**
+Lcom/musicvault/app/data/EntitiesKt;
+HSPLcom/musicvault/app/data/ModelsKt;->**(**)**
+Lcom/musicvault/app/data/ModelsKt;
+HSPLcom/musicvault/app/data/MusicRepository;->**(**)**
+Lcom/musicvault/app/data/MusicRepository;
+HSPLcom/musicvault/app/player/PlayerController;->**(**)**
+Lcom/musicvault/app/player/PlayerController;
+HSPLcom/musicvault/app/player/MusicPlaybackService;->**(**)**
+Lcom/musicvault/app/player/MusicPlaybackService;
+HSPLcom/musicvault/app/player/AudioSessionBridge;->**(**)**
+Lcom/musicvault/app/player/AudioSessionBridge;
+HSPLcom/musicvault/app/providers/Providers;->**(**)**
+Lcom/musicvault/app/providers/Providers;
+HSPLcom/musicvault/app/ui/FastFeedAdaptersKt;->**(**)**
+Lcom/musicvault/app/ui/FastFeedAdaptersKt;
+HSPLcom/musicvault/app/ui/search/RemoteResultsAdapterKt;->**(**)**
+Lcom/musicvault/app/ui/search/RemoteResultsAdapterKt;
+HSPLcom/musicvault/app/catalog/CatalogRepository;->**(**)**
+Lcom/musicvault/app/catalog/CatalogRepository;

@@ -18,12 +18,19 @@ class NativeEqualizer {
     val isAvailable: Boolean get() = equalizer != null
     val bandCount: Int get() = equalizer?.numberOfBands?.toInt() ?: 0
 
-    fun attach(audioSessionId: Int): Boolean {
+    /**
+     * Creates the effect for the given audio session. The effect is created
+     * DISABLED unless [enabled] is true: force-enabling on every attach (e.g.
+     * when the activity is recreated while music plays) slams an active audio
+     * effect onto a live session, which some devices — Xiaomi/HyperOS in
+     * particular — reward with silent output until the track is recreated.
+     */
+    fun attach(audioSessionId: Int, enabled: Boolean = false): Boolean {
         if (audioSessionId <= 0) return false
         if (sessionId == audioSessionId && equalizer != null) return true
         release()
         return runCatching {
-            equalizer = Equalizer(0, audioSessionId).also { it.enabled = true }
+            equalizer = Equalizer(0, audioSessionId).also { it.enabled = enabled }
             sessionId = audioSessionId
         }.isSuccess
     }

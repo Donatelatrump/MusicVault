@@ -33,7 +33,11 @@ class PlayerController(context: Context) {
         val trackId: String? = null,
         val positionMs: Long = 0L,
         val durationMs: Long = 0L,
-        val isPlaying: Boolean = false
+        val isPlaying: Boolean = false,
+        // Monotonic timestamp (elapsedRealtimeNanos) of when this snapshot was
+        // measured. Lyrics extrapolation anchors on it so UI latency can never
+        // skew the perceived sync.
+        val sampledAtElapsed: Long = 0L
     )
 
     private val settings: SharedPreferences = context.getSharedPreferences("musicvault.settings", Context.MODE_PRIVATE)
@@ -65,6 +69,10 @@ class PlayerController(context: Context) {
     // app should append one (continuous playback). Without a next item the
     // crossfade can never trigger.
     var onNextItemNeeded: ((finishedTrackId: String?) -> Unit)? = null
+    private var pendingRefillFor: String? = null
+    // Invoked on the main thread whenever playback UI state is re-published
+    // (transitions, ticks). Used by the home-screen widget to stay in sync.
+    var onPlaybackUiChanged: (() -> Unit)? = null
     private var ticker: Job? = null
     private var released = false
 
@@ -138,10 +146,27 @@ class PlayerController(context: Context) {
             trackId = controller.currentMediaItem?.mediaId?.takeIf { it.isNotBlank() },
             positionMs = controller.currentPosition.coerceAtLeast(0L),
             durationMs = controller.duration.takeIf { it > 0L } ?: 0L,
-            isPlaying = controller.isPlaying
+            isPlaying = controller.isPlaying,
+            sampledAtElapsed = android.os.SystemClock.elapsedRealtimeNanos()
         )
         _audioSessionId.value = AudioSessionBridge.sessionId
         _queueIndex.value = controller.currentMediaItemIndex
+        // Safety net for the continuous-playback refill: transition events can
+        // be missed after a crossfade hand-off (MediaSession.setPlayer re-binds
+        // the session to a new player), which left the queue without a successor
+        // and made Bluetooth/hardware Next stop responding until the track
+        // ended naturally. Any progress tick with no successor asks for one,
+        // deduped per track so a failing lookup never spams.
+        val currentId = controller.currentMediaItem?.mediaId?.takeIf { it.isNotBlank() }
+        if (!controller.hasNextMediaItem() && currentId != null) {
+            if (pendingRefillFor != currentId) {
+                pendingRefillFor = currentId
+                onNextItemNeeded?.invoke(currentId)
+            }
+        } else {
+            pendingRefillFor = null
+        }
+        onPlaybackUiChanged?.invoke()
     }
 
     private fun publishQueue(controller: MediaController) {
