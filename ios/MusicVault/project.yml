@@ -1,0 +1,51 @@
+# XcodeGen alternative (https://github.com/yonaskolb/XcodeGen)
+# Generates a full MusicVault.xcodeproj from this manifest:
+#   brew install xcodegen
+#   cd ios/MusicVault && xcodegen
+# Then open MusicVault.xcodeproj.
+name: MusicVault
+options:
+  bundleIdPrefix: com.donnet
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    TARGETED_DEVICE_FAMILY: "1,2"
+targets:
+  MusicVault:
+    type: application
+    platform: iOS
+    sources:
+      - Sources/AppModule
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: MusicVault
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UIBackgroundModes:
+          - audio
+        UIUserInterfaceStyle: Dark
+    scheme:
+      testTargets: []
+
+  MusicVaultWidget:
+    type: app-extension
+    platform: iOS
+    productName: MusicVault Widget
+    bundleId: com.donnet.musicvault.ios.MusicVaultWidget
+    deploymentTarget:
+      iOS: "16.0"
+    sources:
+      - Sources/MusicVaultWidget
+    info:
+      path: Sources/MusicVaultWidget/Info.plist
+    settings:
+      base:
+        SWIFT_VERSION: "5.9"
+        CODE_SIGN_STYLE: Automatic
