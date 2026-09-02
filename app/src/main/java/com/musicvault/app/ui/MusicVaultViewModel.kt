@@ -64,6 +64,10 @@ data class MusicUiState(
     val fullPlayer: Boolean = false,
     val shuffle: Boolean = false,
     val crossfadeSeconds: Int = 5,
+    // Visual style of the full player: "vinyl" (turntable) or "circular"
+    // (circular visualizer). Persisted in prefs so it survives relaunches;
+    // it only picks which interface renders, playback logic is shared.
+    val playerStyle: String = "vinyl",
     val remoteAlbumTracks: List<CatalogTrack> = emptyList(),
     val isLoadingRemoteAlbum: Boolean = false,
     val isSearching: Boolean = false,
@@ -98,6 +102,9 @@ class MusicVaultViewModel(
     private val _fullPlayer = MutableStateFlow(false)
     private val _shuffle = MutableStateFlow(false)
     private val _crossfadeSeconds = MutableStateFlow(preferences.getInt("crossfade_seconds", 5).coerceIn(0, 12))
+    private val _playerStyle = MutableStateFlow(
+        preferences.getString("player_style", null)?.takeIf { it == "circular" } ?: "vinyl"
+    )
     private val _remoteAlbumTracks = MutableStateFlow<List<CatalogTrack>>(emptyList())
     private val _loadingRemoteAlbum = MutableStateFlow(false)
     private val _remoteTracks = MutableStateFlow<List<CatalogTrack>>(emptyList())
@@ -136,6 +143,7 @@ class MusicVaultViewModel(
     val isPlaying: StateFlow<Boolean> = player.isPlaying
     val playbackProgress: StateFlow<PlayerController.PlaybackProgress> = player.progress
     val downloadProgress: StateFlow<Map<String, Int>> = _downloadProgress.asStateFlow()
+    val playerStyle: StateFlow<String> = _playerStyle.asStateFlow()
     val albumDownloads: StateFlow<Set<String>> = _albumDownloads.asStateFlow()
 
     private val _downloadDirLabel = MutableStateFlow(
@@ -323,7 +331,8 @@ class MusicVaultViewModel(
         _remoteTracks, _remoteAlbums, _selectedTrack, _selectedPlaylist,
         _selectedPlaylistTracks, _selectedRemoteAlbum, _remoteAlbumTracks, _loadingRemoteAlbum,
         _selectedLocalAlbum, _selectedLocalAlbumTracks, _fullPlayer, _shuffle, _crossfadeSeconds,
-        _searching, _scanning, _providerMessage, _errorMessage, favoriteIds, recentSearches, recommendations
+        _searching, _scanning, _providerMessage, _errorMessage, favoriteIds, recentSearches, recommendations,
+        _playerStyle
     ) { v ->
         val rec = v[25] as Pair<*, *>
         MusicUiState(
@@ -338,7 +347,8 @@ class MusicVaultViewModel(
             isSearching = v[19] as Boolean, isScanning = v[20] as Boolean,
             providerMessage = v[21] as String?, errorMessage = v[22] as String?,
             favoriteIds = v[23] as Set<String>, recentSearches = v[24] as List<String>,
-            recommendedTracks = rec.first as List<Track>, recommendedAlbums = rec.second as List<Album>
+            recommendedTracks = rec.first as List<Track>, recommendedAlbums = rec.second as List<Album>,
+            playerStyle = v[26] as String
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MusicUiState())
 
@@ -703,6 +713,13 @@ class MusicVaultViewModel(
         _crossfadeSeconds.value = value
         preferences.edit().putInt("crossfade_seconds", value).apply()
         player.setCrossfadeSeconds(value)
+    }
+
+    /** Persists the full-player look: "vinyl" (turntable) or "circular" (visualizer). */
+    fun setPlayerStyle(style: String) {
+        val value = if (style == "circular") "circular" else "vinyl"
+        _playerStyle.value = value
+        preferences.edit().putString("player_style", value).apply()
     }
 
     fun toggleFavorite(track: Track) {

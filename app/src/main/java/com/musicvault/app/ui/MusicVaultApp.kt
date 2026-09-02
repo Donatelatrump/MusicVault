@@ -112,7 +112,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.cos
+import kotlin.math.floor
+import kotlin.math.pow
 import kotlin.math.sin
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.ui.graphics.vector.ImageVector
 
 /** Deterministic spine accent for a key. Tone-on-tone pair for subtle placeholder fills. */
 private fun gradientFor(key: String): Pair<Color, Color> {
@@ -203,8 +207,10 @@ fun MusicVaultApp(vm: MusicVaultViewModel) {
                     crossfadeSeconds = state.crossfadeSeconds,
                     equalizerBands = equalizerBands,
                     eqEnabled = eqEnabled,
+                    playerStyle = state.playerStyle,
                     downloadDirLabel = downloadDirLabel,
                     onCrossfadeChange = vm::setCrossfadeSeconds,
+                    onPlayerStyleChange = vm::setPlayerStyle,
                     onEqualizerEnabled = vm::setEqualizerEnabled,
                     onEqualizerBand = vm::setEqualizerBand,
                     onPickDownloadFolder = { folderPicker.launch(null) },
@@ -367,7 +373,7 @@ fun MusicVaultApp(vm: MusicVaultViewModel) {
                     )
             ) {
                 state.selectedTrack?.let { track ->
-                    FullPlayerScreen(track, isPlaying, state.shuffle, queue, queueIndex, favoriteIds, vm)
+                    FullPlayerScreen(track, isPlaying, state.shuffle, queue, queueIndex, favoriteIds, state.playerStyle, vm)
                 }
             }
         }
@@ -1332,7 +1338,7 @@ private fun rememberLyricPositionState(
 }
 
 @Composable
-private fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean, queue: List<Track>, queueIndex: Int, favoriteIds: Set<String>, vm: MusicVaultViewModel) {
+private fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean, queue: List<Track>, queueIndex: Int, favoriteIds: Set<String>, playerStyle: String, vm: MusicVaultViewModel) {
     val progress by vm.playbackProgress.collectAsState()
     val lyrics by vm.lyrics.collectAsState()
     LaunchedEffect(track.id) { vm.loadLyrics(track) }
@@ -1436,15 +1442,29 @@ private fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean,
                                     scaleY = s
                                 }
                         ) {
-                            VinylDisc(
-                                coverUri = track.coverUri,
-                                title = track.title,
-                                isPlaying = isPlaying,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 8.dp)
-                                    .aspectRatio(1f)
-                            )
+                            // One player, two interchangeable skins chosen in
+                            // Settings. Both consume the same track/isPlaying
+                            // state; only the visuals differ.
+                            val stageModifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 8.dp)
+                                .aspectRatio(1f)
+                            if (playerStyle == "circular") {
+                                CircularVisualizer(
+                                    coverUri = track.coverUri,
+                                    title = track.title,
+                                    isPlaying = isPlaying,
+                                    seed = abs(track.id.hashCode()),
+                                    modifier = stageModifier
+                                )
+                            } else {
+                                VinylDisc(
+                                    coverUri = track.coverUri,
+                                    title = track.title,
+                                    isPlaying = isPlaying,
+                                    modifier = stageModifier
+                                )
+                            }
                         }
                     }
                 }
@@ -1788,79 +1808,222 @@ private fun SkeletonRow(modifier: Modifier = Modifier) {
 }
 
 /**
- * Vinyl turntable: the record spins at 33⅓ RPM (one turn every 18s) while the
- * song plays and freezes in place on pause. The track/album artwork is the
- * record label; the tonearm swings onto the disc when playback starts.
+ * Turntable deck: the record IS the album artwork, spinning on a slipmat over
+ * the plinth. The tonearm rotates on its own pivot with constant length; when
+ * paused it swings aside onto a rest clip beside the record, so it never
+ * hovers over the artwork.
+ *
+ * The deck carries its own visual hardware: a pitch-style RPM fader that
+ * retimes the platter animation (16–78 RPM, 33⅓ by default, detented at the
+ * classic 33/45/78 speeds), a speed selector that snaps to those detents, and
+ * decorative keys (power, stop, transport) that are engraved look-only — none
+ * of them touch the playback engine.
  */
 @Composable
 private fun VinylDisc(coverUri: String?, title: String, isPlaying: Boolean, modifier: Modifier = Modifier) {
+    // Visual platter speed. Purely cosmetic: it scales the spin animation and
+    // never reaches the audio pipeline. rememberSaveable keeps it across
+    // configuration changes.
+    var rpm by rememberSaveable { mutableFloatStateOf(33.33f) }
     // Angle accumulates per frame so a pause freezes the record mid-spin
-    // instead of snapping back to zero.
+    // instead of snapping back to zero. The rate is read from the RPM state
+    // every frame, so dragging the fader retimes the platter fluidly.
     var angle by remember { mutableFloatStateOf(0f) }
     LaunchedEffect(isPlaying) {
         if (!isPlaying) return@LaunchedEffect
         var lastFrame = withFrameNanos { it }
         while (true) {
             withFrameNanos { now ->
-                angle = (angle + (now - lastFrame) / 1_000_000f * (360f / 18_000f)) % 360f
+                angle = (angle + (now - lastFrame) / 1_000_000f * (rpm * 360f / 60_000f)) % 360f
                 lastFrame = now
             }
         }
     }
-    // Stylus tip position (fractions of the canvas). Playing lands the tip ON
-    // the grooves pointing toward the record center; paused parks it outside
-    // the disc, on the rest. Animating the tip (not a pivot angle) keeps the
-    // arm visibly over the record at all times.
-    // One animated fraction drives the arm: 0 = tip resting on the grooves,
-    // 1 = parked clearly off the disc. The tip positions themselves are
-    // computed in disc-radius units inside the Canvas so they stay correct on
-    // any stage aspect ratio.
+    // 0 = tip over the record edge, 1 = parked on the rest clip.
     val armParked by animateFloatAsState(
         if (isPlaying) 0f else 1f,
         tween(durationMillis = 700, easing = FastOutSlowInEasing),
         label = "armParked"
     )
-    Box(modifier, contentAlignment = Alignment.Center) {
-        // ONE rotating GPU layer: the vinyl face and the artwork ride on a
-        // single graphicsLayer so they rotate together as one composition
-        // layer instead of two independent ones.
+    BoxWithConstraints(modifier.padding(10.dp)) {
+        val recordDiameter = minOf(maxWidth, maxHeight) * 0.64f
+        val centerX = maxWidth * 0.36f
+        val centerY = maxHeight * 0.5f
+
+        // Plinth: the deck body.
         Box(
             Modifier
                 .fillMaxSize()
-                .graphicsLayer { rotationZ = angle }
+                .clip(RoundedCornerShape(20.dp))
+                .background(VaultColors.Surface1)
+                .border(1.dp, VaultColors.Divider, RoundedCornerShape(20.dp))
+        )
+
+        // Deck markings: slipmat ring under the record.
+        Canvas(Modifier.fillMaxSize()) {
+            val ringCenter = Offset(size.width * 0.36f, size.height * 0.5f)
+            val ringRadius = (size.minDimension * 0.64f) / 2f + 4.dp.toPx()
+            drawCircle(Color(0xFF26221E), radius = ringRadius + 3.dp.toPx(), center = ringCenter)
+            drawCircle(Color(0xFF141210), radius = ringRadius, center = ringCenter, style = Stroke(width = 1.dp.toPx()))
+        }
+        // Power key + status LED + model plate (top-left). The LED lights up
+        // with playback. Decorative hardware: wired to nothing on purpose.
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(start = 12.dp, top = 12.dp)
         ) {
-            // Groove geometry depends only on the disc size — computed once per
-            // size via onSizeChanged instead of rebuilding the ring loop on
-            // every structural recomposition/redraw.
-            var grooveRadii by remember { mutableStateOf<List<Float>>(emptyList()) }
-            val grooveStart = with(LocalDensity.current) { 3.dp.toPx() }
-            val grooveStep = with(LocalDensity.current) { 2.6.dp.toPx() }
-            Canvas(
+            Box(
                 Modifier
-                    .fillMaxSize()
-                    .onSizeChanged { size ->
-                        val radius = minOf(size.width, size.height) / 2f
-                        val radii = ArrayList<Float>()
-                        var r = radius * 0.31f + grooveStart
-                        while (r < radius - grooveStart) {
-                            radii += r
-                            r += grooveStep
-                        }
-                        grooveRadii = radii
-                    }
-                    .shadow(elevation = 18.dp, shape = CircleShape, ambientColor = Color.Black, spotColor = Color.Black)
+                    .size(26.dp)
+                    .clip(CircleShape)
+                    .background(VaultColors.Surface2)
+                    .border(1.dp, VaultColors.Divider, CircleShape),
+                contentAlignment = Alignment.Center
             ) {
-                val radius = size.minDimension / 2f
-                val grooveStroke = 0.8.dp.toPx()
-                drawCircle(Color(0xFF131313), radius = radius)
-                drawCircle(Color(0xFF1E1E1E), radius = radius, style = Stroke(width = 1.dp.toPx()))
-                // Grooves: alternating faint rings between the label and the rim.
-                grooveRadii.forEachIndexed { step, r ->
-                    val alpha = if (step % 2 == 0) 0.055f else 0.022f
-                    drawCircle(Color.White.copy(alpha = alpha), radius = r, style = Stroke(width = grooveStroke))
+                Icon(VaultIcons.Power, null, tint = VaultColors.TextTertiary, modifier = Modifier.size(13.dp))
+            }
+            Spacer(Modifier.width(5.dp))
+            val ledColor by animateColorAsState(
+                if (isPlaying) Color(0xFF7E8F6E) else VaultColors.Divider,
+                tween(320), label = "deckLed"
+            )
+            Box(Modifier.size(5.dp).clip(CircleShape).background(ledColor))
+            Spacer(Modifier.width(7.dp))
+            Text(
+                "VAULT HV-01  ·  SIDE A",
+                color = VaultColors.TextTertiary, fontSize = 9.sp, fontFamily = VaultFonts.Mono, letterSpacing = 1.sp
+            )
+        }
+        // Hardware panel on the right edge: speed selector on top (snaps the
+        // visual platter to 33/45/78) and transport keys under it. The keys
+        // mirror the deck look only — playback stays with the controls below.
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .padding(end = 8.dp)
+        ) {
+            listOf(33.33f to "33", 45f to "45", 78f to "78").forEach { (speed, label) ->
+                val selected = abs(rpm - speed) < 1.5f
+                Box(
+                    Modifier
+                        .width(34.dp)
+                        .clip(RoundedCornerShape(7.dp))
+                        .background(if (selected) VaultColors.AccentSoft else VaultColors.Surface2)
+                        .border(1.dp, if (selected) VaultColors.Accent else VaultColors.Divider, RoundedCornerShape(7.dp))
+                        .clickable { rpm = speed }
+                        .padding(vertical = 3.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        label,
+                        color = if (selected) VaultColors.Accent else VaultColors.TextTertiary,
+                        fontSize = 10.sp,
+                        fontFamily = VaultFonts.Mono
+                    )
                 }
             }
-            // Record label: the cover art, riding on the same rotation.
+            Spacer(Modifier.height(4.dp))
+            DeckKey(VaultIcons.Stop, tint = VaultColors.TextTertiary)
+            DeckKey(VaultIcons.SkipPrevious, tint = VaultColors.TextTertiary)
+            DeckKey(
+                if (isPlaying) VaultIcons.Pause else Icons.Default.PlayArrow,
+                tint = if (isPlaying) VaultColors.Accent else VaultColors.TextTertiary
+            )
+            DeckKey(VaultIcons.SkipNext, tint = VaultColors.TextTertiary)
+        }
+        // Pitch-style RPM fader (bottom strip): a groove track with detents at
+        // the classic speeds. Drag or tap it to retime the platter fluidly; the
+        // current speed is engraved to the right in mono type.
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .padding(start = 16.dp, end = 12.dp, bottom = 12.dp)
+        ) {
+            Box(
+                Modifier
+                    .weight(1f)
+                    .height(34.dp)
+                    .pointerInput(Unit) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            fun setFromX(x: Float) {
+                                val width = size.width.toFloat().coerceAtLeast(1f)
+                                val fraction = x.coerceIn(0f, width) / width
+                                rpm = 16f + fraction * (78f - 16f)
+                            }
+                            setFromX(down.position.x)
+                            val slop = awaitTouchSlopOrCancellation(down.id) { change, _ ->
+                                change.consume()
+                                setFromX(change.position.x)
+                            }
+                            if (slop != null) {
+                                drag(slop.id) { change ->
+                                    change.consume()
+                                    setFromX(change.position.x)
+                                }
+                            }
+                        }
+                    }
+            ) {
+                Canvas(Modifier.fillMaxSize()) {
+                    val midY = size.height / 2f
+                    fun xFor(value: Float) = (value - 16f) / (78f - 16f) * size.width
+                    // Groove track.
+                    drawLine(
+                        Color(0xFF141210),
+                        Offset(0f, midY), Offset(size.width, midY),
+                        strokeWidth = 8.dp.toPx(), cap = StrokeCap.Round
+                    )
+                    drawLine(
+                        VaultColors.Divider,
+                        Offset(0f, midY), Offset(size.width, midY),
+                        strokeWidth = 1.dp.toPx(), cap = StrokeCap.Round
+                    )
+                    // Detents at the classic speeds.
+                    listOf(33.33f, 45f, 78f).forEach { detent ->
+                        drawLine(
+                            VaultColors.Surface3,
+                            Offset(xFor(detent), midY - 6.dp.toPx()),
+                            Offset(xFor(detent), midY + 6.dp.toPx()),
+                            strokeWidth = 1.5.dp.toPx()
+                        )
+                    }
+                    // Filled run up to the thumb + brass fader knob.
+                    val thumbX = xFor(rpm)
+                    drawLine(
+                        VaultColors.AccentDeep,
+                        Offset(0f, midY), Offset(thumbX, midY),
+                        strokeWidth = 3.dp.toPx(), cap = StrokeCap.Round
+                    )
+                    drawCircle(VaultColors.Accent, radius = 6.dp.toPx(), center = Offset(thumbX, midY))
+                    drawCircle(Color(0xFF141210), radius = 2.dp.toPx(), center = Offset(thumbX, midY))
+                }
+            }
+            Spacer(Modifier.width(10.dp))
+            Text(
+                "${rpm.roundToInt()} RPM",
+                color = VaultColors.Accent,
+                fontSize = 11.sp,
+                fontFamily = VaultFonts.Mono,
+                letterSpacing = 1.sp
+            )
+        }
+        // The record: the album artwork, spinning on the slipmat.
+        Box(
+            Modifier
+                .offset(x = centerX - recordDiameter / 2, y = centerY - recordDiameter / 2)
+                .size(recordDiameter)
+                .graphicsLayer { rotationZ = angle }
+                .shadow(elevation = 12.dp, shape = CircleShape, ambientColor = Color.Black, spotColor = Color.Black)
+                .clip(CircleShape)
+                .border(2.dp, VaultColors.Surface3, CircleShape)
+        ) {
             AsyncImage(
                 model = ImageRequest.Builder(LocalContext.current)
                     .data(coverUri)
@@ -1869,67 +2032,55 @@ private fun VinylDisc(coverUri: String?, title: String, isPlaying: Boolean, modi
                     .build(),
                 contentDescription = title,
                 contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .fillMaxSize(0.62f)
-                    .clip(CircleShape)
-                    .border(1.dp, VaultColors.Divider, CircleShape)
+                modifier = Modifier.fillMaxSize()
             )
         }
-        // Fixed light sheen (the light source does not rotate with the disc).
-        Canvas(Modifier.fillMaxSize()) {
-            val radius = size.minDimension / 2f
-            val stroke = Stroke(width = radius * 0.34f, cap = StrokeCap.Round)
-            drawArc(
-                color = Color.White.copy(alpha = 0.045f),
-                startAngle = 195f, sweepAngle = 55f, useCenter = false,
-                topLeft = Offset(radius * 0.16f, radius * 0.16f),
-                size = androidx.compose.ui.geometry.Size(size.width - radius * 0.32f, size.height - radius * 0.32f),
-                style = stroke
-            )
-            drawArc(
-                color = Color.White.copy(alpha = 0.035f),
-                startAngle = 15f, sweepAngle = 55f, useCenter = false,
-                topLeft = Offset(radius * 0.16f, radius * 0.16f),
-                size = androidx.compose.ui.geometry.Size(size.width - radius * 0.32f, size.height - radius * 0.32f),
-                style = stroke
-            )
-        }
-        // Spindle hole.
+
+        // Spindle over the artwork (static).
         Box(
             Modifier
+                .offset(x = centerX - 5.dp, y = centerY - 5.dp)
                 .size(10.dp)
                 .clip(CircleShape)
                 .background(VaultColors.Background)
                 .border(1.dp, VaultColors.Divider, CircleShape)
         )
-        // Tonearm: rotates around its own pivot (top-right corner) with
-        // CONSTANT length — like a real tonearm. At 0° the tip rests on the
-        // grooves (0.62R from the record center, along the pivot→center line);
-        // parked, it swings by an angle solved from the law of cosines so the
-        // tip clears the rim (≥1.10R) on any stage aspect ratio. The disc is
-        // drawn slightly inset so the swing always has room.
+        // Tonearm rotates on its pivot (top-right of the deck) with CONSTANT
+        // length. Playing: tip over the record edge (0.80R from the record
+        // center, along the pivot→center line). Parked: it swings by an angle
+        // solved from the law of cosines so the tip clears the record
+        // (≥1.25R) and rests on a clip beside it — never over the artwork.
         Canvas(Modifier.fillMaxSize()) {
-            val center = Offset(size.width / 2f, size.height / 2f)
-            val radius = size.minDimension / 2f
-            val pivot = Offset(size.width * 0.88f, size.height * 0.08f)
-            val toCenter = center - pivot
+            val recordCenter = Offset(size.width * 0.36f, size.height * 0.5f)
+            val recordRadius = (size.minDimension * 0.64f) / 2f
+            val pivot = Offset(size.width * 0.88f, size.height * 0.14f)
+            val toCenter = recordCenter - pivot
             val pivotToCenter = kotlin.math.sqrt(toCenter.x * toCenter.x + toCenter.y * toCenter.y)
             val armUnit = toCenter / pivotToCenter
-            val armLength = pivotToCenter - radius * 0.62f
-            // Swing angle needed so the parked tip sits at 1.10R from the
-            // record center (law of cosines), clamped to ±40°.
-            val clearance = radius * 1.10f
+            val armLength = pivotToCenter - recordRadius * 0.80f
+            val clearance = recordRadius * 1.25f
             val cosSwing = (pivotToCenter * pivotToCenter + armLength * armLength - clearance * clearance) /
                 (2f * pivotToCenter * armLength)
             val maxSwing = (40f * Math.PI.toFloat() / 180f)
             val swing = kotlin.math.acos(cosSwing.coerceIn(-1f, 1f)).coerceIn(0f, maxSwing)
-            val angle = swing * armParked
-            val cosA = kotlin.math.cos(angle)
-            val sinA = kotlin.math.sin(angle)
+            val sinSwing = kotlin.math.sin(swing)
+            val armAngle = -swing * armParked
+            val cosA = kotlin.math.cos(armAngle)
+            val sinA = kotlin.math.sin(armAngle)
             val armDir = Offset(armUnit.x * cosA - armUnit.y * sinA, armUnit.x * sinA + armUnit.y * cosA)
             val tip = pivot + armDir * armLength
             val armVector = tip - pivot
+
+            // Rest clip under the parked tip.
+            val restDir = Offset(armUnit.x * cosSwing + armUnit.y * sinSwing, -armUnit.x * sinSwing + armUnit.y * cosSwing)
+            val restTip = pivot + restDir * armLength
+            drawLine(
+                color = Color(0xFF26221E),
+                start = restTip,
+                end = restTip + Offset(0f, 14.dp.toPx()),
+                strokeWidth = 6.dp.toPx(),
+                cap = StrokeCap.Round
+            )
             // Counterweight stub behind the pivot, opposite the arm.
             drawLine(
                 color = Color(0xFF8F897D),
@@ -1948,6 +2099,147 @@ private fun VinylDisc(coverUri: String?, title: String, isPlaying: Boolean, modi
             drawCircle(Color(0xFF8F897D), radius = 7.dp.toPx(), center = pivot)
             drawCircle(Color(0xFF3A362F), radius = 3.dp.toPx(), center = pivot)
             drawCircle(VaultColors.Accent, radius = 5.dp.toPx(), center = tip)
+        }
+    }
+}
+
+/** Decorative deck key: pure turntable dressing, performs no action. */
+@Composable
+private fun DeckKey(icon: ImageVector, tint: Color) {
+    Box(
+        Modifier
+            .size(24.dp)
+            .clip(CircleShape)
+            .background(VaultColors.Surface2)
+            .border(1.dp, VaultColors.Divider, CircleShape),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(icon, null, tint = tint, modifier = Modifier.size(12.dp))
+    }
+}
+
+/**
+ * Circular visualizer player: the artwork is a large centered disc and the
+ * music is drawn as a ring of radial bars around it. The ring is a stylized
+ * spectrum — bass bars sit at the top and pulse wide and slow (a soft beat
+ * ring hugs the artwork), mids run down the sides, treble bars near the
+ * bottom flutter fast and short. Values are generated procedurally from the
+ * playback state (energy eases in on play, out to a calm shimmer on pause),
+ * so the visualization reads the same isPlaying/track data as the vinyl skin
+ * and never touches the audio pipeline.
+ */
+@Composable
+private fun CircularVisualizer(
+    coverUri: String?,
+    title: String,
+    isPlaying: Boolean,
+    seed: Int,
+    modifier: Modifier = Modifier
+) {
+    // Song energy follows the play state; paused shrinks to a quiet idle glow.
+    val energy by animateFloatAsState(
+        if (isPlaying) 1f else 0.16f,
+        tween(durationMillis = 900, easing = FastOutSlowInEasing),
+        label = "vizEnergy"
+    )
+    // Draw-phase clock: frameNs is only read inside Canvas, so updating it
+    // invalidates just the draw pass — no recomposition at 60–120 Hz.
+    var frameNs by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(Unit) {
+        val t0 = withFrameNanos { it }
+        while (true) {
+            withFrameNanos { now -> frameNs = now - t0 }
+        }
+    }
+    BoxWithConstraints(modifier.padding(10.dp)) {
+        val side = minOf(maxWidth, maxHeight)
+        Box(Modifier.size(side)) {
+            Canvas(Modifier.fillMaxSize()) {
+                val center = Offset(size.width / 2f, size.height / 2f)
+                val artRadius = size.minDimension * 0.24f
+                val r0 = artRadius + 9.dp.toPx()
+                val maxLen = size.minDimension / 2f - r0 - 5.dp.toPx()
+                val t = frameNs / 1_000_000_000f
+                val twoPi = 2f * Math.PI.toFloat()
+                val s = (seed % 9973) / 9973f
+                // Slow dynamics envelope: swells and dips like song sections.
+                val swell = 0.72f + 0.28f * sin(t * 0.19f + s * 17f) * sin(t * 0.113f + s * 5f)
+                // Beat pulse: a soft kick that mostly lifts the bass bars.
+                val beatHz = 1f / (0.58f + s * 0.3f)
+                val kickPhase = (t * beatHz + s * 3f) % 1f
+                val kick = if (energy > 0.5f) {
+                    maxOf(0f, cos(kickPhase * twoPi)).pow(20)
+                } else 0f
+
+                // Hairline ring where the bars start + a beat ring that
+                // breathes with the kick around the artwork.
+                drawCircle(VaultColors.Divider, radius = r0 - 1.dp.toPx(), center = center, style = Stroke(1.dp.toPx()))
+                drawCircle(
+                    VaultColors.Accent.copy(alpha = 0.08f + 0.20f * kick * energy),
+                    radius = r0 - 5.dp.toPx() + kick * 5.dp.toPx(),
+                    center = center,
+                    style = Stroke(1.5.dp.toPx())
+                )
+
+                val half = 72
+                for (i in 0 until half) {
+                    val p = i / (half - 1f) // 0 = bass (top) → 1 = treble (bottom)
+                    // Deterministic per-bar phases from the song seed.
+                    val n1 = sin(i * 12.9898f + seed) * 43758.5453f
+                    val phase = (n1 - floor(n1)) * twoPi
+                    val n2 = sin(i * 78.233f + seed * 1.7f) * 12543.21f
+                    val phase2 = (n2 - floor(n2)) * twoPi
+                    // Temporal speed: bass sways slowly, treble flutters fast.
+                    val speed = 0.9f + p * p * 6.5f
+                    val osc = 0.5f + 0.5f * sin(t * speed * twoPi * 0.5f + phase)
+                    val shimmer = 0.5f + 0.5f * sin(t * (1.7f + p * 5f) * twoPi * 0.5f + phase2)
+                    // Spatial traveling wave so the ring moves as a whole.
+                    val wave = 0.82f + 0.18f * sin(p * 9f - t * 2.1f)
+                    // Amplitude: bass wide, treble short.
+                    val amp = (1.02f - 0.58f * p) * (0.55f + 0.45f * osc) * (0.62f + 0.38f * shimmer) * wave
+                    val bassBoost = (1f - p) * (1f - p) * kick * 0.45f
+                    val v = (energy * swell * (amp + bassBoost)).coerceIn(0.05f, 1f)
+                    val len = v * maxLen
+                    val color = when {
+                        p < 0.34f -> VaultColors.AccentDeep
+                        p < 0.67f -> VaultColors.Accent
+                        else -> Color(0xFFD8CFBA)
+                    }
+                    val alpha = 0.35f + 0.65f * v
+                    // Mirror the bar across the vertical axis: right + left.
+                    for (deg in listOf(-90f + p * 180f, -90f - p * 180f)) {
+                        val a = deg * (Math.PI.toFloat() / 180f)
+                        val dir = Offset(cos(a), sin(a))
+                        drawLine(
+                            color.copy(alpha = alpha),
+                            start = center + dir * r0,
+                            end = center + dir * (r0 + len),
+                            strokeWidth = 2.5.dp.toPx(),
+                            cap = StrokeCap.Round
+                        )
+                    }
+                }
+            }
+            // The artwork: a large centered disc the ring never covers.
+            Box(
+                Modifier
+                    .size(side * 0.48f)
+                    .align(Alignment.Center)
+                    .shadow(elevation = 10.dp, shape = CircleShape, ambientColor = Color.Black, spotColor = Color.Black)
+                    .clip(CircleShape)
+                    .border(1.5.dp, VaultColors.Surface3, CircleShape)
+            ) {
+                AsyncImage(
+                    model = ImageRequest.Builder(LocalContext.current)
+                        .data(coverUri)
+                        .memoryCacheKey("circular:$coverUri")
+                        .crossfade(true)
+                        .build(),
+                    contentDescription = title,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
         }
     }
 }
@@ -2071,12 +2363,14 @@ private fun SettingsScreen(
     crossfadeSeconds: Int,
     equalizerBands: List<com.musicvault.app.player.NativeEqualizer.Band>,
     eqEnabled: Boolean,
+    playerStyle: String,
     downloadDirLabel: String,
     onCrossfadeChange: (Int) -> Unit,
     onEqualizerEnabled: (Boolean) -> Unit,
     onEqualizerBand: (Int, Short) -> Unit,
     onPickDownloadFolder: () -> Unit,
     onUseInternalFolder: () -> Unit,
+    onPlayerStyleChange: (String) -> Unit,
     onClose: () -> Unit
 ) {
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -2084,6 +2378,35 @@ private fun SettingsScreen(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onClose) { Icon(Icons.Default.ArrowBack, "Atrás", tint = VaultColors.TextPrimary) }
                 Text("Ajustes", color = VaultColors.TextPrimary, fontSize = 26.sp, fontWeight = FontWeight.Bold, fontFamily = VaultFonts.Display, letterSpacing = (-0.75).sp)
+            }
+        }
+        item {
+            SettingsSection("APARIENCIA") {
+                Text("Estilo del reproductor", color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Elige la interfaz del reproductor. La reproducción no cambia.",
+                    color = VaultColors.TextTertiary, fontSize = 12.sp
+                )
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    StyleOption(
+                        title = "Tornamesa / Vinilo",
+                        description = "Disco giratorio con brazo, control de RPM y hardware del deck.",
+                        icon = VaultIcons.Album,
+                        selected = playerStyle == "vinyl",
+                        onClick = { onPlayerStyleChange("vinyl") },
+                        modifier = Modifier.weight(1f)
+                    )
+                    StyleOption(
+                        title = "Visualizador circular",
+                        description = "Portada central rodeada por anillos de graves, medios y agudos.",
+                        icon = VaultIcons.GraphicEq,
+                        selected = playerStyle == "circular",
+                        onClick = { onPlayerStyleChange("circular") },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
             }
         }
         item {
@@ -2212,6 +2535,32 @@ private fun SettingsSection(title: String, content: @Composable androidx.compose
         Text(title, color = VaultColors.Accent, fontSize = 10.sp, fontFamily = VaultFonts.Mono, letterSpacing = 2.sp)
         Spacer(Modifier.height(12.dp))
         content()
+    }
+}
+
+/** Selectable card for the player-style setting (two skins, same playback engine). */
+@Composable
+private fun StyleOption(
+    title: String,
+    description: String,
+    icon: ImageVector,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (selected) VaultColors.AccentSoft else VaultColors.Surface2)
+            .border(1.dp, if (selected) VaultColors.Accent else VaultColors.Divider, RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .padding(12.dp)
+    ) {
+        Icon(icon, null, tint = if (selected) VaultColors.Accent else VaultColors.TextSecondary, modifier = Modifier.size(22.dp))
+        Spacer(Modifier.height(8.dp))
+        Text(title, color = VaultColors.TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, lineHeight = 16.sp)
+        Spacer(Modifier.height(2.dp))
+        Text(description, color = VaultColors.TextTertiary, fontSize = 10.sp, lineHeight = 13.sp)
     }
 }
 
