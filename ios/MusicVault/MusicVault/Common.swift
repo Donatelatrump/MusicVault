@@ -177,8 +177,8 @@ struct PlaylistPickerSheet: View {
                         .tracking(2)
                         .foregroundColor(VaultColors.accent)
                         .padding(.horizontal, 16)
-                        .padding(.top, 8)
-                    ForEach(store.favoritesPlaylist + store.userPlaylists) { playlist in
+                    let allPlaylists = (store.favoritesPlaylist.map { [$0] } ?? []) + store.userPlaylists
+                    ForEach(allPlaylists) { playlist in
                         Button {
                             Task {
                                 await store.addTrackToPlaylist(playlist.id, track: track)

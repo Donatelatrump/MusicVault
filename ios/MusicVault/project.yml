@@ -18,9 +18,9 @@ targets:
     type: application
     platform: iOS
     sources:
-      - Sources/AppModule
+      - MusicVault
     info:
-      path: Info.plist
+      path: MusicVault/Info.plist
       properties:
         CFBundleDisplayName: MusicVault
         UILaunchScreen: {}
@@ -31,6 +31,8 @@ targets:
         UIBackgroundModes:
           - audio
         UIUserInterfaceStyle: Dark
+    entitlements:
+      path: MusicVault/MusicVault.entitlements
     scheme:
       testTargets: []
 
@@ -42,9 +44,9 @@ targets:
     deploymentTarget:
       iOS: "16.0"
     sources:
-      - Sources/MusicVaultWidget
+      - MusicVaultWidget
     info:
-      path: Sources/MusicVaultWidget/Info.plist
+      path: MusicVaultWidget/Info.plist
     settings:
       base:
         SWIFT_VERSION: "5.9"

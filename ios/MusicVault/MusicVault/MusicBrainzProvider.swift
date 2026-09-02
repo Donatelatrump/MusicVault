@@ -74,13 +74,32 @@ struct MusicBrainzProvider {
                     artistName: artistName,
                     artistId: artistId,
                     durationMs: durationMs,
-                    releaseGroupId: releaseGroupId,
+                    releaseGroupID: releaseGroupId,
                     coverUri: nil // Will be fetched from Cover Art Archive if needed
                 )
             }
         } catch {
             return []
         }
+    }
+
+    /// Enrich a track with MusicBrainz metadata (MBID, release group, etc.)
+    /// Used to enrich Deezer/iTunes results with authoritative MBIDs.
+    func enrichWithMusicBrainz(_ track: CatalogTrack) async -> CatalogTrack {
+        guard track.provider != "musicbrainz" else { return track }
+        let mbResults = await searchRecordings(query: "\(track.title) \(track.artistName)", limit: 1)
+        guard let mb = mbResults.first else { return track }
+        return CatalogTrack(
+            id: track.id,
+            title: mb.title,
+            artistName: mb.artistName,
+            albumId: mb.releaseGroupID.map { "mb:\($0)" } ?? track.albumId,
+            albumTitle: track.albumTitle,
+            durationMs: mb.durationMs > 0 ? mb.durationMs : track.durationMs,
+            coverUri: track.coverUri ?? mb.releaseGroupID.flatMap { Self.coverURL(forReleaseGroupID: $0)?.absoluteString },
+            previewUri: track.previewUri,
+            provider: track.provider
+        )
     }
 
     /// Fetch release group (album) info for a recording's release group.
@@ -122,7 +141,6 @@ struct MBRecording: Identifiable, Hashable {
             id: id,
             title: title,
             artistName: artistName,
-            artistId: artistId,
             albumId: releaseGroupID.map { "mb:\($0)" },
             albumTitle: nil,
             durationMs: durationMs,

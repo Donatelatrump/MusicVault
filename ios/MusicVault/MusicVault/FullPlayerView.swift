@@ -320,3 +320,109 @@ struct QueueSheet: View {
         .background(VaultColors.background)
     }
 }
+
+/// Lyrics panel with synced karaoke scrolling and plain lyrics support.
+struct LyricsPanelView: View {
+    @EnvironmentObject var engine: PlayerEngine
+    let track: Track
+
+    @State private var lyrics: Lyrics?
+    @State private var isLoading = true
+    @State private var activeIndex: Int = -1
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 20)
+                .fill(VaultColors.surface1)
+                .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(VaultColors.divider))
+
+            if isLoading {
+                VStack(spacing: 12) {
+                    ProgressView()
+                        .tint(VaultColors.accent)
+                    Text("Cargando letras…")
+                        .font(.vaultMono)
+                        .foregroundColor(VaultColors.textTertiary)
+                }
+            } else if let lyrics, !lyrics.isEmpty {
+                if !lyrics.synced.isEmpty {
+                    ScrollViewReader { proxy in
+                        ScrollView(showsIndicators: false) {
+                            VStack(alignment: .leading, spacing: 18) {
+                                ForEach(Array(lyrics.synced.enumerated()), id: \.offset) { index, line in
+                                    let isActive = index == activeIndex
+                                    Text(line.text)
+                                        .font(.system(size: isActive ? 20 : 16, weight: isActive ? .bold : .medium, design: .rounded))
+                                        .foregroundColor(isActive ? VaultColors.accent : VaultColors.textTertiary)
+                                        .scaleEffect(isActive ? 1.02 : 1.0, anchor: .leading)
+                                        .animation(.spring(response: 0.35, dampingFraction: 0.7), value: isActive)
+                                        .id(index)
+                                        .contentShape(Rectangle())
+                                        .onTapGesture {
+                                            engine.seek(to: line.timeMs / 1000)
+                                        }
+                                }
+                            }
+                            .padding(.horizontal, 24)
+                            .padding(.vertical, 32)
+                        }
+                        .onChange(of: engine.position) { pos in
+                            updateActiveLine(positionMs: pos * 1000, lines: lyrics.synced, proxy: proxy)
+                        }
+                    }
+                } else if let plain = lyrics.plain {
+                    ScrollView(showsIndicators: false) {
+                        Text(plain)
+                            .font(.system(size: 15, weight: .regular, design: .rounded))
+                            .foregroundColor(VaultColors.textSecondary)
+                            .lineSpacing(6)
+                            .padding(24)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            } else {
+                VStack(spacing: 10) {
+                    Image(systemName: "text.quote")
+                        .font(.system(size: 36))
+                        .foregroundColor(VaultColors.textTertiary)
+                    Text("Sin letras disponibles")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(VaultColors.textSecondary)
+                }
+            }
+        }
+        .task(id: track.id) {
+            await loadLyrics()
+        }
+    }
+
+    private func loadLyrics() async {
+        isLoading = true
+        lyrics = await LyricsService.shared.fetch(
+            artist: track.artistName,
+            title: track.title,
+            album: track.albumTitle,
+            durationMs: track.durationMs
+        )
+        isLoading = false
+    }
+
+    private func updateActiveLine(positionMs: Double, lines: [LyricLine], proxy: ScrollViewProxy) {
+        var foundIndex = -1
+        for (i, line) in lines.enumerated() {
+            if positionMs >= line.timeMs {
+                foundIndex = i
+            } else {
+                break
+            }
+        }
+        if foundIndex != activeIndex {
+            activeIndex = foundIndex
+            if foundIndex >= 0 {
+                withAnimation(.easeInOut(duration: 0.3)) {
+                    proxy.scrollTo(foundIndex, anchor: .center)
+                }
+            }
+        }
+    }
+}

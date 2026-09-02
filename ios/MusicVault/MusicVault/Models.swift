@@ -51,7 +51,7 @@ struct PlayHistoryEntry: Identifiable, Hashable {
 }
 
 /// Metadata result from the public catalog providers (iTunes/Deezer).
-struct CatalogTrack: Identifiable, Hashable {
+struct CatalogTrack: Identifiable, Hashable, Codable {
     let id: String              // already namespaced: "deezer:<id>" / "itunes:<id>"
     var title: String
     var artistName: String
@@ -79,23 +79,28 @@ struct CatalogTrack: Identifiable, Hashable {
     }
 }
 
-struct CatalogAlbum: Identifiable, Hashable {
+struct CatalogAlbum: Identifiable, Hashable, Codable {
     let id: String
     var title: String
     var artistName: String
     var year: Int?
     var coverUri: String?
     var provider: String
+
+    var coverURL: URL? {
+        guard let coverUri, !coverUri.isEmpty else { return nil }
+        return URL(string: coverUri)
+    }
 }
 
 // MARK: - Lyrics
 
-struct LyricLine: Hashable {
+struct LyricLine: Hashable, Codable {
     let timeMs: Double
     let text: String
 }
 
-struct Lyrics: Hashable {
+struct Lyrics: Hashable, Codable {
     var plain: String?
     var synced: [LyricLine]
 

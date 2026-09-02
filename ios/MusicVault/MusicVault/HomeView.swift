@@ -13,7 +13,7 @@ struct HomeView: View {
                 if !store.recommendations.isEmpty {
                     VStack(alignment: .leading, spacing: 10) {
                         SectionHeader(title: "PARA TI")
-                        carousel(store.recommendations)
+                        carousel(store.recommendations.map(\.asTrack))
                     }
                 }
                 if !store.favorites.isEmpty {

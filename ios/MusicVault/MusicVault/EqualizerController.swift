@@ -53,7 +53,7 @@ final class EqualizerController: ObservableObject {
 
     func setBand(_ index: Int, level: Double) {
         guard bands.indices.contains(index) else { return }
-        let clamped = level.clamped(to: -12...12)
+        let clamped = min(max(level, -12.0), 12.0)
         bands[index].level = clamped
         if isEnabled { updateEQ() }
     }

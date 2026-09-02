@@ -19,8 +19,10 @@ struct AlbumsView: View {
                 header
 
                 // Favorites card (always first)
-                playlistCard(store.favoritesPlaylist)
-                    .padding(.horizontal, 20)
+                if let favorites = store.favoritesPlaylist {
+                    playlistCard(favorites)
+                        .padding(.horizontal, 20)
+                }
 
                 // User playlists
                 if !store.userPlaylists.isEmpty {

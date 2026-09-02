@@ -82,8 +82,8 @@ struct CatalogService {
             return result
         }
 
-        await Database.shared.saveSearchCache(key: key, queryText: query, tracks: merged)
-        return merged
+        await Database.shared.saveSearchCache(key: key, queryText: query, tracks: enriched)
+        return enriched
     }
 
     private func normalize(_ title: String, _ artist: String) -> String {
@@ -314,23 +314,3 @@ private struct DeezerAlbumDetailResponse: Decodable {
     var artist: Artist?
     var tracks: Tracks?
 }
-
-/// Enrich a track with MusicBrainz metadata (MBID, release group, etc.)
-    /// Used to enrich Deezer/iTunes results with authoritative MBIDs.
-    func enrichWithMusicBrainz(_ track: CatalogTrack) async -> CatalogTrack {
-        guard track.provider != "musicbrainz" else { return track }
-        let mbResults = await MusicBrainzProvider.shared.searchRecordings(query: "\(track.title) \(track.artistName)", limit: 1)
-        guard let mb = mbResults.first else { return track }
-        return CatalogTrack(
-            id: track.id,
-            title: mb.title,
-            artistName: mb.artistName,
-            artistId: mb.artistId,
-            albumId: mb.releaseGroupID.map { "mb:\($0)" } ?? track.albumId,
-            albumTitle: track.albumTitle,
-            durationMs: mb.durationMs > 0 ? mb.durationMs : track.durationMs,
-            coverUri: track.coverUri ?? MusicBrainzProvider.coverURL(forReleaseGroupID: mb.releaseGroupID ?? "")?.absoluteString,
-            previewUri: track.previewUri,
-            provider: track.provider
-        )
-    }
