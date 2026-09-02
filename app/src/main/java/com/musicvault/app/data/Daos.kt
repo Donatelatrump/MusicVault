@@ -95,7 +95,9 @@ interface CatalogSearchCacheDao {
     @Query("SELECT * FROM catalog_search_cache WHERE cacheKey=:cacheKey LIMIT 1")
     suspend fun get(cacheKey: String): CatalogSearchCacheEntity?
 
-    @Query("SELECT * FROM catalog_search_cache ORDER BY savedAt DESC")
+    // LIMIT keeps this flow cheap: each row carries large JSON blobs and the
+    // only consumer (Home recommendations) flattens the newest entries anyway.
+    @Query("SELECT * FROM catalog_search_cache ORDER BY savedAt DESC LIMIT 12")
     fun observeAll(): Flow<List<CatalogSearchCacheEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)

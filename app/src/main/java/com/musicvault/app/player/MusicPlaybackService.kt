@@ -79,15 +79,21 @@ class MusicPlaybackService : MediaSessionService() {
     private fun startCrossfadeMonitor() {
         serviceScope.launch {
             while (isActive) {
+                // Nothing can crossfade while paused: sleep long and skip the
+                // prefs read instead of waking every 2 s for the whole session.
+                if (!player.isPlaying) {
+                    delay(5_000L)
+                    continue
+                }
                 val crossfadeSeconds = settings.getInt("crossfade_seconds", 5).coerceIn(0, 12)
-                
+
                 // duration > 0 excludes C.TIME_UNSET: with an unknown duration
                 // "remaining" is garbage and the crossfade can never trigger,
                 // so poll slowly instead of busy-looping at 100ms.
-                if (crossfadeSeconds > 0 && player.isPlaying && player.hasNextMediaItem() && player.duration > 0L) {
+                if (crossfadeSeconds > 0 && player.hasNextMediaItem() && player.duration > 0L) {
                     val remaining = player.duration - player.currentPosition
                     val crossfadeWindowMs = crossfadeSeconds * 1000L
-                    
+
                     // ✅ Solo monitorear cuando estamos cerca del crossfade
                     if (remaining <= crossfadeWindowMs + 2000L) { // 2s buffer
                         maybeCrossfade()

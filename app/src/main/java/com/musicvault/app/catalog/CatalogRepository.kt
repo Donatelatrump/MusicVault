@@ -6,7 +6,10 @@ import com.musicvault.app.data.TrackEntity
 import com.musicvault.app.data.CatalogSearchCacheEntity
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 
 class CatalogRepository(
@@ -23,13 +26,19 @@ class CatalogRepository(
 
     /** Cached search metadata used by Home recommendations without another network request. */
     fun cachedTracks(): Flow<List<CatalogTrack>> =
-        db.catalogSearchCacheDao().observeAll().map { entries ->
-            entries.asSequence()
-                .flatMap { decode(it).tracks.asSequence() }
-                .distinctBy { "${it.provider}:${it.id}" }
-                .take(120)
-                .toList()
-        }
+        db.catalogSearchCacheDao().observeAll()
+            .map { entries ->
+                entries.asSequence()
+                    .flatMap { decode(it).tracks.asSequence() }
+                    .distinctBy { "${it.provider}:${it.id}" }
+                    .take(120)
+                    .toList()
+            }
+            // JSON decoding of the whole cache is not free: keep it off the
+            // main thread and swallow no-op re-emissions (Room re-fires this
+            // flow on ANY write to the table).
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
 
     suspend fun search(query: String, limitTracks: Int = 20, limitAlbums: Int = 10): MetadataCatalogProvider.SearchResult {
         val normalized = query.trim().lowercase()
@@ -38,11 +47,11 @@ class CatalogRepository(
         val now = System.currentTimeMillis()
         val cached = db.catalogSearchCacheDao().get(cacheKey)
         if (cached != null && now - cached.savedAt <= CACHE_TTL_MS) {
-            val cachedResult = decode(cached)
-            // Keep the Room library/catalog index warm even when the result comes
-            // from the search cache. Home recommendations rely on this metadata.
-            persist(cachedResult)
-            return cachedResult
+            // No re-persist on cache hit: the tracks/albums tables already hold
+            // this exact metadata from the first save, and re-upserting
+            // identical rows only invalidated Room flows and forced Home
+            // recommendations to recompute on every repeated search.
+            return decode(cached)
         }
 
         val results = if (provider is MetadataCatalogProvider) {
@@ -63,6 +72,11 @@ class CatalogRepository(
             )
         )
         db.catalogSearchCacheDao().deleteOlderThan(now - (24L * 60L * 60L * 1000L))
+        // Populate the Room tracks/albums index once per NEW search. The old
+        // code did this on repeated cache hits instead (upserting identical
+        // rows and invalidating Room flows every time); fresh results landing
+        // here keeps the index warm with a fraction of the writes.
+        persist(results)
         return results
     }
 

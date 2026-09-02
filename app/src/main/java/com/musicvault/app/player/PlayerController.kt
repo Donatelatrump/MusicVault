@@ -70,6 +70,11 @@ class PlayerController(context: Context) {
     // crossfade can never trigger.
     var onNextItemNeeded: ((finishedTrackId: String?) -> Unit)? = null
     private var pendingRefillFor: String? = null
+    // Last (trackId, isPlaying) pair pushed to the playback-UI listener. The
+    // widget only mirrors those two values, so publishing on every progress
+    // tick would cost a binder round-trip each 500 ms even with the widget
+    // gone. Invoking only on change keeps the widget live at transitions.
+    private var lastUiStateKey: Pair<String?, Boolean>? = null
     // Invoked on the main thread whenever playback UI state is re-published
     // (transitions, ticks). Used by the home-screen widget to stay in sync.
     var onPlaybackUiChanged: (() -> Unit)? = null
@@ -166,7 +171,11 @@ class PlayerController(context: Context) {
         } else {
             pendingRefillFor = null
         }
-        onPlaybackUiChanged?.invoke()
+        val uiKey = currentId to controller.isPlaying
+        if (uiKey != lastUiStateKey) {
+            lastUiStateKey = uiKey
+            onPlaybackUiChanged?.invoke()
+        }
     }
 
     private fun publishQueue(controller: MediaController) {

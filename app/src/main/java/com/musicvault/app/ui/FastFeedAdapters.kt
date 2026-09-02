@@ -134,9 +134,13 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
     ) {
         val oldSelected = this.selectedTrackId
         val oldPlaying = this.isPlaying
-        val recommendationsChanged = recommendedTracks.map { it.id } != recommendedTracksCache.map { it.id } ||
-            recommendedAlbums.map { it.id } != recommendedAlbumsCache.map { it.id } ||
-            recommendations.map { it.id } != recommendationsCache.map { it.id }
+        // Identity-first comparisons: the lists are usually the SAME instances
+        // across recompositions, so the element-wise map/equals only runs when
+        // a genuinely new list arrived.
+        val recommendationsChanged =
+            (recommendedTracks !== recommendedTracksCache && recommendedTracks.map { it.id } != recommendedTracksCache.map { it.id }) ||
+                (recommendedAlbums !== recommendedAlbumsCache && recommendedAlbums.map { it.id } != recommendedAlbumsCache.map { it.id }) ||
+                (recommendations !== recommendationsCache && recommendations.map { it.id } != recommendationsCache.map { it.id })
         val auxiliaryDataChanged = this.playlists != playlists || this.customAlbums != customAlbums
         val downloadsChanged = this.albumDownloads != albumDownloads
 
@@ -497,6 +501,7 @@ internal class LocalAlbumDetailAdapter(private val vm: MusicVaultViewModel) :
     private var album: Album? = null
     private var playlists: List<Playlist> = emptyList()
     private var albums: List<Album> = emptyList()
+    private var tracksCache: List<Track> = emptyList()
     private var selectedTrackId: String? = null
     private var isPlaying: Boolean = false
     private var onBack: (() -> Unit)? = null
@@ -555,18 +560,37 @@ internal class LocalAlbumDetailAdapter(private val vm: MusicVaultViewModel) :
         isPlaying: Boolean,
         onBack: () -> Unit
     ) {
+        // This update runs on every recomposition of the hosting screen. Skip
+        // the whole rebuild (and DiffUtil) when nothing the rows render changed.
         val headerChanged = this.album != album || this.onBack !== onBack
+        val tracksChanged = tracks !== tracksCache && tracks != tracksCache
+        val selectionChanged = this.selectedTrackId != selectedTrackId || this.isPlaying != isPlaying
+        val auxiliaryChanged = this.playlists != playlists || this.albums != albums
+        val oldSelected = this.selectedTrackId
+        val oldPlaying = this.isPlaying
+        if (!headerChanged && !tracksChanged && !selectionChanged && !auxiliaryChanged) return
+
         this.album = album
         this.playlists = playlists
         this.albums = albums
-        val oldSelected = this.selectedTrackId
-        val oldPlaying = this.isPlaying
         this.selectedTrackId = selectedTrackId
         this.isPlaying = isPlaying
         this.onBack = onBack
-        submitList(tracks.toList()) {
+
+        if (tracksChanged) {
+            tracksCache = tracks
+            submitList(tracks.toList()) {
+                if (headerChanged && itemCount > 0) notifyItemChanged(0)
+                if (selectionChanged) {
+                    if (oldSelected != null) currentList.indexOfFirst { it.id == oldSelected }.takeIf { it >= 0 }?.let { notifyItemChanged(it + 1, STATE_PAYLOAD) }
+                    if (selectedTrackId != null && selectedTrackId != oldSelected) currentList.indexOfFirst { it.id == selectedTrackId }.takeIf { it >= 0 }?.let { notifyItemChanged(it + 1, STATE_PAYLOAD) }
+                }
+            }
+        } else {
+            // Same row set: refresh only the header and the affected rows
+            // instead of running DiffUtil over the whole album again.
             if (headerChanged && itemCount > 0) notifyItemChanged(0)
-            if (oldSelected != selectedTrackId || oldPlaying != isPlaying) {
+            if (selectionChanged) {
                 if (oldSelected != null) currentList.indexOfFirst { it.id == oldSelected }.takeIf { it >= 0 }?.let { notifyItemChanged(it + 1, STATE_PAYLOAD) }
                 if (selectedTrackId != null && selectedTrackId != oldSelected) currentList.indexOfFirst { it.id == selectedTrackId }.takeIf { it >= 0 }?.let { notifyItemChanged(it + 1, STATE_PAYLOAD) }
             }

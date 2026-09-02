@@ -405,6 +405,8 @@ private fun PersistentSection(
 private fun HomeScreen(state: MusicUiState, albumDownloads: Set<String>, isPlaying: Boolean, vm: MusicVaultViewModel) {
     val context = LocalContext.current
     val adapter = remember { HomeFeedAdapter(vm) }
+    // Filtered once per albums emission instead of once per recomposition.
+    val customAlbums = remember(state.albums) { state.albums.filter { it.id.startsWith("album:custom:") } }
     AndroidView(
         modifier = Modifier.fillMaxSize().clipToBounds(),
         factory = {
@@ -428,16 +430,23 @@ private fun HomeScreen(state: MusicUiState, albumDownloads: Set<String>, isPlayi
             }
         },
         update = {
-            adapter.update(
-                recommendedTracks = state.recommendedTracks,
-                recommendedAlbums = state.recommendedAlbums,
-                recommendations = state.recommendedTracks,
-                playlists = state.playlists,
-                customAlbums = state.albums.filter { it.id.startsWith("album:custom:") },
-                albumDownloads = albumDownloads,
-                selectedTrackId = state.selectedTrack?.id,
-                isPlaying = isPlaying
-            )
+            // Skip adapter pushes while the tab is hidden (alpha 0): this
+            // screen recomposes on every root state emission, but pushing
+            // into a hidden RecyclerView is wasted work. Reactivating the
+            // section flips state.section, so the first update afterwards
+            // repushes everything.
+            if (state.section == AppSection.HOME) {
+                adapter.update(
+                    recommendedTracks = state.recommendedTracks,
+                    recommendedAlbums = state.recommendedAlbums,
+                    recommendations = state.recommendedTracks,
+                    playlists = state.playlists,
+                    customAlbums = customAlbums,
+                    albumDownloads = albumDownloads,
+                    selectedTrackId = state.selectedTrack?.id,
+                    isPlaying = isPlaying
+                )
+            }
         }
     )
 }
@@ -638,13 +647,15 @@ private fun SearchScreen(
                     }
                 },
                 update = { recyclerView ->
-                    adapter.updateItems(resultItems)
-
-                    // Skip state pushes while the tab is hidden (alpha 0): the
-                    // screen keeps observing flows (download progress ticks),
-                    // but pushing state into a hidden RecyclerView is wasted
-                    // work. The first update after reactivation repushes all.
+                    // Hidden-tab guard: don't rebuild items while the tab is
+                    // hidden; results only change while the tab is visible.
                     if (state.section == AppSection.SEARCH) {
+                        adapter.updateItems(resultItems)
+
+                        // Skip state pushes while the tab is hidden (alpha 0): the
+                        // screen keeps observing flows (download progress ticks),
+                        // but pushing state into a hidden RecyclerView is wasted
+                        // work. The first update after reactivation repushes all.
                         // Use the repository's authoritative downloaded list. Its IDs are
                         // already the exact provider:recording:<id> keys used by remote
                         // downloads, so search rows switch to the post-download state as
@@ -846,6 +857,7 @@ private fun LibraryScreen(state: MusicUiState, isPlaying: Boolean, vm: MusicVaul
         if (granted) vm.scanLocalAudio(context)
     }
     val adapter = remember { LibraryFeedAdapter(vm) }
+    val customAlbums = remember(state.albums) { state.albums.filter { a -> a.id.startsWith("album:custom:") } }
 
     AndroidView(
         modifier = Modifier.fillMaxSize().clipToBounds(),
@@ -866,13 +878,16 @@ private fun LibraryScreen(state: MusicUiState, isPlaying: Boolean, vm: MusicVaul
             }
         },
         update = {
-            adapter.update(
-                tracks = state.downloaded,
-                playlists = state.playlists,
-                customAlbums = state.albums.filter { a -> a.id.startsWith("album:custom:") },
-                selectedTrackId = state.selectedTrack?.id,
-                isPlaying = isPlaying
-            )
+            // Hidden-tab guard: same rationale as HomeScreen.
+            if (state.section == AppSection.LIBRARY) {
+                adapter.update(
+                    tracks = state.downloaded,
+                    playlists = state.playlists,
+                    customAlbums = customAlbums,
+                    selectedTrackId = state.selectedTrack?.id,
+                    isPlaying = isPlaying
+                )
+            }
         }
     )
 }
@@ -903,7 +918,10 @@ private fun PlaylistScreen(state: MusicUiState, vm: MusicVaultViewModel) {
             }
         },
         update = {
-            adapter.update(state.playlists)
+            // Hidden-tab guard: same rationale as HomeScreen.
+            if (state.section == AppSection.PLAYLISTS) {
+                adapter.update(state.playlists)
+            }
         }
     )
 
@@ -970,6 +988,7 @@ private fun LocalAlbumDetail(
 ) {
     val context = LocalContext.current
     val albumAdapter = remember(vm) { LocalAlbumDetailAdapter(vm) }
+    val customAlbums = remember(albums) { albums.filter { it.id.startsWith("album:custom:") } }
 
     AndroidView(
         modifier = Modifier.fillMaxSize(),
@@ -991,7 +1010,7 @@ private fun LocalAlbumDetail(
                 album = album,
                 tracks = tracks,
                 playlists = playlists,
-                albums = albums.filter { it.id.startsWith("album:custom:") },
+                albums = customAlbums,
                 selectedTrackId = selectedTrackId,
                 isPlaying = isPlaying,
                 onBack = vm::closeLocalAlbum
@@ -2027,7 +2046,9 @@ private fun VinylDisc(coverUri: String?, title: String, isPlaying: Boolean, modi
             AsyncImage(
                 model = ImageRequest.Builder(LocalContext.current)
                     .data(coverUri)
-                    .memoryCacheKey("vinyl:$coverUri")
+                    // Cap the decode: the record never renders larger than
+                    // ~300dp, a full-res decode here was pure memory waste.
+                    .size(512)
                     .crossfade(true)
                     .build(),
                 contentDescription = title,
@@ -2232,7 +2253,9 @@ private fun CircularVisualizer(
                 AsyncImage(
                     model = ImageRequest.Builder(LocalContext.current)
                         .data(coverUri)
-                        .memoryCacheKey("circular:$coverUri")
+                        // Same cap as VinylDisc: shares one decoded entry with
+                        // the vinyl skin instead of decoding full-res.
+                        .size(512)
                         .crossfade(true)
                         .build(),
                     contentDescription = title,

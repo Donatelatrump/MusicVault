@@ -68,10 +68,17 @@ class MusicWidgetProvider : AppWidgetProvider() {
         /** Re-renders every widget instance; a no-op when nothing changed. */
         fun push(context: Context) {
             val app = context.applicationContext
+            // Dedupe BEFORE touching AppWidgetManager: pushes arrive on every
+            // playback transition and getAppWidgetIds is a binder call to
+            // system_server. The cheap key check short-circuits no-op pushes.
+            val c = controller
+            if (c != null) {
+                val key = c.currentMediaItem?.mediaId to c.isPlaying
+                if (key == lastPushedKey) return
+            }
             val manager = AppWidgetManager.getInstance(app) ?: return
             val ids = manager.getAppWidgetIds(ComponentName(app, MusicWidgetProvider::class.java))
             if (ids.isEmpty()) return
-            val c = controller
             if (c == null) {
                 // First push after process start: bind a MediaController and
                 // re-render with live state instead of leaving the placeholder.
@@ -79,9 +86,7 @@ class MusicWidgetProvider : AppWidgetProvider() {
             }
             val item = c?.currentMediaItem
             if (c != null) {
-                val key = item?.mediaId to c.isPlaying
-                if (key == lastPushedKey) return
-                lastPushedKey = key
+                lastPushedKey = item?.mediaId to c.isPlaying
             }
             val views = RemoteViews(app.packageName, R.layout.widget_music)
             views.setTextViewText(

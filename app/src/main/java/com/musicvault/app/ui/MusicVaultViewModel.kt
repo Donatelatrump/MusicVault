@@ -132,6 +132,9 @@ class MusicVaultViewModel(
     private var albumJob: Job? = null
     private var historyJob: Job? = null
     private var lastHistoryUpdateAt = 0L
+    // Cached resolution of the currently playing track for the history writer.
+    private var historyTrackId: String? = null
+    private var historyTrack: Track? = null
 
     private val localTracks = repository.tracks()
     private val downloaded = repository.downloaded()
@@ -425,10 +428,17 @@ class MusicVaultViewModel(
                 .collect { progress ->
                     val now = System.currentTimeMillis()
                     if (!progress.isPlaying && progress.positionMs <= 0L) return@collect
-                    if (now - lastHistoryUpdateAt < 2_000L) return@collect
+                    if (now - lastHistoryUpdateAt < 10_000L) return@collect
                     val ratio = (progress.positionMs.toFloat() / progress.durationMs.toFloat()).coerceIn(0f, 1f)
                     progress.trackId?.let { id ->
-                        localTracks.first().firstOrNull { it.id == id }?.let { current ->
+                        // Resolve the track once per track change, not once per
+                        // throttled tick: a full table query every 2 s was the
+                        // hottest DB path during playback.
+                        if (id != historyTrackId) {
+                            historyTrack = localTracks.first().firstOrNull { it.id == id }
+                            historyTrackId = id
+                        }
+                        historyTrack?.let { current ->
                             if (_selectedTrack.value?.id != id) _selectedTrack.value = current
                         }
                         repository.updateLatestCompletion(id, ratio)
@@ -1204,15 +1214,15 @@ class MusicVaultViewModel(
         _downloadProgress.value = _downloadProgress.value + (id to 0)
         val job = viewModelScope.launch(Dispatchers.IO) {
             try {
-                var lastProgress = 0
                 var lastProgressAt = 0L
                 val result = Providers.download(name, author, onProgress = { progress ->
                     val now = System.currentTimeMillis()
-                    // Download progress is not animation state. Throttle UI updates
-                    // ✅ Optimized progress throttling: only update UI when meaningful
-                    // Reduced from 120ms to 300ms to decrease UI updates by ~60%
-                    if (progress == 100 || progress == 0 || progress - lastProgress >= 5 || now - lastProgressAt >= 300L) {
-                        lastProgress = progress
+                    // Download progress is not animation state. Time-based
+                    // throttle: the OR of the old condition (>=5% OR >=300ms)
+                    // fired on nearly every callback with fast downloads;
+                    // capping by elapsed time alone bounds map copies to 2/s
+                    // while keeping the bar visibly alive.
+                    if (progress == 100 || progress == 0 || now - lastProgressAt >= 500L) {
                         lastProgressAt = now
                         _downloadProgress.value = _downloadProgress.value + (id to progress)
                     }
