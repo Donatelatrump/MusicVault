@@ -2,6 +2,13 @@ package com.musicvault.app.catalog
 
 import androidx.compose.runtime.Immutable
 
+enum class CatalogContentType {
+    MUSIC,
+    PODCAST,
+    ASMR,
+    OTHER
+}
+
 @Immutable
 data class CatalogTrack(
     val id: String,
@@ -12,7 +19,12 @@ data class CatalogTrack(
     val albumTitle: String?,
     val durationMs: Long,
     val coverUri: String? = null,
-    val provider: String = "musicbrainz"
+    val provider: String = "musicbrainz",
+    val description: String? = null,
+    val url: String? = null,
+    val source: String? = null,
+    val sourceId: String? = null,
+    val contentType: CatalogContentType = CatalogContentType.MUSIC
 )
 
 @Immutable

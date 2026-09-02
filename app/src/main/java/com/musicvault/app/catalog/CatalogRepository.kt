@@ -92,6 +92,11 @@ class CatalogRepository(
                 put("durationMs", item.durationMs)
                 put("coverUri", item.coverUri ?: JSONObject.NULL)
                 put("provider", item.provider)
+                put("description", item.description ?: JSONObject.NULL)
+                put("url", item.url ?: JSONObject.NULL)
+                put("source", item.source ?: JSONObject.NULL)
+                put("sourceId", item.sourceId ?: JSONObject.NULL)
+                put("contentType", item.contentType.name)
             })
         }
     }.toString()
@@ -125,7 +130,14 @@ class CatalogRepository(
                             albumTitle = item.optionalString("albumTitle"),
                             durationMs = item.optLong("durationMs", 0L),
                             coverUri = item.optionalString("coverUri"),
-                            provider = item.optString("provider", "musicbrainz")
+                            provider = item.optString("provider", "musicbrainz"),
+                            description = item.optionalString("description"),
+                            url = item.optionalString("url"),
+                            source = item.optionalString("source"),
+                            sourceId = item.optionalString("sourceId"),
+                            contentType = item.optionalString("contentType")
+                                ?.let { runCatching { CatalogContentType.valueOf(it) }.getOrNull() }
+                                ?: CatalogContentType.MUSIC
                         ))
                     }
                 }
@@ -204,7 +216,8 @@ class CatalogRepository(
                 id = "${it.provider}:recording:${it.id}", title = it.title, artistName = it.artistName,
                 albumId = it.albumId?.let { id -> "${it.provider}:release:$id" } ?: "unknown",
                 albumTitle = it.albumTitle ?: "Álbum desconocido", durationMs = it.durationMs,
-                audioUri = null, isDownloaded = false, coverUri = it.coverUri
+                audioUri = null, isDownloaded = false, coverUri = it.coverUri,
+                source = it.source, sourceId = it.sourceId
             )
         })
     }

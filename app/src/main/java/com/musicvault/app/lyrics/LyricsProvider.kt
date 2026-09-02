@@ -1,5 +1,6 @@
 package com.musicvault.app.lyrics
 
+import java.util.Locale
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URLEncoder
@@ -29,6 +30,31 @@ object LyricsProvider {
 
     private fun isUsable(lyrics: Lyrics): Boolean =
         lyrics.synced.size >= MIN_SYNCED_LINES || (lyrics.plain?.length ?: 0) >= MIN_PLAIN_CHARS
+
+    fun buildLrc(lyrics: Lyrics): String = when {
+        lyrics.synced.isNotEmpty() -> buildString {
+            lyrics.synced.forEach { line ->
+                val totalMs = line.timeMs.coerceAtLeast(0L)
+                val minutes = totalMs / 60_000L
+                val seconds = (totalMs % 60_000L) / 1000L
+                val centiseconds = ((totalMs % 1000L) / 10L).coerceIn(0L, 99L)
+                append('[')
+                append(String.format(Locale.US, "%02d:%02d.%02d", minutes, seconds, centiseconds))
+                append("] ")
+                append(line.text)
+                append('\n')
+            }
+        }
+        !lyrics.plain.isNullOrBlank() -> lyrics.plain.trimEnd()
+        else -> ""
+    }
+
+    fun parseStoredLrc(raw: String): Lyrics? {
+        val synced = parseLrc(raw)
+        if (synced.isNotEmpty()) return Lyrics(plain = null, synced = synced)
+        val plain = raw.trim()
+        return plain.takeIf { it.isNotBlank() }?.let { Lyrics(plain = it, synced = emptyList()) }
+    }
 
     fun fetch(artist: String, title: String, album: String? = null, durationMs: Long = 0L): Lyrics? {
         val durationSeconds = (durationMs / 1000L).takeIf { it > 0 }

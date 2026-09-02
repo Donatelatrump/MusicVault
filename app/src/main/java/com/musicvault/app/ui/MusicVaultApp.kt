@@ -158,6 +158,10 @@ fun MusicVaultApp(vm: MusicVaultViewModel) {
     val favoriteIds = state.favoriteIds
     val equalizerBands by vm.equalizerBands.collectAsState()
     val eqEnabled by vm.eqEnabled.collectAsState()
+    val eqPreset by vm.eqPreset.collectAsState()
+    val loudnessGainMb by vm.loudnessGainMb.collectAsState()
+    val bassBoostAvailable by vm.bassBoostAvailable.collectAsState()
+    val virtualizerAvailable by vm.virtualizerAvailable.collectAsState()
     val downloadDirLabel by vm.downloadDirLabel.collectAsState()
     // SAF directory picker for the user-selected download destination.
     val folderPicker = rememberLauncherForActivityResult(
@@ -209,12 +213,20 @@ fun MusicVaultApp(vm: MusicVaultViewModel) {
                     crossfadeSeconds = state.crossfadeSeconds,
                     equalizerBands = equalizerBands,
                     eqEnabled = eqEnabled,
+                    eqPreset = eqPreset,
+                    loudnessGainMb = loudnessGainMb,
+                    bassBoostAvailable = bassBoostAvailable,
+                    virtualizerAvailable = virtualizerAvailable,
                     playerStyle = state.playerStyle,
                     downloadDirLabel = downloadDirLabel,
                     onCrossfadeChange = vm::setCrossfadeSeconds,
                     onPlayerStyleChange = vm::setPlayerStyle,
                     onEqualizerEnabled = vm::setEqualizerEnabled,
                     onEqualizerBand = vm::setEqualizerBand,
+                    onEqualizerPreset = vm::applyEqualizerPreset,
+                    onLoudnessChange = vm::setLoudnessGain,
+                    onBassBoostStrength = vm::setBassBoostStrength,
+                    onVirtualizerStrength = vm::setVirtualizerStrength,
                     onPickDownloadFolder = { folderPicker.launch(null) },
                     onUseInternalFolder = vm::useInternalDownloads,
                     onClose = { showSettings = false }
@@ -2403,13 +2415,21 @@ private fun SyncedLyricsList(lines: List<LyricLine>, positionState: State<Long>,
 @Composable
 private fun SettingsScreen(
     crossfadeSeconds: Int,
-    equalizerBands: List<com.musicvault.app.player.NativeEqualizer.Band>,
+    equalizerBands: List<com.musicvault.app.player.AudioEffects.Band>,
     eqEnabled: Boolean,
+    eqPreset: com.musicvault.app.player.EqualizerPreset,
+    loudnessGainMb: Int,
+    bassBoostAvailable: Boolean,
+    virtualizerAvailable: Boolean,
     playerStyle: String,
     downloadDirLabel: String,
     onCrossfadeChange: (Int) -> Unit,
     onEqualizerEnabled: (Boolean) -> Unit,
     onEqualizerBand: (Int, Short) -> Unit,
+    onEqualizerPreset: (com.musicvault.app.player.EqualizerPreset) -> Unit,
+    onLoudnessChange: (Int) -> Unit,
+    onBassBoostStrength: (Int) -> Unit,
+    onVirtualizerStrength: (Int) -> Unit,
     onPickDownloadFolder: () -> Unit,
     onUseInternalFolder: () -> Unit,
     onPlayerStyleChange: (String) -> Unit,
@@ -2541,6 +2561,87 @@ private fun SettingsScreen(
                         colors = SwitchDefaults.colors(checkedThumbColor = VaultColors.OnAccent, checkedTrackColor = VaultColors.Accent)
                     )
                 }
+
+                Spacer(Modifier.height(14.dp))
+                Text("Presets", color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                Spacer(Modifier.height(8.dp))
+                PresetChips(
+                    selected = eqPreset,
+                    onSelect = { onEqualizerPreset(it) }
+                )
+
+                Spacer(Modifier.height(14.dp))
+                Text(
+                    "Volume Boost",
+                    color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 13.sp
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    "Aumenta la ganancia general sin distorsión. Independiente del preset.",
+                    color = VaultColors.TextTertiary, fontSize = 11.sp
+                )
+                var loudnessDrag by remember(loudnessGainMb) { mutableStateOf<Float?>(null) }
+                val shownLoudnessDb = (loudnessDrag ?: loudnessGainMb.toFloat()) / 1000f
+                Slider(
+                    value = loudnessDrag ?: loudnessGainMb.toFloat(),
+                    onValueChange = { loudnessDrag = it },
+                    onValueChangeFinished = {
+                        loudnessDrag?.toInt()?.let(onLoudnessChange)
+                        loudnessDrag = null
+                    },
+                    valueRange = 0f..3000f,
+                    colors = SliderDefaults.colors(thumbColor = VaultColors.Accent, activeTrackColor = VaultColors.Accent, inactiveTrackColor = VaultColors.Surface3)
+                )
+                Text(
+                    String.format(java.util.Locale.US, "%+5.1f dB", shownLoudnessDb),
+                    color = VaultColors.Accent,
+                    fontSize = 12.sp,
+                    fontFamily = VaultFonts.Mono
+                )
+
+                if (bassBoostAvailable) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Bass Boost (efecto nativo)",
+                        color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 13.sp
+                    )
+                    var bbDrag by remember { mutableStateOf<Float?>(null) }
+                    Slider(
+                        value = bbDrag ?: eqPreset.bassBoost.toFloat(),
+                        onValueChange = { bbDrag = it },
+                        onValueChangeFinished = {
+                            bbDrag?.toInt()?.let(onBassBoostStrength)
+                            bbDrag = null
+                        },
+                        valueRange = 0f..1000f,
+                        colors = SliderDefaults.colors(thumbColor = VaultColors.Accent, activeTrackColor = VaultColors.Accent, inactiveTrackColor = VaultColors.Surface3)
+                    )
+                }
+
+                if (virtualizerAvailable) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Virtualizador",
+                        color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 13.sp
+                    )
+                    var virtDrag by remember { mutableStateOf<Float?>(null) }
+                    Slider(
+                        value = virtDrag ?: eqPreset.virtualizer.toFloat(),
+                        onValueChange = { virtDrag = it },
+                        onValueChangeFinished = {
+                            virtDrag?.toInt()?.let(onVirtualizerStrength)
+                            virtDrag = null
+                        },
+                        valueRange = 0f..1000f,
+                        colors = SliderDefaults.colors(thumbColor = VaultColors.Accent, activeTrackColor = VaultColors.Accent, inactiveTrackColor = VaultColors.Surface3)
+                    )
+                }
+
+                if (equalizerBands.isNotEmpty()) {
+                    Spacer(Modifier.height(14.dp))
+                    Text("Bandas", color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                    Spacer(Modifier.height(4.dp))
+                }
                 equalizerBands.forEach { band ->
                     Column {
                         Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
@@ -2603,6 +2704,42 @@ private fun StyleOption(
         Text(title, color = VaultColors.TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, lineHeight = 16.sp)
         Spacer(Modifier.height(2.dp))
         Text(description, color = VaultColors.TextTertiary, fontSize = 10.sp, lineHeight = 13.sp)
+    }
+}
+
+/** Horizontally-scrolling chips that select one of the curated EQ presets. */
+@Composable
+private fun PresetChips(
+    selected: com.musicvault.app.player.EqualizerPreset,
+    onSelect: (com.musicvault.app.player.EqualizerPreset) -> Unit
+) {
+    LazyRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        contentPadding = PaddingValues(horizontal = 2.dp)
+    ) {
+        items(com.musicvault.app.player.EqualizerPreset.entries.toList()) { preset ->
+            val isSelected = preset == selected
+            Row(
+                Modifier
+                    .clip(RoundedCornerShape(50))
+                    .background(if (isSelected) VaultColors.Accent else VaultColors.Surface2)
+                    .border(
+                        1.dp,
+                        if (isSelected) VaultColors.Accent else VaultColors.Divider,
+                        RoundedCornerShape(50)
+                    )
+                    .clickable { onSelect(preset) }
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    preset.displayName,
+                    color = if (isSelected) VaultColors.OnAccent else VaultColors.TextPrimary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        }
     }
 }
 

@@ -216,6 +216,7 @@ class RemoteResultsAdapter(
         private val image = itemView.findViewWithTag<ImageView>("cover")
         private val title = itemView.findViewWithTag<TextView>("title")
         private val subtitle = itemView.findViewWithTag<TextView>("subtitle")
+        private val description = itemView.findViewWithTag<TextView>("description")
         private val progressBar = itemView.findViewWithTag<ProgressBar>("progress")
         private val downloadSpinner = itemView.findViewWithTag<DownloadSpinnerView>("downloadSpinner")
         private val play = itemView.findViewWithTag<StyledPlayButton>("play")
@@ -261,7 +262,9 @@ class RemoteResultsAdapter(
             val downloading = p != null && !downloaded
             if (!stateOnly) {
                 title.text = value.title
-                subtitle.text = "${value.artistName} · ${value.albumTitle ?: "Álbum desconocido"}"
+                subtitle.text = buildSubtitle(value)
+                description.text = value.description?.takeIf { it.isNotBlank() }.orEmpty()
+                description.visibility = if (description.text.isNullOrBlank()) View.GONE else View.VISIBLE
                 loadCover(itemView.context, image, value.coverUri, 56)
             }
             progressBar.visibility = View.GONE
@@ -288,6 +291,22 @@ class RemoteResultsAdapter(
                 play.mode = if (isPlaying && selectedTrackId == localId) StyledPlayButton.Mode.PAUSE else StyledPlayButton.Mode.PLAY
             }
             title.setTextColor(if (isPlaying && selectedTrackId == localId) Color.parseColor("#E0A458") else Color.parseColor("#F1EAD9"))
+        }
+
+        private fun buildSubtitle(value: CatalogTrack): String {
+            val parts = buildList {
+                if (value.artistName.isNotBlank()) add(value.artistName)
+                when (value.contentType) {
+                    com.musicvault.app.catalog.CatalogContentType.MUSIC -> Unit
+                    com.musicvault.app.catalog.CatalogContentType.PODCAST -> add("Podcast")
+                    com.musicvault.app.catalog.CatalogContentType.ASMR -> add("ASMR")
+                    com.musicvault.app.catalog.CatalogContentType.OTHER -> add("Otro")
+                }
+                add(formatDuration(value.durationMs))
+            }.filter { it.isNotBlank() }
+            val base = parts.joinToString(" · ")
+            val source = value.source?.takeIf { it.isNotBlank() } ?: value.provider
+            return if (base.isBlank()) source else "$base · $source"
         }
     }
 
@@ -476,7 +495,7 @@ class RemoteResultsAdapter(
         }
 
         private fun makeTrackRow(context: Context): LinearLayout {
-            val row = makeRow(context, 68)
+            val row = makeRow(context, 84)
             row.removeViewAt(2)
             val text = row.getChildAt(1) as LinearLayout
             val progress = ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal).apply {
@@ -485,6 +504,14 @@ class RemoteResultsAdapter(
                 layoutParams = LinearLayout.LayoutParams(0, 0)
             }
             text.addView(progress)
+            text.addView(TextView(context).apply {
+                tag = "description"
+                setTextColor(Color.parseColor("#9C927F"))
+                textSize = 11f
+                maxLines = 2
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                visibility = View.GONE
+            })
             // Single fixed-size action column: play / spinner / more live in the
             // same 48dp box (visibility-toggled), so every row — no matter the
             // title length or download state — aligns its action in exactly the
@@ -518,6 +545,19 @@ class RemoteResultsAdapter(
             })
             row.addView(actions)
             return row
+        }
+
+        private fun formatDuration(durationMs: Long): String {
+            if (durationMs <= 0L) return "Duración desconocida"
+            val totalSeconds = durationMs / 1000L
+            val hours = totalSeconds / 3600L
+            val minutes = (totalSeconds % 3600L) / 60L
+            val seconds = totalSeconds % 60L
+            return if (hours > 0) {
+                "%d:%02d:%02d".format(hours, minutes, seconds)
+            } else {
+                "%d:%02d".format(minutes, seconds)
+            }
         }
 
         private fun buttonBackground(context: Context, normal: Int, pressed: Int, radius: Float): StateListDrawable {

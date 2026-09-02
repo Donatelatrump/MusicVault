@@ -12,11 +12,14 @@ import com.musicvault.app.catalog.CatalogRepository
 import com.musicvault.app.catalog.CatalogTrack
 import com.musicvault.app.catalog.CoverImageCache
 import com.musicvault.app.catalog.MetadataCatalogProvider
+import com.musicvault.app.catalog.YouTubeMetadataProvider
 import com.musicvault.app.data.*
 import com.musicvault.app.library.LocalAudioScanner
 import com.musicvault.app.lyrics.LyricLine
+import com.musicvault.app.lyrics.LyricsLocalStore
 import com.musicvault.app.lyrics.LyricsProvider
-import com.musicvault.app.player.NativeEqualizer
+import com.musicvault.app.player.AudioEffects
+import com.musicvault.app.player.EqualizerPreset
 import com.musicvault.app.player.PlayerController
 import com.musicvault.app.providers.ProviderResult
 import com.musicvault.app.providers.Providers
@@ -88,7 +91,7 @@ class MusicVaultViewModel(
     private val favoritesAlbumId = "playlist:favorites"
     private val catalog = CatalogRepository(MetadataCatalogProvider(), database)
     private val player = PlayerController(appContext)
-    private val equalizer = NativeEqualizer()
+    private val equalizer = AudioEffects()
     private val preferences: SharedPreferences = appContext.getSharedPreferences("musicvault.settings", Context.MODE_PRIVATE)
 
     private val _section = MutableStateFlow(AppSection.HOME)
@@ -196,13 +199,27 @@ class MusicVaultViewModel(
     val queue: StateFlow<List<Track>> = player.queue
     val queueIndex: StateFlow<Int> = player.queueIndex
     val audioSessionId: StateFlow<Int> = player.audioSessionId
-    private val _equalizerBands = MutableStateFlow<List<NativeEqualizer.Band>>(emptyList())
-    val equalizerBands: StateFlow<List<NativeEqualizer.Band>> = _equalizerBands.asStateFlow()
+    private val _equalizerBands = MutableStateFlow<List<AudioEffects.Band>>(emptyList())
+    val equalizerBands: StateFlow<List<AudioEffects.Band>> = _equalizerBands.asStateFlow()
     // Persisted opt-in: the EQ is OFF unless the user enables it, so attaching
     // the effect (app start, activity recreation) can never enable an audio
     // effect on a live session unprompted.
     private val _eqEnabled = MutableStateFlow(preferences.getBoolean("eq_enabled", false))
     val eqEnabled: StateFlow<Boolean> = _eqEnabled.asStateFlow()
+
+    private val _eqPreset = MutableStateFlow(EqualizerPreset.fromName(preferences.getString("eq_preset", null)))
+    val eqPreset: StateFlow<EqualizerPreset> = _eqPreset.asStateFlow()
+
+    private val _loudnessGainMb = MutableStateFlow(preferences.getInt("loudness_gain_mb", 0))
+    val loudnessGainMb: StateFlow<Int> = _loudnessGainMb.asStateFlow()
+
+    // Surface to the UI which auxiliary effects the device actually supports.
+    // Equalizer is the only one required to render the band sliders; the rest
+    // can be hidden if the platform refused to construct the AudioEffect.
+    private val _bassBoostAvailable = MutableStateFlow(false)
+    val bassBoostAvailable: StateFlow<Boolean> = _bassBoostAvailable.asStateFlow()
+    private val _virtualizerAvailable = MutableStateFlow(false)
+    val virtualizerAvailable: StateFlow<Boolean> = _virtualizerAvailable.asStateFlow()
 
     // Lyrics for the full player. One request in flight, results cached per
     // track so re-opening the player (or replaying a track) never refetches.
@@ -215,24 +232,32 @@ class MusicVaultViewModel(
         if (_lyrics.value.trackId == track.id && (_lyrics.value.loading || _lyrics.value.notFound ||
                 _lyrics.value.plain != null || _lyrics.value.synced.isNotEmpty())
         ) return
-        lyricsCache[track.id]?.let { cached ->
-            _lyrics.value = cached
-            return
-        }
         lyricsJob?.cancel()
-        _lyrics.value = LyricsUiState(trackId = track.id, loading = true)
         lyricsJob = viewModelScope.launch(Dispatchers.IO) {
-            val result = runCatching {
-                LyricsProvider.fetch(
-                    artist = track.artistName,
-                    title = track.title,
-                    album = track.albumTitle.takeIf { it.isNotBlank() && !it.equals("Álbum desconocido", ignoreCase = true) },
-                    durationMs = track.durationMs
-                )
-            }.getOrNull()
+            val localReference = database.downloadRecordDao().get(track.id)?.path ?: track.audioUri
+            val local = LyricsLocalStore.read(appContext, localReference)
             val state = when {
-                result == null || result.isEmpty -> LyricsUiState(trackId = track.id, notFound = true)
-                else -> LyricsUiState(trackId = track.id, plain = result.plain, synced = result.synced)
+                local != null && !local.isEmpty -> LyricsUiState(
+                    trackId = track.id,
+                    plain = local.plain,
+                    synced = local.synced
+                )
+                lyricsCache[track.id] != null -> lyricsCache[track.id]!!
+                else -> {
+                    _lyrics.value = LyricsUiState(trackId = track.id, loading = true)
+                    val result = runCatching {
+                        LyricsProvider.fetch(
+                            artist = track.artistName,
+                            title = track.title,
+                            album = track.albumTitle.takeIf { it.isNotBlank() && !it.equals("Álbum desconocido", ignoreCase = true) },
+                            durationMs = track.durationMs
+                        )
+                    }.getOrNull()
+                    when {
+                        result == null || result.isEmpty -> LyricsUiState(trackId = track.id, notFound = true)
+                        else -> LyricsUiState(trackId = track.id, plain = result.plain, synced = result.synced)
+                    }
+                }
             }
             if (lyricsCache.size >= 40) lyricsCache.clear()
             lyricsCache[track.id] = state
@@ -250,7 +275,8 @@ class MusicVaultViewModel(
         artistName = ct.artistName,
         albumId = ct.albumId?.let { "${ct.provider}:release:$it" } ?: "unknown",
         albumTitle = ct.albumTitle ?: "Álbum desconocido", durationMs = ct.durationMs,
-        audioUri = null, isDownloaded = false, coverUri = ct.coverUri
+        audioUri = null, isDownloaded = false, coverUri = ct.coverUri,
+        source = ct.source, sourceId = ct.sourceId
     )
 
     // Recommendations are isolated from fast-changing player/download UI state.
@@ -417,9 +443,16 @@ class MusicVaultViewModel(
             launch {
                 player.audioSessionId.collect { sessionId ->
                     // The effect is created disabled unless the user opted in;
-                    // never force-enable it on a live session (see NativeEqualizer).
+                    // never force-enable it on a live session (see AudioEffects).
                     if (sessionId > 0 && equalizer.attach(sessionId, _eqEnabled.value)) {
                         _equalizerBands.value = equalizer.bands()
+                        _bassBoostAvailable.value = equalizer.isBassBoostAvailable
+                        _virtualizerAvailable.value = equalizer.isVirtualizerAvailable
+                        // Replay persisted state onto the freshly attached
+                        // effects stack so the user's selection survives a
+                        // session change (new track, new device attach, etc).
+                        equalizer.setLoudnessGain(_loudnessGainMb.value)
+                        applyEqualizerPreset(_eqPreset.value)
                     }
                 }
             }
@@ -785,6 +818,49 @@ class MusicVaultViewModel(
     fun setEqualizerBand(index: Int, level: Short) {
         equalizer.setBandLevel(index, level)
         _equalizerBands.value = equalizer.bands()
+        // Any manual touch is a custom curve: stop pretending we are still on
+        // a curated preset and persist the transition so it survives a restart.
+        if (_eqPreset.value != EqualizerPreset.Custom) {
+            _eqPreset.value = EqualizerPreset.Custom
+            preferences.edit().putString("eq_preset", EqualizerPreset.Custom.name).apply()
+        }
+    }
+
+    /**
+     * Applies a curated preset: writes its band levels into the live effect,
+     * drives BassBoost/Virtualizer strengths and stores the selection. The
+     * master gain (LoudnessEnhancer) is left untouched so the volume-boost
+     * slider keeps its own independent value.
+     */
+    fun applyEqualizerPreset(preset: EqualizerPreset) {
+        _eqPreset.value = preset
+        preferences.edit().putString("eq_preset", preset.name).apply()
+        val bands = _equalizerBands.value
+        if (bands.isEmpty()) return
+        val target = preset.project(bands.first().minLevel, bands.first().maxLevel)
+        target.forEachIndexed { i, level ->
+            equalizer.setBandLevel(i, level)
+        }
+        equalizer.setBassBoostStrength(preset.bassBoost)
+        equalizer.setVirtualizerStrength(preset.virtualizer)
+        _equalizerBands.value = equalizer.bands()
+    }
+
+    fun setLoudnessGain(gainMb: Int) {
+        val clamped = gainMb.coerceIn(0, 3000)
+        _loudnessGainMb.value = clamped
+        preferences.edit().putInt("loudness_gain_mb", clamped).apply()
+        equalizer.setLoudnessGain(clamped)
+    }
+
+    /** Mirror of [applyEqualizerPreset] for direct slider control over BassBoost. */
+    fun setBassBoostStrength(strength: Int) {
+        equalizer.setBassBoostStrength(strength)
+    }
+
+    /** Mirror of [applyEqualizerPreset] for direct slider control over Virtualizer. */
+    fun setVirtualizerStrength(strength: Int) {
+        equalizer.setVirtualizerStrength(strength)
     }
 
     fun nextTrack() {
@@ -1109,7 +1185,13 @@ class MusicVaultViewModel(
 
     fun requestDownload(track: Track) {
         requestDownloadInternal(track.id, track.title, track.artistName) { result ->
-            if (result is ProviderResult.Success) repository.setDownloaded(track, result.audioUri)
+            if (result is ProviderResult.Success) {
+                repository.setDownloaded(track, result.audioUri)
+                persistDownloadedLyrics(
+                    track = track,
+                    localReference = result.localPath ?: result.audioUri
+                )
+            }
         }
     }
 
@@ -1143,15 +1225,27 @@ class MusicVaultViewModel(
             }
             return
         }
-        requestDownloadInternal(id, track.title, track.artistName) { result ->
+        requestDownloadInternal(id, track.title, track.artistName, track.url) { result ->
             if (result is ProviderResult.Success) {
                 val entity = TrackEntity(id, track.title, track.artistName,
                     track.albumId?.let { "${track.provider}:release:$it" } ?: "unknown",
-                    track.albumTitle ?: "Álbum desconocido", track.durationMs, result.audioUri, true, track.coverUri)
+                    track.albumTitle ?: "Álbum desconocido", track.durationMs, result.audioUri, true, track.coverUri,
+                    source = track.source ?: displaySource(track),
+                    sourceId = track.sourceId ?: track.id
+                )
                 database.trackDao().upsertAll(listOf(entity))
                 track.albumId?.let { albumId -> database.albumDao().upsertAll(listOf(AlbumEntity(
                     "${track.provider}:release:$albumId", track.albumTitle ?: "Álbum desconocido", track.artistId, track.artistName, 0, track.coverUri))) }
-                val local = Track(id, track.title, track.artistName, entity.albumId, entity.albumTitle, track.durationMs, result.audioUri, true, track.coverUri)
+                val local = Track(
+                    id, track.title, track.artistName, entity.albumId, entity.albumTitle,
+                    track.durationMs, result.audioUri, true, track.coverUri,
+                    source = track.source ?: displaySource(track),
+                    sourceId = track.sourceId ?: track.id
+                )
+                persistDownloadedLyrics(
+                    track = local,
+                    localReference = result.localPath ?: result.audioUri
+                )
                 onReady?.invoke(local)
                 onFinished?.invoke(local)
                 if (autoPlay) {
@@ -1172,7 +1266,7 @@ class MusicVaultViewModel(
             return
         }
         _providerMessage.value = "Descargando \"${track.title}\" para añadirla a la playlist..."
-        requestDownloadInternal(track.id, track.title, track.artistName) { result ->
+        requestDownloadInternal(track.id, track.title, track.artistName, track.url) { result ->
             if (result is ProviderResult.Success) {
                 val ready = track.copy(audioUri = result.audioUri, isDownloaded = true)
                 repository.setDownloaded(track, result.audioUri)
@@ -1196,7 +1290,7 @@ class MusicVaultViewModel(
             return
         }
         _providerMessage.value = "Descargando \"${track.title}\" para añadirla al álbum..."
-        requestDownloadInternal(track.id, track.title, track.artistName) { result ->
+        requestDownloadInternal(track.id, track.title, track.artistName, track.url) { result ->
             if (result is ProviderResult.Success) {
                 val ready = track.copy(audioUri = result.audioUri, isDownloaded = true)
                 repository.setDownloaded(track, result.audioUri)
@@ -1226,7 +1320,13 @@ class MusicVaultViewModel(
         viewModelScope.launch(Dispatchers.IO) { repository.deletePlaylist(playlistId) }
     }
 
-    private fun requestDownloadInternal(id: String, name: String, author: String, onSuccess: suspend (ProviderResult?) -> Unit) {
+    private fun requestDownloadInternal(
+        id: String,
+        name: String,
+        author: String,
+        sourceUrl: String? = null,
+        onSuccess: suspend (ProviderResult?) -> Unit
+    ) {
         val jobToStart = synchronized(downloadLock) {
             downloadWaiters.getOrPut(id) { mutableListOf() }.add(onSuccess)
             if (_downloadProgress.value.containsKey(id)) return
@@ -1235,7 +1335,7 @@ class MusicVaultViewModel(
             viewModelScope.launch(Dispatchers.IO) {
                 try {
                     var lastProgressAt = 0L
-                    val result = Providers.download(name, author, onProgress = { progress ->
+                    val result = Providers.download(name, author, sourceUrl = sourceUrl, onProgress = { progress ->
                         val now = System.currentTimeMillis()
                         // Download progress is not animation state. Time-based
                         // throttle: the OR of the old condition (>=5% OR >=300ms)
@@ -1248,6 +1348,13 @@ class MusicVaultViewModel(
                         }
                     }, requestId = id)
                     kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                    if (result is ProviderResult.Success) {
+                        runCatching {
+                            database.downloadRecordDao().save(
+                                DownloadRecordEntity(id, result.localPath ?: result.audioUri)
+                            )
+                        }
+                    }
                     val waiters = synchronized(downloadLock) { downloadWaiters.remove(id).orEmpty().toList() }
                     waiters.forEach { callback ->
                         try {
@@ -1313,4 +1420,36 @@ class MusicVaultViewModel(
             throw IllegalArgumentException("Unknown ViewModel: ${modelClass.name}")
         }
     }
+
+    private suspend fun persistDownloadedLyrics(track: Track, localReference: String?) {
+        val reference = localReference?.takeIf { it.isNotBlank() } ?: return
+        val existing = LyricsLocalStore.read(appContext, reference)
+        if (existing != null) return
+
+        val result = runCatching {
+            LyricsProvider.fetch(
+                artist = track.artistName,
+                title = track.title,
+                album = track.albumTitle.takeIf { it.isNotBlank() && !it.equals("Álbum desconocido", ignoreCase = true) },
+                durationMs = track.durationMs
+            )
+        }.getOrNull() ?: return
+
+        LyricsLocalStore.write(appContext, reference, result)
+    }
+
+    private fun displaySource(track: CatalogTrack): String = track.source
+        ?: when (track.provider) {
+            YouTubeMetadataProvider.PROVIDER_ID -> YouTubeMetadataProvider.SOURCE_NAME
+            "itunes" -> "iTunes"
+            "deezer" -> "Deezer"
+            "musicbrainz" -> "MusicBrainz"
+            else -> track.provider
+        }
+
+    private fun displaySource(track: Track): String = track.source
+        ?: when {
+            track.sourceId != null && track.sourceId.length == 11 -> YouTubeMetadataProvider.SOURCE_NAME
+            else -> "MusicVault"
+        }
 }

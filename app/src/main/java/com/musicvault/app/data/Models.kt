@@ -28,7 +28,10 @@ data class Track(
     val durationMs: Long,
     val audioUri: String? = null,
     val isDownloaded: Boolean = false,
-    val coverUri: String? = null
+    val coverUri: String? = null,
+    val source: String? = null,
+    val sourceId: String? = null,
+    val url: String? = null
 )
 
 @Immutable

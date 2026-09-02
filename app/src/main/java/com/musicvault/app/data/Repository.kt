@@ -135,7 +135,9 @@ class MusicRepository(private val db: MusicDatabase) {
                 durationMs = track.durationMs,
                 audioUri = audioUri,
                 isDownloaded = true,
-                coverUri = track.coverUri
+                coverUri = track.coverUri,
+                source = track.source,
+                sourceId = track.sourceId
             )
         )
     }
@@ -149,6 +151,8 @@ class MusicRepository(private val db: MusicDatabase) {
         durationMs = t.durationMs,
         audioUri = t.audioUri,
         isDownloaded = t.isDownloaded,
-        coverUri = t.coverUri
+        coverUri = t.coverUri,
+        source = t.source,
+        sourceId = t.sourceId
     )
 }

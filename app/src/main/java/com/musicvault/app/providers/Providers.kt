@@ -2,6 +2,7 @@ package com.musicvault.app.providers
 
 import android.content.Context
 import androidx.core.content.FileProvider
+import com.musicvault.app.catalog.CatalogTrack
 import com.yausername.ffmpeg.FFmpeg
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
@@ -115,7 +116,8 @@ object Providers {
         name: String,
         author: String,
         onProgress: (Int) -> Unit = {},
-        requestId: String? = null
+        requestId: String? = null,
+        sourceUrl: String? = null
     ): ProviderResult = downloadSlots.withPermit {
         withContext(Dispatchers.IO) {
             val context = appContext
@@ -137,7 +139,8 @@ object Providers {
                     ?: System.nanoTime().toString()
                 val stagingDir = File(rootDir, ".pending/$requestKey").apply { mkdirs() }
                 val outputTemplate = File(stagingDir, "%(id)s.%(ext)s").absolutePath
-                val query = "ytsearch1:${name.trim()} ${author.trim()}".trim()
+                val directUrl = sourceUrl?.trim()?.takeIf { it.isNotBlank() }
+                val query = directUrl ?: "ytsearch1:${name.trim()} ${author.trim()}".trim()
                 val request = YoutubeDLRequest(query)
 
                 request.addOption("--no-playlist")
@@ -229,7 +232,8 @@ object Providers {
                         return@withContext ProviderResult.Success(
                             document.uri.toString(),
                             document.name ?: finalFile.name,
-                            mime
+                            mime,
+                            document.uri.toString()
                         )
                     }
                 }
@@ -241,18 +245,31 @@ object Providers {
                 ).toString()
 
                 onProgress(100)
-                ProviderResult.Success(audioUri, finalFile.name, mime)
+                ProviderResult.Success(audioUri, finalFile.name, mime, finalFile.absolutePath)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
                 val version = runCatching { YoutubeDL.getInstance().versionName(context) }.getOrNull()
                 val suffix = version?.let { " (yt-dlp $it)" }.orEmpty()
+                unavailableReason(e.message)?.let { return@withContext ProviderResult.Unavailable(it) }
                 ProviderResult.Error(
                     "No se pudo descargar$suffix: ${e.message ?: e.javaClass.simpleName}"
                 )
             }
         }
     }
+
+    suspend fun download(
+        track: CatalogTrack,
+        onProgress: (Int) -> Unit = {},
+        requestId: String? = null
+    ): ProviderResult = download(
+        name = track.title,
+        author = track.artistName,
+        onProgress = onProgress,
+        requestId = requestId,
+        sourceUrl = track.url ?: track.sourceId?.let { "https://www.youtube.com/watch?v=$it" }
+    )
 
     fun cancel(requestId: String) {
         val processId = activeProcesses.remove(requestId) ?: return
@@ -284,6 +301,18 @@ object Providers {
         synchronized(fileReservationLock) { reservedFiles.remove(file.absolutePath) }
     }
 
+    private fun unavailableReason(message: String?): String? {
+        val text = message?.lowercase().orEmpty()
+        return when {
+            text.contains("video unavailable") -> "El video ya no está disponible."
+            text.contains("this video is unavailable") -> "El video ya no está disponible."
+            text.contains("removed by the uploader") -> "El video fue eliminado."
+            text.contains("private video") -> "El video es privado."
+            text.contains("not available") -> "El video ya no está disponible."
+            else -> null
+        }
+    }
+
     private val AUDIO_EXTENSIONS = setOf(
         "mp3", "m4a", "aac", "ogg", "opus", "webm", "wav", "flac"
     )
@@ -293,7 +322,8 @@ sealed interface ProviderResult {
     data class Success(
         val audioUri: String,
         val fileName: String,
-        val mimeType: String? = null
+        val mimeType: String? = null,
+        val localPath: String? = null
     ) : ProviderResult
 
     data class Unavailable(val reason: String) : ProviderResult

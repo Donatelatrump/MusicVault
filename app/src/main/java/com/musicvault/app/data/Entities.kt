@@ -27,7 +27,9 @@ data class TrackEntity(
     val durationMs: Long,
     val audioUri: String?,
     val isDownloaded: Boolean,
-    val coverUri: String? = null
+    val coverUri: String? = null,
+    val source: String? = null,
+    val sourceId: String? = null
 )
 
 @Entity(tableName = "playlists")
