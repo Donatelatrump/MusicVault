@@ -7,21 +7,19 @@ intercambiables** (Tornamesa de vinilo ↔ Visualizador circular).
 
 ## Abrir y ejecutar
 
-**Requisitos:** Xcode 15 o superior (o Swift Playgrounds en iPad), iOS 16+.
+**Requisitos:** Xcode 15 o superior, iOS 16+.
 
 ```bash
 cd ios/MusicVault
-open Package.swift        # Xcode lo abre como app (esquema "MusicVault")
+open MusicVault.xcodeproj   # Xcode abre el proyecto con esquema "MusicVault"
 # ⌘R en un simulador o dispositivo
 ```
 
-- El `Package.swift` usa el formato *Swift Playgrounds App*: no requiere generar
-  `.xcodeproj` ni dependencias externas.
-- Alternativa con **XcodeGen**: `brew install xcodegen && xcodegen` (usa `project.yml`,
-  incluye `UIBackgroundModes: audio` y target WidgetKit ya configurado).
-- **Audio en segundo plano / pantalla bloqueada:** con XcodeGen ya está activo. Con el
-  paquete Playgrounds, añádelo una vez en *Signing & Capabilities → Background Modes →
-  Audio, AirPlay, and Picture in Picture*.
+- El proyecto `MusicVault.xcodeproj` ya incluye los dos targets (`MusicVault` app +
+  `MusicVaultWidget` extension) y el `UIBackgroundModes: audio` necesario para que la
+  reproducción continúe en segundo plano / pantalla bloqueada / auriculares.
+- No hay dependencias externas (todo es SwiftUI, AVFoundation, MediaPlayer, SQLite3
+  del sistema y WidgetKit).
 
 ## Arquitectura — mapeo Android → iOS
 
@@ -63,39 +61,40 @@ open Package.swift        # Xcode lo abre como app (esquema "MusicVault")
 
 ```
 ios/MusicVault/
-├── Package.swift                  # App package (Xcode/Playgrounds, cero dependencias)
-├── project.yml                    # Alternativa XcodeGen con Background Modes + widget
+├── MusicVault.xcodeproj/         # Proyecto Xcode (app + widget, ⌘R directo)
+├── MusicVault/
+│   ├── MusicVaultApp.swift       # @main, tabs, mini player, overlays, environment
+│   ├── Theme.swift               # VaultColors, estilos, gradientes, custom fonts loader
+│   ├── Models.swift              # Track/Playlist/CatalogTrack/Lyrics + helpers
+│   ├── Database.swift            # SQLite3 actor (esquema espejo de Room)
+│   ├── LibraryStore.swift        # Estado global (mirror del ViewModel) + EQ integration
+│   ├── PlayerEngine.swift        # AVPlayer + shuffle/repeat/crossfade/queue/remote/now-playing
+│   ├── EqualizerController.swift # AVAudioEngine + AVAudioUnitEQ (10-band EQ)
+│   ├── CatalogService.swift      # Deezer + iTunes + MusicBrainz + caché
+│   ├── LyricsService.swift       # LRCLib exact/search + parser LRC
+│   ├── LocalImporter.swift       # fileImporter → Documents/Music (+duración AVAsset)
+│   ├── Common.swift              # Covers, TrackRow, actions sheet, pickers, banners
+│   ├── HomeView.swift            # Saludo, Para ti, Favoritos, Importadas
+│   ├── SearchView.swift          # Debounce 350 ms, álbumes + tracks, recientes
+│   ├── LibraryView.swift         # Favoritos + Importaciones + importar
+│   ├── AlbumsView.swift          # Playlists + Álbumes personalizados + detalle + crear
+│   ├── FullPlayerView.swift      # Metadatos, seek, transporte (shuffle/repeat), letras, cola
+│   ├── VinylDiscView.swift       # Tornamesa completa + fader RPM
+│   ├── CircularVisualizerView.swift
+│   ├── MiniPlayerView.swift
+│   ├── SettingsView.swift        # Estilo + RPM + Crossfade + EQ 10-band + Import + About
+│   ├── MusicBrainzProvider.swift # MB metadata + Cover Art Archive
+│   ├── Info.plist                # UIBackgroundModes: audio, URL scheme musicvault://
+│   ├── MusicVault.entitlements   # App Sandbox + user-selected files + MusicKit
+│   ├── Assets.xcassets/          # AppIcon + AccentColor
+│   └── Preview Content/
+│       └── Preview Assets.xcassets/
+├── MusicVaultWidget/
+│   ├── MusicVaultWidget.swift    # WidgetKit small/medium con controles
+│   ├── Info.plist
+│   └── Assets.xcassets/          # AccentColor + WidgetBackground
 ├── README.md
-├── PARITY_REPORT.md               # Matriz exhaustiva de paridad Android ↔ iOS
-└── Sources/
-    ├── AppModule/
-    │   ├── MusicVaultApp.swift    # @main, tabs, mini player, overlays, environment
-    │   ├── Theme.swift            # VaultColors, estilos, gradientes, **custom fonts loader**
-    │   ├── Models.swift           # Track/Playlist/CatalogTrack/Lyrics + helpers
-    │   ├── Database.swift         # SQLite3 actor (esquema espejo de Room)
-    │   ├── LibraryStore.swift     # Estado global (mirror del ViewModel) + EQ integration
-    │   ├── PlayerEngine.swift     # AVPlayer + shuffle/repeat/crossfade/queue/remote/now-playing
-    │   ├── EqualizerController.swift  # **AVAudioEngine + AVAudioUnitEQ (10-band EQ)**
-    │   ├── CatalogService.swift   # Deezer + iTunes + **MusicBrainz** + caché
-    │   ├── LyricsService.swift    # LRCLib exact/search + parser LRC
-    │   ├── LocalImporter.swift    # fileImporter → Documents/Music (+duración AVAsset)
-    │   ├── Common.swift           # Covers, TrackRow, actions sheet, pickers, banners
-    │   ├── HomeView.swift         # Saludo, Para ti, Favoritos, Importadas
-    │   ├── SearchView.swift       # Debounce 350 ms, álbumes + tracks, recientes
-    │   ├── LibraryView.swift      # Favoritos + Importaciones + importar
-    │   ├── AlbumsView.swift       # Playlists + Álbumes personalizados + detalle + crear
-    │   ├── FullPlayerView.swift   # Metadatos, seek, transporte (shuffle/repeat), letras, cola
-    │   ├── VinylDiscView.swift    # Tornamesa completa + fader RPM
-    │   ├── CircularVisualizerView.swift
-    │   ├── MiniPlayerView.swift
-    │   ├── SettingsView.swift     # Estilo + RPM + Crossfade + **EQ 10-band** + Import + About
-    │   ├── Providers/
-    │   │   └── MusicBrainzProvider.swift  # MB metadata + Cover Art Archive
-    │   └── Resources/
-    │       └── Fonts/             # SpaceGrotesk/Inter/Plex Mono TTFs
-    └── MusicVaultWidget/
-        ├── MusicVaultWidget.swift # WidgetKit small/medium con controles
-        └── Info.plist
+└── PARITY_REPORT.md              # Matriz exhaustiva de paridad Android ↔ iOS
 ```
 
 ## Notas de implementación
@@ -131,10 +130,9 @@ ios/MusicVault/
 
 ```bash
 cd ios/MusicVault
-open Package.swift          # Xcode 15+ abre directo (Swift Playgrounds App)
-# ⌘R en simulador/dispositivo
-# Opcional: xcodegen && open MusicVault.xcodeproj
+open MusicVault.xcodeproj   # Xcode 15+ abre directo
+# ⌘R en simulador o dispositivo físico
 ```
 
-**Audio en segundo plano:** con XcodeGen ya está activo (`UIBackgroundModes: audio` en `project.yml`).
-Con el paquete Playgrounds, añádelo en *Signing & Capabilities → Background Modes → Audio*.
+`UIBackgroundModes: audio` ya está en `MusicVault/Info.plist` — la reproducción
+continúa en segundo plano, pantalla bloqueada y Bluetooth automáticamente.

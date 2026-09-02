@@ -240,9 +240,15 @@ class PlayerController(context: Context) {
             controller.seekToNextMediaItem()
             controller.play()
         } else {
-            // Do not escape the explicit queue when it reaches its last item.
-            // Keep the queue intact and simply pause at the end.
-            controller.pause()
+            // No successor in the explicit queue: ask the app for one so the
+            // system media notification and Bluetooth/AVRCP keep working. The
+            // app appends the suggested track and the next progress tick will
+            // see hasNextMediaItem() == true. Without this, pressing Next on
+            // the headset at the end of a list silently did nothing and
+            // Media3 hid the next button from the notification.
+            val currentId = controller.currentMediaItem?.mediaId?.takeIf { it.isNotBlank() }
+            pendingRefillFor = null
+            onNextItemNeeded?.invoke(currentId)
         }
         publishQueue(controller)
         publishProgress(controller)

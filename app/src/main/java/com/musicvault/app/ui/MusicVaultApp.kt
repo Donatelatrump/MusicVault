@@ -2481,7 +2481,7 @@ private fun SettingsScreen(
                 }
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "Los archivos nuevos se guardarán en esta carpeta. Los ya descargados no se mueven.",
+                    "Las nuevas descargas se guardan en esta carpeta. Si eliges una fuera del almacenamiento de la app (Descargas, tarjeta SD…), los archivos sobrevivirán aunque desinstales MusicVault.",
                     color = VaultColors.TextTertiary, fontSize = 11.sp
                 )
                 Spacer(Modifier.height(12.dp))
