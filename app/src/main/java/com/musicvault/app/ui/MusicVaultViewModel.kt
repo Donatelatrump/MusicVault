@@ -117,8 +117,9 @@ class MusicVaultViewModel(
     private val _albumDownloads = MutableStateFlow<Set<String>>(emptySet())
     private val favoriteIds = repository.favorites()
     private val recentSearches = repository.recentSearches(12)
+    private val downloadLock = Any()
     private val downloadJobs = mutableMapOf<String, Job>()
-    private val downloadWaiters = mutableMapOf<String, MutableList<suspend (ProviderResult) -> Unit>>()
+    private val downloadWaiters = mutableMapOf<String, MutableList<suspend (ProviderResult?) -> Unit>>()
     private var searchJob: Job? = null
     // Monotonic generation prevents a slow/cancel-resistant provider request from
     // publishing stale results after the user has typed a newer query.
@@ -258,12 +259,12 @@ class MusicVaultViewModel(
     private val recommendations: StateFlow<Pair<List<Track>, List<Album>>> = combine(
         localTracks, allCatalogAlbums, favoriteIds, recentSearches, cachedCatalogTracks, relatedCatalog
     ) { v ->
-        val tracks = v[0] as List<Track>
-        val catalogAlbums = v[1] as List<Album>
-        val favorites = v[2] as Set<String>
-        val searches = v[3] as List<String>
-        val cachedTracks = v[4] as List<CatalogTrack>
-        val related = v[5] as List<CatalogTrack>
+        val tracks = (v[0] as? List<*>)?.filterIsInstance<Track>() ?: emptyList()
+        val catalogAlbums = (v[1] as? List<*>)?.filterIsInstance<Album>() ?: emptyList()
+        val favorites = (v[2] as? Set<*>)?.filterIsInstance<String>()?.toSet() ?: emptySet()
+        val searches = (v[3] as? List<*>)?.filterIsInstance<String>() ?: emptyList()
+        val cachedTracks = (v[4] as? List<*>)?.filterIsInstance<CatalogTrack>() ?: emptyList()
+        val related = (v[5] as? List<*>)?.filterIsInstance<CatalogTrack>() ?: emptyList()
 
         // User profile: artists and albums already in the vault.
         val downloaded = tracks.filter { it.isDownloaded }
@@ -337,21 +338,23 @@ class MusicVaultViewModel(
         _searching, _scanning, _providerMessage, _errorMessage, favoriteIds, recentSearches, recommendations,
         _playerStyle
     ) { v ->
-        val rec = v[25] as Pair<*, *>
+        val rec = v[25] as? Pair<*, *> ?: (emptyList<Track>() to emptyList<Album>())
         MusicUiState(
-            section = v[0] as AppSection, search = v[1] as String, tracks = v[2] as List<Track>,
-            downloaded = v[3] as List<Track>, albums = v[4] as List<Album>, playlists = v[5] as List<Playlist>,
-            remoteTracks = v[6] as List<CatalogTrack>, remoteAlbums = v[7] as List<CatalogAlbum>,
-            selectedTrack = v[8] as Track?, selectedPlaylist = v[9] as Playlist?,
-            selectedPlaylistTracks = v[10] as List<Track>, selectedRemoteAlbum = v[11] as CatalogAlbum?,
-            remoteAlbumTracks = v[12] as List<CatalogTrack>, isLoadingRemoteAlbum = v[13] as Boolean,
-            selectedLocalAlbum = v[14] as Album?, selectedLocalAlbumTracks = v[15] as List<Track>,
-            fullPlayer = v[16] as Boolean, shuffle = v[17] as Boolean, crossfadeSeconds = v[18] as Int,
-            isSearching = v[19] as Boolean, isScanning = v[20] as Boolean,
-            providerMessage = v[21] as String?, errorMessage = v[22] as String?,
-            favoriteIds = v[23] as Set<String>, recentSearches = v[24] as List<String>,
-            recommendedTracks = rec.first as List<Track>, recommendedAlbums = rec.second as List<Album>,
-            playerStyle = v[26] as String
+            section = v[0] as? AppSection ?: AppSection.HOME, search = v[1] as? String ?: "",
+            tracks = (v[2] as? List<*>)?.filterIsInstance<Track>() ?: emptyList(),
+            downloaded = (v[3] as? List<*>)?.filterIsInstance<Track>() ?: emptyList(), albums = (v[4] as? List<*>)?.filterIsInstance<Album>() ?: emptyList(),
+            playlists = (v[5] as? List<*>)?.filterIsInstance<Playlist>() ?: emptyList(),
+            remoteTracks = (v[6] as? List<*>)?.filterIsInstance<CatalogTrack>() ?: emptyList(), remoteAlbums = (v[7] as? List<*>)?.filterIsInstance<CatalogAlbum>() ?: emptyList(),
+            selectedTrack = v[8] as? Track, selectedPlaylist = v[9] as? Playlist,
+            selectedPlaylistTracks = (v[10] as? List<*>)?.filterIsInstance<Track>() ?: emptyList(), selectedRemoteAlbum = v[11] as? CatalogAlbum,
+            remoteAlbumTracks = (v[12] as? List<*>)?.filterIsInstance<CatalogTrack>() ?: emptyList(), isLoadingRemoteAlbum = v[13] as? Boolean ?: false,
+            selectedLocalAlbum = v[14] as? Album, selectedLocalAlbumTracks = (v[15] as? List<*>)?.filterIsInstance<Track>() ?: emptyList(),
+            fullPlayer = v[16] as? Boolean ?: false, shuffle = v[17] as? Boolean ?: false, crossfadeSeconds = v[18] as? Int ?: 5,
+            isSearching = v[19] as? Boolean ?: false, isScanning = v[20] as? Boolean ?: false,
+            providerMessage = v[21] as? String?, errorMessage = v[22] as? String?,
+            favoriteIds = (v[23] as? Set<*>)?.filterIsInstance<String>()?.toSet() ?: emptySet(), recentSearches = (v[24] as? List<*>)?.filterIsInstance<String>() ?: emptyList(),
+            recommendedTracks = (rec.first as? List<*>)?.filterIsInstance<Track>() ?: emptyList(), recommendedAlbums = (rec.second as? List<*>)?.filterIsInstance<Album>() ?: emptyList(),
+            playerStyle = v[26] as? String ?: "vinyl"
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MusicUiState())
 
@@ -664,7 +667,7 @@ class MusicVaultViewModel(
         val enabled = !_shuffle.value
         _shuffle.value = enabled
         player.setShuffle(enabled)
-        if (activePlaylistId == null && enabled) {
+        if (!explicitQueueMode && activePlaylistId == null && enabled) {
             _selectedTrack.value?.let { viewModelScope.launch { enqueueSmartNext(it) } }
         }
     }
@@ -765,7 +768,7 @@ class MusicVaultViewModel(
         _providerMessage.value = "Descargando \"${track.title}\" para añadirla a la cola..."
         requestRemoteDownload(track, autoPlay = false) { ready ->
             explicitQueueMode = true
-            player.append(ready)
+            ready?.let { player.append(it) }
         }
     }
 
@@ -887,7 +890,9 @@ class MusicVaultViewModel(
             val remaining = if (index >= 0) _remoteAlbumTracks.value.drop(index + 1) else _remoteAlbumTracks.value
             val nextRemote = if (_shuffle.value && remaining.isNotEmpty()) remaining.randomOrNull() else remaining.firstOrNull()
             if (nextRemote != null) {
-                requestRemoteDownload(nextRemote, autoPlay = false) { ready -> player.append(ready) }
+                requestRemoteDownload(nextRemote, autoPlay = false) { ready ->
+                    ready?.let { player.append(it) }
+                }
                 return
             }
         }
@@ -923,7 +928,9 @@ class MusicVaultViewModel(
                 it.title.isNotBlank() && "${it.provider}:recording:${it.id}" !in existingIds
             }
             if (candidate != null) {
-                requestRemoteDownload(candidate, autoPlay = false) { ready -> player.append(ready) }
+                requestRemoteDownload(candidate, autoPlay = false) { ready ->
+                    ready?.let { player.append(it) }
+                }
             } else {
                 localCandidates.randomOrNull()?.let { player.append(it) }
             }
@@ -1110,21 +1117,30 @@ class MusicVaultViewModel(
 
     private suspend fun awaitRemoteDownload(track: CatalogTrack): Track? =
         kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
-            requestRemoteDownload(track, autoPlay = false) { ready ->
-                if (continuation.isActive) continuation.resume(ready)
-            }
+            requestRemoteDownload(
+                track = track,
+                autoPlay = false,
+                onFinished = { ready ->
+                    if (continuation.isActive) continuation.resume(ready)
+                }
+            )
         }
 
     private fun requestRemoteDownload(
         track: CatalogTrack,
         autoPlay: Boolean,
-        onReady: (suspend (Track) -> Unit)? = null
+        onReady: (suspend (Track) -> Unit)? = null,
+        onFinished: (suspend (Track?) -> Unit)? = null
     ) {
         val id = "${track.provider}:recording:${track.id}"
         track.coverUri?.let { CoverImageCache.prefetch(appContext, listOf(it)) }
         val existing = state.value.tracks.firstOrNull { it.id == id && it.isDownloaded }
         if (existing != null) {
-            viewModelScope.launch { onReady?.invoke(existing); if (autoPlay) selectTrack(existing) }
+            viewModelScope.launch {
+                onReady?.invoke(existing)
+                onFinished?.invoke(existing)
+                if (autoPlay) selectTrack(existing)
+            }
             return
         }
         requestDownloadInternal(id, track.title, track.artistName) { result ->
@@ -1137,12 +1153,15 @@ class MusicVaultViewModel(
                     "${track.provider}:release:$albumId", track.albumTitle ?: "Álbum desconocido", track.artistId, track.artistName, 0, track.coverUri))) }
                 val local = Track(id, track.title, track.artistName, entity.albumId, entity.albumTitle, track.durationMs, result.audioUri, true, track.coverUri)
                 onReady?.invoke(local)
+                onFinished?.invoke(local)
                 if (autoPlay) {
                     _selectedTrack.value = local
                     player.play(local)
                     repository.recordPlay(local, 0f)
                     enqueueSmartNext(local)
                 }
+            } else {
+                onFinished?.invoke(null)
             }
         }
     }
@@ -1207,56 +1226,64 @@ class MusicVaultViewModel(
         viewModelScope.launch(Dispatchers.IO) { repository.deletePlaylist(playlistId) }
     }
 
-    private fun requestDownloadInternal(id: String, name: String, author: String, onSuccess: suspend (ProviderResult) -> Unit) {
-        downloadWaiters.getOrPut(id) { mutableListOf() }.add(onSuccess)
-        if (_downloadProgress.value.containsKey(id)) return
+    private fun requestDownloadInternal(id: String, name: String, author: String, onSuccess: suspend (ProviderResult?) -> Unit) {
+        val jobToStart = synchronized(downloadLock) {
+            downloadWaiters.getOrPut(id) { mutableListOf() }.add(onSuccess)
+            if (_downloadProgress.value.containsKey(id)) return
 
-        _downloadProgress.value = _downloadProgress.value + (id to 0)
-        val job = viewModelScope.launch(Dispatchers.IO) {
-            try {
-                var lastProgressAt = 0L
-                val result = Providers.download(name, author, onProgress = { progress ->
-                    val now = System.currentTimeMillis()
-                    // Download progress is not animation state. Time-based
-                    // throttle: the OR of the old condition (>=5% OR >=300ms)
-                    // fired on nearly every callback with fast downloads;
-                    // capping by elapsed time alone bounds map copies to 2/s
-                    // while keeping the bar visibly alive.
-                    if (progress == 100 || progress == 0 || now - lastProgressAt >= 500L) {
-                        lastProgressAt = now
-                        _downloadProgress.value = _downloadProgress.value + (id to progress)
+            _downloadProgress.value = _downloadProgress.value + (id to 0)
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    var lastProgressAt = 0L
+                    val result = Providers.download(name, author, onProgress = { progress ->
+                        val now = System.currentTimeMillis()
+                        // Download progress is not animation state. Time-based
+                        // throttle: the OR of the old condition (>=5% OR >=300ms)
+                        // fired on nearly every callback with fast downloads;
+                        // capping by elapsed time alone bounds map copies to 2/s
+                        // while keeping the bar visibly alive.
+                        if (progress == 100 || progress == 0 || now - lastProgressAt >= 500L) {
+                            lastProgressAt = now
+                            _downloadProgress.value = _downloadProgress.value + (id to progress)
+                        }
+                    }, requestId = id)
+                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                    val waiters = synchronized(downloadLock) { downloadWaiters.remove(id).orEmpty().toList() }
+                    waiters.forEach { callback ->
+                        try {
+                            callback(result)
+                        } catch (_: Exception) {
+                            // One consumer must not prevent the other download consumers from completing.
+                        }
                     }
-                }, requestId = id)
-                kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                val waiters = downloadWaiters.remove(id).orEmpty().toList()
-                waiters.forEach { callback ->
-                    try {
-                        callback(result)
-                    } catch (_: Exception) {
-                        // One consumer must not prevent the other download consumers from completing.
+                    when (result) {
+                        is ProviderResult.Success -> _providerMessage.value = "Disponible: ${result.fileName}"
+                        is ProviderResult.Unavailable -> _providerMessage.value = result.reason
+                        is ProviderResult.Error -> _providerMessage.value = result.message
                     }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    val waiters = synchronized(downloadLock) { downloadWaiters.remove(id).orEmpty().toList() }
+                    waiters.forEach { callback ->
+                        runCatching { callback(null) }
+                    }
+                    throw e
+                } catch (e: Exception) {
+                    val waiters = synchronized(downloadLock) { downloadWaiters.remove(id).orEmpty().toList() }
+                    waiters.forEach { callback ->
+                        runCatching { callback(null) }
+                    }
+                    _providerMessage.value = "Error durante la descarga: ${e.message ?: "error desconocido"}"
+                } finally {
+                    _downloadProgress.value = _downloadProgress.value - id
+                    synchronized(downloadLock) { downloadJobs.remove(id) }
                 }
-                when (result) {
-                    is ProviderResult.Success -> _providerMessage.value = "Disponible: ${result.fileName}"
-                    is ProviderResult.Unavailable -> _providerMessage.value = result.reason
-                    is ProviderResult.Error -> _providerMessage.value = result.message
-                }
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                downloadWaiters.remove(id)
-                throw e
-            } catch (e: Exception) {
-                downloadWaiters.remove(id)
-                _providerMessage.value = "Error durante la descarga: ${e.message ?: "error desconocido"}"
-            } finally {
-                _downloadProgress.value = _downloadProgress.value - id
-                downloadJobs.remove(id)
             }
         }
-        downloadJobs[id] = job
+        synchronized(downloadLock) { downloadJobs[id] = jobToStart }
     }
 
     fun cancelDownload(id: String) {
-        downloadJobs.remove(id)?.cancel()
+        synchronized(downloadLock) { downloadJobs.remove(id)?.cancel() }
         Providers.cancel(id)
         _downloadProgress.value = _downloadProgress.value - id
     }
@@ -1265,10 +1292,12 @@ class MusicVaultViewModel(
     fun clearError() { _errorMessage.value = null }
 
     override fun onCleared() {
-        downloadJobs.keys.toList().forEach { Providers.cancel(it) }
-        downloadJobs.values.forEach { it.cancel() }
-        downloadJobs.clear()
-        downloadWaiters.clear()
+        synchronized(downloadLock) {
+            downloadJobs.keys.toList().forEach { Providers.cancel(it) }
+            downloadJobs.values.forEach { it.cancel() }
+            downloadJobs.clear()
+            downloadWaiters.clear()
+        }
         searchJob?.cancel(); playlistJob?.cancel(); albumJob?.cancel(); historyJob?.cancel()
         equalizer.release()
         player.release()

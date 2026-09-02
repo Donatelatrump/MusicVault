@@ -58,6 +58,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Search
@@ -88,6 +89,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.core.content.ContextCompat
 import android.widget.LinearLayout
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -851,13 +853,30 @@ private fun RemoteTrackRow(
 @Composable
 private fun LibraryScreen(state: MusicUiState, isPlaying: Boolean, vm: MusicVaultViewModel) {
     val context = LocalContext.current
+    val permission = if (Build.VERSION.SDK_INT >= 33) {
+        Manifest.permission.READ_MEDIA_AUDIO
+    } else {
+        Manifest.permission.READ_EXTERNAL_STORAGE
+    }
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) vm.scanLocalAudio(context)
     }
+    var permissionRequested by rememberSaveable { mutableStateOf(false) }
     val adapter = remember { LibraryFeedAdapter(vm) }
     val customAlbums = remember(state.albums) { state.albums.filter { a -> a.id.startsWith("album:custom:") } }
+
+    LaunchedEffect(state.section) {
+        if (state.section == AppSection.LIBRARY && !permissionRequested) {
+            permissionRequested = true
+            if (ContextCompat.checkSelfPermission(context, permission) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                vm.scanLocalAudio(context)
+            } else {
+                launcher.launch(permission)
+            }
+        }
+    }
 
     AndroidView(
         modifier = Modifier.fillMaxSize().clipToBounds(),
@@ -1048,7 +1067,7 @@ private fun RemoteAlbumDetail(
     ) {
         item {
             IconButton(onClick = vm::closeRemoteAlbum) {
-                Icon(Icons.Default.ArrowBack, "Atrás", tint = VaultColors.TextPrimary)
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Atrás", tint = VaultColors.TextPrimary)
             }
             val (top, bottom) = remember(album.id) { gradientFor(album.id) }
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1159,7 +1178,7 @@ private fun PlaylistDetail(
     ) {
         item {
             IconButton(onClick = vm::clearSelection) {
-                Icon(Icons.Default.ArrowBack, "Atrás", tint = VaultColors.TextPrimary)
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Atrás", tint = VaultColors.TextPrimary)
             }
             Text(playlist.title, color = VaultColors.TextPrimary, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.5).sp)
             Text(playlist.description, color = VaultColors.TextSecondary, fontSize = 14.sp)
@@ -1192,9 +1211,9 @@ private fun PlaylistDetail(
             TrackRowWithProgress(
                 track = track,
                 progressFlow = remember(track.id) { vm.downloadProgressFor(track.id) },
-                onClick = { vm.selectTrack(track) },
+                onClick = { vm.playPlaylistTrack(playlist, track) },
                 isPlaying = isPlaying && selectedTrackId == track.id,
-                onPlayToggle = { if (selectedTrackId == track.id) vm.togglePlayback() else vm.selectTrack(track) },
+                onPlayToggle = { if (selectedTrackId == track.id) vm.togglePlayback() else vm.playPlaylistTrack(playlist, track) },
                 onCancelDownload = { vm.cancelDownload(track.id) },
                 actions = { TrackActionsMenu(track, playlists, albums.filter { it.id.startsWith("album:custom:") }, vm, vm.isFavorite(track.id)) },
                 modifier = Modifier.animateItem()
@@ -2399,7 +2418,7 @@ private fun SettingsScreen(
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onClose) { Icon(Icons.Default.ArrowBack, "Atrás", tint = VaultColors.TextPrimary) }
+                IconButton(onClick = onClose) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Atrás", tint = VaultColors.TextPrimary) }
                 Text("Ajustes", color = VaultColors.TextPrimary, fontSize = 26.sp, fontWeight = FontWeight.Bold, fontFamily = VaultFonts.Display, letterSpacing = (-0.75).sp)
             }
         }
@@ -2592,13 +2611,13 @@ private fun StyleOption(
 private fun QueueBottomSheet(queue: List<Track>, currentIndex: Int, vm: MusicVaultViewModel, onDismiss: () -> Unit) {
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = VaultColors.Surface1) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp)) {
-            Text("A continuación", color = VaultColors.TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
-            Spacer(Modifier.height(10.dp))
-            if (queue.isEmpty()) {
-                Text("La cola está vacía.", color = VaultColors.TextSecondary, modifier = Modifier.padding(vertical = 24.dp))
-            } else {
-                LazyColumn(Modifier.fillMaxWidth().heightIn(max = 520.dp)) {
-                    itemsIndexed(queue, key = { _, track -> track.id }) { index, track ->
+                Text("A continuación", color = VaultColors.TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
+                Spacer(Modifier.height(10.dp))
+                if (queue.isEmpty()) {
+                    Text("La cola está vacía.", color = VaultColors.TextSecondary, modifier = Modifier.padding(vertical = 24.dp))
+                } else {
+                    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 520.dp)) {
+                    itemsIndexed(queue, key = { index, track -> "${track.id}#$index" }) { index, track ->
                         Row(
                             Modifier.fillMaxWidth().animateItem().padding(vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically
