@@ -29,7 +29,15 @@ data class TrackEntity(
     val isDownloaded: Boolean,
     val coverUri: String? = null,
     val source: String? = null,
-    val sourceId: String? = null
+    val sourceId: String? = null,
+    /**
+     * True when the user removed this track from the library while the file is
+     * still on the device (e.g. an audio file scanned from MediaStore whose
+     * physical deletion was blocked by storage permissions). The scanner must
+     * not resurrect userRemoved tracks even though MediaStore still reports
+     * them.
+     */
+    val userRemoved: Boolean = false
 )
 
 @Entity(tableName = "playlists")

@@ -59,6 +59,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Search
@@ -264,14 +268,16 @@ fun MusicVaultApp(vm: MusicVaultViewModel) {
                         }
                     }
                     AnimatedVisibility(
-                        visible = state.errorMessage != null,
+                        visible = state.errorMessage != null || state.providerMessage != null,
                         enter = fadeIn(tween(180)) + expandVertically(spring(stiffness = Spring.StiffnessMedium)),
                         exit = fadeOut(tween(140)) + shrinkVertically(spring(stiffness = Spring.StiffnessMedium))
                     ) {
-                        state.errorMessage?.let {
+                        val msg = state.errorMessage ?: state.providerMessage
+                        val dismiss: () -> Unit = if (state.errorMessage != null) vm::clearError else vm::clearProviderMessage
+                        msg?.let {
                             AssistChip(
-                                onClick = vm::clearError,
-                                label = { Text(it, maxLines = 3) },
+                                onClick = dismiss,
+                                label = { Text(it, maxLines = if (state.errorMessage != null) 8 else 3) },
                                 trailingIcon = { Icon(Icons.Default.Close, null) },
                                 colors = AssistChipDefaults.assistChipColors(
                                     containerColor = VaultColors.Surface2,
@@ -603,11 +609,18 @@ private fun SearchScreen(
     Column(Modifier.fillMaxSize().padding(20.dp)) {
         OutlinedTextField(
             value = state.search,
-            onValueChange = vm::search,
+            onValueChange = vm::updateSearchInput,
             Modifier.fillMaxWidth(),
             placeholder = { Text("Canción, artista o álbum", color = VaultColors.TextTertiary) },
             leadingIcon = { Icon(Icons.Default.Search, null, tint = VaultColors.TextSecondary) },
+            trailingIcon = {
+                IconButton(onClick = { vm.submitSearch() }, enabled = state.search.isNotBlank()) {
+                    Icon(Icons.AutoMirrored.Filled.Send, "Buscar", tint = VaultColors.Accent)
+                }
+            },
             singleLine = true,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(onSearch = { vm.submitSearch() }),
             shape = RoundedCornerShape(10.dp),
             colors = OutlinedTextFieldDefaults.colors(
                 focusedBorderColor = VaultColors.Accent,
@@ -1138,7 +1151,19 @@ private fun RemoteAlbumDetail(
                 loading -> Column(Modifier.fillMaxWidth()) {
                     repeat(4) { SkeletonRow() }
                 }
-                tracks.isEmpty() -> Text("No hay canciones disponibles para este álbum.", color = VaultColors.TextSecondary)
+                tracks.isEmpty() -> Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                    Text(
+                        "No se encontraron canciones para este álbum.",
+                        color = VaultColors.TextSecondary,
+                        fontSize = 14.sp
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Puede ser que el proveedor no tenga el catálogo completo. Intenta abrir otro álbum del mismo artista.",
+                        color = VaultColors.TextTertiary,
+                        fontSize = 12.sp
+                    )
+                }
             }
             Spacer(Modifier.height(10.dp))
         }

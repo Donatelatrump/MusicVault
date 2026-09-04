@@ -4,10 +4,12 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.lifecycleScope
 import com.musicvault.app.data.MusicDatabase
+import com.musicvault.app.permissions.StoragePermissions
 import com.musicvault.app.providers.Providers
 import com.musicvault.app.ui.MusicVaultApp
 import com.musicvault.app.ui.MusicVaultViewModel
@@ -24,6 +26,30 @@ class MainActivity : ComponentActivity() {
     private val viewModel: MusicVaultViewModel by viewModels {
         MusicVaultViewModel.Factory(applicationContext, database)
     }
+
+    /**
+     * Lanzador de permisos múltiples. Se invoca en dos momentos:
+     *
+     *  - [onCreate] si al iniciar faltan permisos de almacenamiento.
+     *  - [onResume] si el usuario acaba de volver desde Ajustes / desde el
+     *    diálogo del sistema, para reintentar los que sigan pendientes.
+     *
+     * Si tras dos denegaciones (Android marca el permiso como "no volver a
+     * preguntar") el launcher termina con resultados vacíos, el ViewModel
+     * recibe [onStoragePermissionResult] con granted=false y evita seguir
+     * lanzando diálogos innecesarios.
+     */
+    private val storagePermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { results ->
+            val anyGranted = results.values.any { granted -> granted }
+            val totalRequested = results.size
+            val denied = results.values.count { granted -> !granted }
+            viewModel.onStoragePermissionResult(
+                granted = anyGranted,
+                totalRequested = totalRequested,
+                denied = denied
+            )
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         // System-driven splash: branding shows instantly while the process
@@ -53,6 +79,32 @@ class MainActivity : ComponentActivity() {
             MusicVaultTheme {
                 MusicVaultApp(viewModel)
             }
+        }
+
+        // Solicita permisos de almacenamiento al iniciar la app. Si todos
+        // están otorgados (incluido el WRITE legacy en API ≤ 28), no se
+        // muestra nada y la app sigue igual que antes.
+        requestStoragePermissionsIfNeeded()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Si el usuario volvió desde Ajustes después de habilitar manualmente
+        // el permiso, lo volvemos a evaluar para mantener el estado interno
+        // del ViewModel sincronizado.
+        viewModel.refreshStoragePermissionState()
+        requestStoragePermissionsIfNeeded()
+    }
+
+    private fun requestStoragePermissionsIfNeeded() {
+        // Evita relanzar el diálogo cuando el usuario ya denegó el permiso
+        // dos veces (Android marca el permiso como "permanently denied" y el
+        // diálogo dejaría de tener efecto). El usuario tendría que ir a
+        // Ajustes para rehabilitarlo manualmente.
+        if (!viewModel.shouldPromptForStoragePermissions()) return
+        val missing = StoragePermissions.missing(this)
+        if (missing.isNotEmpty()) {
+            storagePermissionLauncher.launch(missing)
         }
     }
 }

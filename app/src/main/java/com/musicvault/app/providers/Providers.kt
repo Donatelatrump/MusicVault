@@ -127,10 +127,14 @@ object Providers {
                 ensureInitialized(context)
                 val ytDlpVersion = runCatching { YoutubeDL.getInstance().versionName(context) }.getOrNull()
 
-                val rootDir = File(
-                    context.getExternalFilesDir("Music") ?: context.filesDir,
-                    "downloads"
-                ).apply { mkdirs() }
+                val externalMusic = context.getExternalFilesDir("Music")
+                val rootDir = when {
+                    externalMusic != null -> File(externalMusic, "downloads")
+                    // Fallback al almacenamiento interno de la app. Garantiza que
+                    // las descargas nunca fallen por una SD card ausente o
+                    // desmontada (caso común en API ≤ 28 con SD como external).
+                    else -> File(context.filesDir, "downloads")
+                }.apply { mkdirs() }
 
                 // Every request gets its own staging directory. This removes the
                 // race where two simultaneous downloads scan the same directory
@@ -216,26 +220,35 @@ object Providers {
                 val treeUri = prefs(context).getString(DOWNLOAD_TREE_PREF, null)
                     ?.takeIf { it.isNotBlank() }?.let(android.net.Uri::parse)
                 if (treeUri != null) {
-                    val document = runCatching {
+                    val safResult = runCatching {
                         val tree = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, treeUri)
-                            ?: return@runCatching null
+                            ?: throw IllegalStateException("La URI persistida no es válida en este dispositivo")
                         val doc = tree.createFile(mime, finalFile.nameWithoutExtension)
-                            ?: return@runCatching null
-                        context.contentResolver.openOutputStream(doc.uri)?.use { out ->
-                            finalFile.inputStream().use { input -> input.copyTo(out) }
-                        } ?: return@runCatching null
+                            ?: throw IllegalStateException("No se pudo crear el archivo en la carpeta seleccionada")
+                        val out = context.contentResolver.openOutputStream(doc.uri)
+                            ?: throw IllegalStateException("No se pudo abrir el archivo en la carpeta seleccionada")
+                        out.use { finalFile.inputStream().use { input -> input.copyTo(it) } }
                         doc
-                    }.getOrNull()
-                    if (document != null) {
-                        finalFile.delete()
-                        onProgress(100)
-                        return@withContext ProviderResult.Success(
-                            document.uri.toString(),
-                            document.name ?: finalFile.name,
-                            mime,
-                            document.uri.toString()
-                        )
                     }
+                    safResult.fold(
+                        onSuccess = { document ->
+                            finalFile.delete()
+                            onProgress(100)
+                            return@withContext ProviderResult.Success(
+                                document.uri.toString(),
+                                document.name ?: finalFile.name,
+                                mime,
+                                document.uri.toString()
+                            )
+                        },
+                        onFailure = {
+                            prefs(context).edit().remove(DOWNLOAD_TREE_PREF).apply()
+                            return@withContext ProviderResult.Error(
+                                "La carpeta de descargas seleccionada ya no es válida. " +
+                                    "Se restauró la carpeta interna de la app. Vuelve a elegir una carpeta."
+                            )
+                        }
+                    )
                 }
 
                 val audioUri = FileProvider.getUriForFile(
@@ -251,9 +264,11 @@ object Providers {
             } catch (e: Exception) {
                 val version = runCatching { YoutubeDL.getInstance().versionName(context) }.getOrNull()
                 val suffix = version?.let { " (yt-dlp $it)" }.orEmpty()
-                unavailableReason(e.message)?.let { return@withContext ProviderResult.Unavailable(it) }
+                val detail = e.message?.trim().takeIf { !it.isNullOrBlank() }
+                    ?: e.javaClass.simpleName
+                unavailableReason(detail)?.let { return@withContext ProviderResult.Unavailable(it) }
                 ProviderResult.Error(
-                    "No se pudo descargar$suffix: ${e.message ?: e.javaClass.simpleName}"
+                    "No se pudo descargar$suffix. ${detail.take(700)}"
                 )
             }
         }

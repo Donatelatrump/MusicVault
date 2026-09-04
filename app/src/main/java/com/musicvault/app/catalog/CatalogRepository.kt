@@ -7,6 +7,8 @@ import com.musicvault.app.data.CatalogSearchCacheEntity
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
@@ -16,6 +18,40 @@ class CatalogRepository(
     private val provider: CatalogProvider,
     private val db: MusicDatabase
 ) {
+    /**
+     * Returns the underlying [MetadataCatalogProvider] when the active provider
+     * is one, otherwise null. Used by the UI to issue incremental
+     * fast/merged queries without waiting for the full [search] pipeline.
+     */
+    fun metadata(): MetadataCatalogProvider? =
+        provider as? MetadataCatalogProvider
+    /**
+     * Fast search that returns the first non-empty provider hit with a
+     * quality-gated score. Used by the UI to publish results as soon as
+     * possible while the slower merged search runs in the background.
+     */
+    suspend fun searchFast(query: String, limitTracks: Int = 40, limitAlbums: Int = 20): MetadataCatalogProvider.SearchResult {
+        if (provider !is MetadataCatalogProvider) return search(query, limitTracks, limitAlbums)
+        return coroutineScope {
+            val tracks = async { provider.searchTracksFast(query, limitTracks) }
+            val albums = async { provider.searchAlbumsFast(query, limitAlbums) }
+            MetadataCatalogProvider.SearchResult(tracks.await(), albums.await())
+        }
+    }
+
+    /**
+     * Slower full-merge search that ranks every provider together. Used to
+     * refine the fast-path result once all providers have answered.
+     */
+    suspend fun searchMerged(query: String, limitTracks: Int = 40, limitAlbums: Int = 20): MetadataCatalogProvider.SearchResult {
+        if (provider !is MetadataCatalogProvider) return search(query, limitTracks, limitAlbums)
+        return coroutineScope {
+            val tracks = async { provider.searchTracksMerged(query, limitTracks) }
+            val albums = async { provider.searchAlbumsMerged(query, limitAlbums) }
+            MetadataCatalogProvider.SearchResult(tracks.await(), albums.await())
+        }
+    }
+
     companion object {
         private const val CACHE_TTL_MS = 30L * 60L * 1000L
     }
@@ -164,14 +200,14 @@ class CatalogRepository(
     private fun JSONObject.optionalInt(key: String): Int? = opt(key)?.takeIf { it != JSONObject.NULL }?.toString()?.toIntOrNull()
 
     suspend fun searchTracks(query: String, limit: Int = 20): List<CatalogTrack> {
-        val results = if (provider is MetadataCatalogProvider) provider.searchTracksOnly(query, limit)
+        val results = if (provider is MetadataCatalogProvider) provider.searchTracksMerged(query, limit)
         else provider.searchTracks(query, limit)
         persistTracks(results)
         return results
     }
 
     suspend fun searchAlbums(query: String, limit: Int = 10): List<CatalogAlbum> {
-        val results = if (provider is MetadataCatalogProvider) provider.searchAlbumsOnly(query, limit)
+        val results = if (provider is MetadataCatalogProvider) provider.searchAlbumsMerged(query, limit)
         else provider.searchAlbums(query, limit)
         persistAlbums(results)
         return results

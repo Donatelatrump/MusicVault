@@ -124,6 +124,16 @@ class MusicRepository(private val db: MusicDatabase) {
         db.trackDao().delete(id)
     }
 
+    /**
+     * Marks a track as user-removed without deleting the row. Used for
+     * MediaStore-backed tracks whose physical file deletion was blocked by
+     * storage permissions: the row stays so the scanner can see the flag and
+     * leave the file alone on future rescans.
+     */
+    suspend fun markTrackRemoved(id: String) {
+        db.trackDao().markRemoved(id)
+    }
+
     suspend fun setDownloaded(track: Track, audioUri: String) {
         db.trackDao().update(
             TrackEntity(

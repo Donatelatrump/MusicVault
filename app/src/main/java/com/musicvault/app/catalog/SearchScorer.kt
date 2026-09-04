@@ -10,6 +10,11 @@ import kotlin.math.min
  * The score is composed of:
  *   - exact (case/diacritic-insensitive) match of title and artist against the query
  *   - token Jaccard similarity over title/artist
+ *   - phrase match (the query appears as a contiguous span inside title/artist)
+ *   - combined title+artist match: when the query is "song artist", tracks
+ *     that hit both fields score much higher than tracks that only hit one
+ *     (this is the signal that fixes "Friends Marshmello" returning random
+ *     songs titled "Friends" by other artists)
  *   - how plausible the track duration is (filters out podcasts/compilations when
  *     the user is searching a song)
  *   - position-based popularity (earlier = more popular)
@@ -43,6 +48,46 @@ internal object SearchScorer {
         return if (union == 0) 0f else intersection.toFloat() / union
     }
 
+    /**
+     * Length of the longest contiguous run of [phrase] tokens that appears
+     * inside [target] in the same order. Returns 0 when nothing matches.
+     *
+     * "Fuerza Regida Sabor Fresa" vs target "sabor fresa" returns 2: the
+     * trailing "Sabor Fresa" slice of the query still matches even though
+     * the query as a whole does not. This makes the ranker robust to
+     * reordered queries and to queries with extra/noise tokens.
+     *
+     * Implementation: for each starting offset in the target, walk the phrase
+     * and count the longest prefix that lines up token-for-token. The maximum
+     * over all starting offsets is returned. O(|target| * |phrase|) which is
+     * fine: query and title are short strings.
+     */
+    fun longestPhraseMatch(target: String, phrase: String): Int {
+        if (phrase.isBlank() || target.isBlank()) return 0
+        val targetTokens = target.split(' ').filter { it.isNotBlank() }
+        val phraseTokens = phrase.split(' ').filter { it.isNotBlank() }
+        if (phraseTokens.isEmpty() || phraseTokens.size > targetTokens.size) return 0
+        var best = 0
+        for (start in 0..(targetTokens.size - phraseTokens.size)) {
+            var run = 0
+            for (offset in phraseTokens.indices) {
+                if (targetTokens[start + offset] == phraseTokens[offset]) run++ else break
+            }
+            if (run > best) best = run
+            // A shorter suffix of the phrase may also match starting at the
+            // same target offset (covers reordered multi-segment queries).
+            for (suffixStart in 1 until phraseTokens.size) {
+                run = 0
+                val maxLen = minOf(phraseTokens.size - suffixStart, targetTokens.size - start)
+                for (offset in 0 until maxLen) {
+                    if (targetTokens[start + offset] == phraseTokens[suffixStart + offset]) run++ else break
+                }
+                if (run > best) best = run
+            }
+        }
+        return best
+    }
+
     fun score(track: CatalogTrack, query: String, originalIndex: Int, total: Int): Float {
         val normalizedQuery = normalize(query)
         if (normalizedQuery.isBlank()) return 0f
@@ -62,6 +107,24 @@ internal object SearchScorer {
         val titleSim = jaccard(queryTokens, titleTokens)
         val artistSim = jaccard(queryTokens, artistTokens)
 
+        // How many query tokens land on the title vs on the artist. This is the
+        // single most useful signal for "Friends Marshmello": we want tracks
+        // where one token matches the title and the other matches the artist,
+        // not tracks where every token happens to appear in the title of an
+        // unrelated song called "Friends".
+        val titleHits = queryTokens.intersect(titleTokens).size
+        val artistHits = queryTokens.intersect(artistTokens).size
+        val titleCoverage = if (queryTokens.isNotEmpty()) titleHits.toFloat() / queryTokens.size else 0f
+        val artistCoverage = if (queryTokens.isNotEmpty()) artistHits.toFloat() / queryTokens.size else 0f
+
+        // Sub-phrase match: find the longest contiguous slice of the query that
+        // appears in order inside the title (or artist). Covers reordered
+        // queries ("Fuerza Regida Sabor Fresa") and queries with extra noise
+        // tokens ("Sabor Fresa Fuerza Regida remix").
+        val phraseTokensCount = queryTokens.size
+        val titlePhraseLen = if (phraseTokensCount > 1) longestPhraseMatch(titleNorm, normalizedQuery) else 0
+        val artistPhraseLen = if (phraseTokensCount > 1) longestPhraseMatch(artistNorm, normalizedQuery) else 0
+
         var score = 0f
         if (titleExact) score += 100f
         if (artistExact) score += 60f
@@ -72,8 +135,65 @@ internal object SearchScorer {
         score += artistSim * 20f
 
         if (titleTokens.isNotEmpty() && queryTokens.isNotEmpty()) {
-            val coverage = queryTokens.intersect(titleTokens).size.toFloat() / queryTokens.size
-            score += coverage * 25f
+            score += titleCoverage * 25f
+        }
+
+        // Combined match bonus: query tokens distributed across title + artist.
+        // This is what makes "Friends Marshmello" rank Marshmello's "Friends"
+        // above a random song titled "Friends" by an unrelated artist.
+        if (queryTokens.size >= 2) {
+            // Matched coverage is the share of query tokens that landed on
+            // either field. Capped at 1.0 because duplicated hits — the same
+            // token appearing in both title and artist — would otherwise push
+            // this past 100% and skew ordering.
+            val totalCoverage = ((titleHits + artistHits).toFloat() / queryTokens.size).coerceAtMost(1f)
+            if (totalCoverage >= 0.99f) {
+                // Every query token was found across (title ∪ artist).
+                score += 45f
+                if (titleCoverage >= 0.49f && artistCoverage >= 0.49f) {
+                    // At least one token on each side: this is the "song by
+                    // artist" pattern the user typed.
+                    score += 35f
+                }
+            } else if (totalCoverage >= 0.66f) {
+                score += 20f
+                if (titleCoverage >= 0.49f && artistCoverage >= 0.49f) {
+                    score += 15f
+                }
+            }
+        }
+
+        // YouTube search results often embed the channel/uploader in the title
+        // (e.g. "Marshmello - FRIENDS (Acoustic Version)"). When the artist
+        // token is already part of the title, the title-derived match is
+        // effectively redundant with the artist field and the combined bonus
+        // above double-counts the artist hit. Penalize so a clean "FRIENDS"
+        // track wins over a "Marshmello - FRIENDS (Acoustic Version)" one for
+        // the query "friends marshmello".
+        if (queryTokens.size >= 2 && artistHits > 0 && titleHits > 0 &&
+            artistTokens.isNotEmpty() && artistTokens.intersect(titleTokens).size >= artistTokens.size / 2
+        ) {
+            score -= 25f
+        }
+
+        // Phrase bonus: scaled by how much of the query is matched as a
+        // contiguous run. A full 4-token match ("Sabor Fresa Fuerza Regida"
+        // all in order) is worth +30 in the title; a 2-token slice ("Sabor
+        // Fresa" inside "Sabor Fresa (Remix)") is worth +15.
+        if (titlePhraseLen >= 2) {
+            score += 15f * (titlePhraseLen.toFloat() / phraseTokensCount.toFloat())
+        }
+        if (artistPhraseLen >= 2) {
+            score += 9f * (artistPhraseLen.toFloat() / phraseTokensCount.toFloat())
+        }
+
+        // Hard penalty when none of the query tokens match the title at all
+        // (but some token may have matched the artist). This prevents a query
+        // like "Friends Marshmello" from returning every song titled "Friends"
+        // by someone else just because the artist name happened to match
+        // some unrelated field further down the result.
+        if (queryTokens.isNotEmpty() && titleHits == 0 && artistHits > 0) {
+            score -= 18f
         }
 
         if (track.durationMs in 30_000L..600_000L) {
@@ -104,7 +224,7 @@ internal object SearchScorer {
     /**
      * Stable, content-based key for deduplicating results across providers.
      * Two tracks with the same normalized artist + title count as the same track
-     * even when their provider-specific IDs differ (iTunes id vs Deezer id, etc.).
+     * even when their provider-specific IDs differ (e.g. Deezer id vs YouTube id).
      */
     fun dedupKey(track: CatalogTrack): String {
         val title = normalize(track.title).take(120)
@@ -208,7 +328,7 @@ internal object SearchScorer {
         return "$artist::$title::$year"
     }
 
-    private fun scoreAlbum(album: CatalogAlbum, query: String, originalIndex: Int, total: Int): Float {
+    fun scoreAlbum(album: CatalogAlbum, query: String, originalIndex: Int, total: Int): Float {
         val normalizedQuery = normalize(query)
         if (normalizedQuery.isBlank()) return 0f
 
@@ -227,9 +347,20 @@ internal object SearchScorer {
         score += jaccard(queryTokens, titleTokens) * 30f
         score += jaccard(queryTokens, artistTokens) * 18f
 
+        val titleHits = queryTokens.intersect(titleTokens).size
+        val artistHits = queryTokens.intersect(artistTokens).size
+
         if (titleTokens.isNotEmpty() && queryTokens.isNotEmpty()) {
             val coverage = queryTokens.intersect(titleTokens).size.toFloat() / queryTokens.size
             score += coverage * 18f
+        }
+
+        if (queryTokens.size >= 2) {
+            val totalCoverage = (titleHits + artistHits).toFloat() / queryTokens.size
+            if (totalCoverage >= 0.99f) score += 35f
+            val titleCoverage = if (queryTokens.isNotEmpty()) titleHits.toFloat() / queryTokens.size else 0f
+            val artistCoverage = if (queryTokens.isNotEmpty()) artistHits.toFloat() / queryTokens.size else 0f
+            if (titleCoverage >= 0.49f && artistCoverage >= 0.49f) score += 22f
         }
 
         val positionScore = max(0f, 1f - (originalIndex.toFloat() / max(total, 1)))

@@ -17,8 +17,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
+import android.view.KeyEvent
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import androidx.media3.session.SessionResult
 import com.musicvault.app.MainActivity
 
 class MusicPlaybackService : MediaSessionService() {
@@ -52,6 +54,53 @@ class MusicPlaybackService : MediaSessionService() {
 
         mediaSession = MediaSession.Builder(this, player)
             .setSessionActivity(pendingIntent)
+            .setCallback(object : MediaSession.Callback {
+                override fun onPlayerCommandRequest(
+                    session: MediaSession,
+                    controller: MediaSession.ControllerInfo,
+                    playerCommand: Int
+                ): Int {
+                    if (playerCommand == Player.COMMAND_SEEK_TO_NEXT || playerCommand == Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM) {
+                        if (!player.hasNextMediaItem()) {
+                            Log.d("MusicPlaybackService", "Bluetooth Next requested with no next item: preventing song restart")
+                            return SessionResult.RESULT_ERROR_NOT_SUPPORTED
+                        }
+                    }
+                    return SessionResult.RESULT_SUCCESS
+                }
+
+                override fun onMediaButtonEvent(
+                    session: MediaSession,
+                    controllerInfo: MediaSession.ControllerInfo,
+                    intent: Intent
+                ): Boolean {
+                    val keyEvent = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                        intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT, KeyEvent::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT)
+                    }
+                    if (keyEvent?.action == KeyEvent.ACTION_DOWN) {
+                        when (keyEvent.keyCode) {
+                            KeyEvent.KEYCODE_MEDIA_NEXT -> {
+                                if (!player.hasNextMediaItem()) {
+                                    Log.d("MusicPlaybackService", "Bluetooth media button NEXT: no next item, ignoring")
+                                    return true
+                                }
+                            }
+                            KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
+                                if (player.currentPosition > 3000L || !player.hasPreviousMediaItem()) {
+                                    player.seekTo(0L)
+                                } else {
+                                    player.seekToPreviousMediaItem()
+                                }
+                                return true
+                            }
+                        }
+                    }
+                    return super.onMediaButtonEvent(session, controllerInfo, intent)
+                }
+            })
             .build()
     }
 

@@ -4,6 +4,11 @@ import androidx.compose.runtime.Immutable
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.content.BroadcastReceiver
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -18,16 +23,20 @@ import com.musicvault.app.library.LocalAudioScanner
 import com.musicvault.app.lyrics.LyricLine
 import com.musicvault.app.lyrics.LyricsLocalStore
 import com.musicvault.app.lyrics.LyricsProvider
+import com.musicvault.app.permissions.StoragePermissions
 import com.musicvault.app.player.AudioEffects
 import com.musicvault.app.player.EqualizerPreset
 import com.musicvault.app.player.PlayerController
 import com.musicvault.app.providers.ProviderResult
 import com.musicvault.app.providers.Providers
+import com.musicvault.app.download.DownloadForegroundService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.*
 import com.musicvault.app.player.AudioSessionBridge
 
@@ -123,10 +132,47 @@ class MusicVaultViewModel(
     private val downloadLock = Any()
     private val downloadJobs = mutableMapOf<String, Job>()
     private val downloadWaiters = mutableMapOf<String, MutableList<suspend (ProviderResult?) -> Unit>>()
+    private var errorAutoClearJob: Job? = null
+
+    private val downloadReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                DownloadForegroundService.ACTION_PROGRESS -> {
+                    val id = intent.getStringExtra(DownloadForegroundService.EXTRA_ID) ?: return
+                    val progress = intent.getIntExtra(DownloadForegroundService.EXTRA_PROGRESS, 0)
+                    if (_downloadProgress.value.containsKey(id)) {
+                        _downloadProgress.value = _downloadProgress.value + (id to progress)
+                    }
+                }
+                DownloadForegroundService.ACTION_RESULT -> {
+                    handleDownloadServiceResult(intent)
+                }
+            }
+        }
+    }
+    private var providerAutoClearJob: Job? = null
+    // 5s visibility window for transient toast-style messages: long enough
+    // that the user reads it, short enough to not block subsequent actions.
+    private val messageDisplayMs = 5_000L
+    // Tracks how many times the user denied the storage permission dialog.
+    // After two consecutive denials Android stops showing the prompt by
+    // default; we use this to suppress further launch attempts until the
+    // user changes the choice in Settings.
+    private var storagePermissionDeniedCount = 0
+    private var storagePermissionPrompted = false
     private var searchJob: Job? = null
     // Monotonic generation prevents a slow/cancel-resistant provider request from
     // publishing stale results after the user has typed a newer query.
     private var searchGeneration: Long = 0L
+    private companion object {
+        /**
+         * Cap on how long the UI keeps waiting for the full multi-provider
+         * merged view to replace the fast-path result. The fast path is shown
+         * immediately; this only gates how long a stale list is allowed to be
+         * refreshed. Short enough that the user never feels a stall.
+         */
+        const val SEARCH_MERGE_TIMEOUT_MS = 1_200L
+    }
     private var playlistJob: Job? = null
     private var activePlaylistId: String? = null
     // True only when the user explicitly created/selected a playback queue.
@@ -173,7 +219,6 @@ class MusicVaultViewModel(
             }
             preferences.edit().putString(com.musicvault.app.providers.Providers.DOWNLOAD_TREE_PREF, uri.toString()).apply()
             _downloadDirLabel.value = treeLabel(uri)
-            _providerMessage.value = "Descargas guardadas en: ${_downloadDirLabel.value}"
         }
     }
 
@@ -385,6 +430,19 @@ class MusicVaultViewModel(
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MusicUiState())
 
     init {
+        val filter = IntentFilter().apply {
+            addAction(DownloadForegroundService.ACTION_PROGRESS)
+            addAction(DownloadForegroundService.ACTION_RESULT)
+        }
+        if (Build.VERSION.SDK_INT >= 33) {
+            ContextCompat.registerReceiver(
+                appContext, downloadReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            appContext.registerReceiver(downloadReceiver, filter)
+        }
+
         viewModelScope.launch(Dispatchers.IO) {
             // Favorites is a permanent user collection backed by the existing playlist tables.
             // Creating it with a stable id makes it available immediately and preserves it across launches.
@@ -498,70 +556,82 @@ class MusicVaultViewModel(
         }
     }
 
-    fun search(value: String) {
+    fun updateSearchInput(value: String) {
+        // Text edits only update the field state. Network search is triggered
+        // explicitly from submitSearch() (Enter / IME Search action) so the
+        // user can type without the results list flickering on every keystroke.
         _search.value = value
+    }
+
+    fun submitSearch(value: String? = null) {
+        val query = (value ?: _search.value).trim()
+        if (query.isBlank()) return
+        _search.value = query
         _section.value = AppSection.SEARCH
         searchGeneration += 1L
         val generation = searchGeneration
 
-        // Every keystroke cancels and restarts the full debounce window.
-        // 600ms balances perceived speed (results land right after the last
-        // keystroke) with request volume: it is still long enough that fast
-        // typing never fires intermediate network calls, and every request is
-        // cached by the catalog repository.
-        val searchDebounceMs = 600L
         searchJob?.cancel()
         closeRemoteAlbum()
         _remoteTracks.value = emptyList()
         _remoteAlbums.value = emptyList()
-        _searching.value = false
-
-        if (value.isBlank()) return
+        _searching.value = true
+        _errorMessage.value = null
 
         searchJob = viewModelScope.launch {
-            delay(searchDebounceMs)
-
-            // A newer keystroke may have arrived while this coroutine was waiting.
-            if (generation != searchGeneration) return@launch
-
-            _searching.value = true
-            _errorMessage.value = null
+            // Publish the fast-path result the moment it lands so the UI does
+            // not wait for the slower full merge before showing anything.
             try {
-                val results = catalog.search(value, 20, 10)
-
-                // Some providers use blocking I/O and may not react immediately to
-                // coroutine cancellation. Never publish results belonging to an
-                // older query.
-                if (generation != searchGeneration) return@launch
-
-                // Warm the image cache before exposing the list so the first scroll
-                // is not competing with a burst of thumbnail decodes.
-                CoverImageCache.prefetch(
-                    appContext,
-                    results.tracks.map { it.coverUri } +
-                        results.albums.map { it.coverUri }
-                )
-
-                if (generation != searchGeneration) return@launch
-
-                _remoteTracks.value = results.tracks
-                _remoteAlbums.value = results.albums
-                repository.recordSearch(value)
-                if (results.tracks.isEmpty() && results.albums.isEmpty()) {
-                    _errorMessage.value = "No se encontró metadata para \"${value.trim()}\"."
-                }
-            } catch (e: kotlinx.coroutines.CancellationException) {
+                val fast = catalog.searchFast(query, 40, 20)
+                publishRemoteResults(generation, query, fast.tracks, fast.albums)
+            } catch (e: CancellationException) {
                 throw e
-            } catch (e: Exception) {
-                if (generation == searchGeneration) {
-                    _errorMessage.value = "No se pudo consultar metadata: ${e.message ?: "error de red"}"
+            } catch (_: Exception) {
+                if (generation == searchGeneration) _searching.value = false
+                return@launch
+            }
+
+            // While the user is already looking at results, fetch the merged
+            // view across every provider and replace the fast-path list when it
+            // arrives. Generation guard prevents stale merges from clobbering
+            // a newer query's first paint.
+            try {
+                val merged = withTimeoutOrNull(SEARCH_MERGE_TIMEOUT_MS) {
+                    catalog.searchMerged(query, 40, 20)
                 }
+                if (merged != null && generation == searchGeneration) {
+                    publishRemoteResults(generation, query, merged.tracks, merged.albums)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // The fast-path result is already shown; ignore merge errors.
             } finally {
                 if (generation == searchGeneration) {
                     _searching.value = false
                 }
             }
         }
+    }
+
+    private fun publishRemoteResults(
+        generation: Long,
+        query: String,
+        tracks: List<CatalogTrack>,
+        albums: List<CatalogAlbum>
+    ) {
+        if (generation != searchGeneration) return
+        CoverImageCache.prefetch(
+            appContext,
+            tracks.map { it.coverUri } + albums.map { it.coverUri }
+        )
+        if (generation != searchGeneration) return
+        _remoteTracks.value = tracks
+        _remoteAlbums.value = albums
+        if (tracks.isEmpty() && albums.isEmpty()) {
+            _errorMessage.value = "No se encontró metadata para \"${query}\"."
+        }
+        viewModelScope.launch(Dispatchers.IO) { repository.recordSearch(query) }
     }
 
     fun selectTrack(track: Track) {
@@ -579,7 +649,6 @@ class MusicVaultViewModel(
         } else {
             // A remote/non-downloaded track is a download action, not a playback action.
             // Do not select it in the player and do not autoplay when the download finishes.
-            _providerMessage.value = "Descargando \"${track.title}\"..."
             requestDownloadInternal(track.id, track.title, track.artistName) { result ->
                 if (result is ProviderResult.Success) {
                     val updated = track.copy(audioUri = result.audioUri, isDownloaded = true)
@@ -598,7 +667,6 @@ class MusicVaultViewModel(
         }
         // A remote track that is not downloaded must never enter the player automatically.
         // The first click downloads it; a later click on the now-downloaded track plays it.
-        _providerMessage.value = "Descargando \"${track.title}\"..."
         requestRemoteDownload(track, autoPlay = false)
     }
 
@@ -636,18 +704,13 @@ class MusicVaultViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val albumTracks = catalog.tracksForAlbum(catalogAlbum, 50)
-                if (albumTracks.isEmpty()) {
-                    _errorMessage.value = "No hay canciones disponibles para este álbum."
-                    return@launch
-                }
-                _providerMessage.value = "Descargando álbum \"${album.title}\" (${albumTracks.size} canciones)..."
+                if (albumTracks.isEmpty()) return@launch
                 albumTracks.map { track ->
                     async { awaitRemoteDownload(track) }
-                }.let { jobs -> jobs.awaitAll() }
+                }.awaitAll()
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
-            } catch (e: Exception) {
-                _errorMessage.value = "No se pudo preparar el álbum: ${e.message ?: "error"}"
+            } catch (_: Exception) {
             } finally {
                 withContext(Dispatchers.Main.immediate) { _albumDownloads.value = _albumDownloads.value - albumKey }
             }
@@ -660,14 +723,13 @@ class MusicVaultViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val albumTracks = if (tracks.isNotEmpty()) tracks else catalog.tracksForAlbum(album, 50)
-                if (albumTracks.isEmpty()) {
-                    _errorMessage.value = "No hay canciones disponibles para este álbum."
-                    return@launch
-                }
-                _providerMessage.value = "Descargando álbum \"${album.title}\" (${albumTracks.size} canciones)..."
+                if (albumTracks.isEmpty()) return@launch
                 albumTracks.map { track ->
                     async { awaitRemoteDownload(track) }
-                }.let { jobs -> jobs.awaitAll() }
+                }.awaitAll()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
             } finally {
                 withContext(Dispatchers.Main.immediate) { _albumDownloads.value = _albumDownloads.value - albumKey }
             }
@@ -783,7 +845,6 @@ class MusicVaultViewModel(
 
     fun addToQueue(track: Track) {
         if (!track.isDownloaded || track.audioUri == null) {
-            _providerMessage.value = "Descarga la canción antes de agregarla a la cola."
             return
         }
         explicitQueueMode = true
@@ -798,7 +859,6 @@ class MusicVaultViewModel(
             player.append(local)
             return
         }
-        _providerMessage.value = "Descargando \"${track.title}\" para añadirla a la cola..."
         requestRemoteDownload(track, autoPlay = false) { ready ->
             explicitQueueMode = true
             ready?.let { player.append(it) }
@@ -1130,20 +1190,32 @@ class MusicVaultViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
                 val uri = track.audioUri?.let(android.net.Uri::parse)
-                if (uri != null && uri.scheme == "content") {
-                    if (uri.authority != "${appContext.packageName}.fileprovider") {
-                        // Document inside the user-selected SAF folder.
-                        runCatching { appContext.contentResolver.delete(uri, null, null) }
-                    } else {
-                        val fileName = uri.lastPathSegment?.let { java.net.URLDecoder.decode(it, "UTF-8") }
-                        if (!fileName.isNullOrBlank()) {
-                            val root = java.io.File(appContext.getExternalFilesDir("Music") ?: appContext.filesDir, "downloads")
-                            root.walkTopDown().firstOrNull { it.isFile && it.name == fileName }?.delete()
+                if (uri != null) {
+                    if (uri.scheme == "content") {
+                        if (uri.authority != "${appContext.packageName}.fileprovider") {
+                            // MediaStore or SAF Uri (e.g. local scanned audio or custom download tree)
+                            runCatching { appContext.contentResolver.delete(uri, null, null) }
+                        } else {
+                            val fileName = uri.lastPathSegment?.let { java.net.URLDecoder.decode(it, "UTF-8") }
+                            if (!fileName.isNullOrBlank()) {
+                                val root = java.io.File(appContext.getExternalFilesDir("Music") ?: appContext.filesDir, "downloads")
+                                root.walkTopDown().firstOrNull { it.isFile && it.name == fileName }?.delete()
+                            }
                         }
+                    } else if (uri.scheme == "file") {
+                        uri.path?.let { java.io.File(it).delete() }
                     }
                 }
             }
-            repository.deleteTrack(track.id)
+            // Local scanner tracks (id LIKE 'local:%') keep the row around
+            // marked as userRemoved so the next MediaStore scan cannot resurrect
+            // them. The physical file may still be on the device when
+            // ContentResolver.delete was blocked by storage permissions.
+            if (track.id.startsWith("local:")) {
+                repository.markTrackRemoved(track.id)
+            } else {
+                repository.deleteTrack(track.id)
+            }
         }
     }
 
@@ -1169,12 +1241,21 @@ class MusicVaultViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val scanned = LocalAudioScanner(context.contentResolver).scan()
+                // Drop any scanned entry that was previously hidden by the user.
+                // The file may still exist on the device (we could not delete
+                // it through ContentResolver on API >= 30), so MediaStore keeps
+                // reporting it and the next rescan would otherwise resurrect it.
+                val hiddenIds = database.trackDao().getByIds(scanned.map { it.id })
+                    .filter { it.userRemoved }
+                    .map { it.id }
+                    .toSet()
+                val toInsert = scanned.filterNot { it.id in hiddenIds }
                 // Replace only the entries created by the device scanner.
                 // Downloaded/provider tracks use different IDs and therefore
-                // survive rescans. This also removes old short audio entries
-                // that no longer meet the 90-second music threshold.
+                // survive rescans. userRemoved tracks survive too, so the user
+                // decision is not silently reverted.
                 database.trackDao().deleteLocalScannedTracks()
-                database.trackDao().upsertAll(scanned)
+                database.trackDao().upsertAll(toInsert)
             } catch (e: Exception) {
                 _errorMessage.value = "No se pudo escanear el almacenamiento."
             } finally {
@@ -1265,7 +1346,6 @@ class MusicVaultViewModel(
             viewModelScope.launch(Dispatchers.IO) { repository.addTrackToPlaylist(playlistId, track) }
             return
         }
-        _providerMessage.value = "Descargando \"${track.title}\" para añadirla a la playlist..."
         requestDownloadInternal(track.id, track.title, track.artistName, track.url) { result ->
             if (result is ProviderResult.Success) {
                 val ready = track.copy(audioUri = result.audioUri, isDownloaded = true)
@@ -1289,7 +1369,6 @@ class MusicVaultViewModel(
             viewModelScope.launch(Dispatchers.IO) { repository.addTrackToAlbum(albumId, track) }
             return
         }
-        _providerMessage.value = "Descargando \"${track.title}\" para añadirla al álbum..."
         requestDownloadInternal(track.id, track.title, track.artistName, track.url) { result ->
             if (result is ProviderResult.Success) {
                 val ready = track.copy(audioUri = result.audioUri, isDownloaded = true)
@@ -1327,80 +1406,174 @@ class MusicVaultViewModel(
         sourceUrl: String? = null,
         onSuccess: suspend (ProviderResult?) -> Unit
     ) {
-        val jobToStart = synchronized(downloadLock) {
-            downloadWaiters.getOrPut(id) { mutableListOf() }.add(onSuccess)
-            if (_downloadProgress.value.containsKey(id)) return
-
-            _downloadProgress.value = _downloadProgress.value + (id to 0)
-            viewModelScope.launch(Dispatchers.IO) {
-                try {
-                    var lastProgressAt = 0L
-                    val result = Providers.download(name, author, sourceUrl = sourceUrl, onProgress = { progress ->
-                        val now = System.currentTimeMillis()
-                        // Download progress is not animation state. Time-based
-                        // throttle: the OR of the old condition (>=5% OR >=300ms)
-                        // fired on nearly every callback with fast downloads;
-                        // capping by elapsed time alone bounds map copies to 2/s
-                        // while keeping the bar visibly alive.
-                        if (progress == 100 || progress == 0 || now - lastProgressAt >= 500L) {
-                            lastProgressAt = now
-                            _downloadProgress.value = _downloadProgress.value + (id to progress)
-                        }
-                    }, requestId = id)
-                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                    if (result is ProviderResult.Success) {
-                        runCatching {
-                            database.downloadRecordDao().save(
-                                DownloadRecordEntity(id, result.localPath ?: result.audioUri)
-                            )
-                        }
-                    }
-                    val waiters = synchronized(downloadLock) { downloadWaiters.remove(id).orEmpty().toList() }
-                    waiters.forEach { callback ->
-                        try {
-                            callback(result)
-                        } catch (_: Exception) {
-                            // One consumer must not prevent the other download consumers from completing.
-                        }
-                    }
-                    when (result) {
-                        is ProviderResult.Success -> _providerMessage.value = "Disponible: ${result.fileName}"
-                        is ProviderResult.Unavailable -> _providerMessage.value = result.reason
-                        is ProviderResult.Error -> _providerMessage.value = result.message
-                    }
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    val waiters = synchronized(downloadLock) { downloadWaiters.remove(id).orEmpty().toList() }
-                    waiters.forEach { callback ->
-                        runCatching { callback(null) }
-                    }
-                    throw e
-                } catch (e: Exception) {
-                    val waiters = synchronized(downloadLock) { downloadWaiters.remove(id).orEmpty().toList() }
-                    waiters.forEach { callback ->
-                        runCatching { callback(null) }
-                    }
-                    _providerMessage.value = "Error durante la descarga: ${e.message ?: "error desconocido"}"
-                } finally {
-                    _downloadProgress.value = _downloadProgress.value - id
-                    synchronized(downloadLock) { downloadJobs.remove(id) }
-                }
-            }
+        if (!StoragePermissions.canWriteLegacy(appContext)) {
+            val reason = StoragePermissions.explainWhyCannotWrite(appContext)
+                ?: "Sin permiso de almacenamiento."
+            showError(reason)
+            viewModelScope.launch { onSuccess(null) }
+            return
         }
-        synchronized(downloadLock) { downloadJobs[id] = jobToStart }
+
+        val shouldStart = synchronized(downloadLock) {
+            downloadWaiters.getOrPut(id) { mutableListOf() }.add(onSuccess)
+            if (_downloadProgress.value.containsKey(id)) return@synchronized false
+            _downloadProgress.value = _downloadProgress.value + (id to 0)
+            true
+        }
+        if (!shouldStart) return
+
+        // Create the lifecycle handle before starting the service. This closes
+        // the tiny race where a very fast failure could broadcast its result
+        // before downloadJobs had been populated.
+        val job = viewModelScope.launch {
+            kotlinx.coroutines.awaitCancellation()
+        }
+        synchronized(downloadLock) { downloadJobs[id] = job }
+
+        val intent = Intent(DownloadForegroundService.ACTION_DOWNLOAD).apply {
+            putExtra(DownloadForegroundService.EXTRA_ID, id)
+            putExtra(DownloadForegroundService.EXTRA_NAME, name)
+            putExtra(DownloadForegroundService.EXTRA_AUTHOR, author)
+            putExtra(DownloadForegroundService.EXTRA_SOURCE_URL, sourceUrl)
+        }
+        try {
+            DownloadForegroundService.start(appContext, intent)
+        } catch (_: Exception) {
+            synchronized(downloadLock) {
+                downloadWaiters.remove(id)
+                downloadJobs.remove(id)?.cancel()
+            }
+            _downloadProgress.value = _downloadProgress.value - id
+            viewModelScope.launch { onSuccess(null) }
+        }
+    }
+
+    private fun handleDownloadServiceResult(intent: Intent) {
+        val id = intent.getStringExtra(DownloadForegroundService.EXTRA_ID) ?: return
+        val status = intent.getStringExtra(DownloadForegroundService.EXTRA_STATUS) ?: return
+        val result: ProviderResult = when (status) {
+            DownloadForegroundService.STATUS_SUCCESS -> ProviderResult.Success(
+                audioUri = intent.getStringExtra(DownloadForegroundService.EXTRA_AUDIO_URI).orEmpty(),
+                fileName = intent.getStringExtra(DownloadForegroundService.EXTRA_FILE_NAME).orEmpty(),
+                mimeType = intent.getStringExtra(DownloadForegroundService.EXTRA_MIME),
+                localPath = intent.getStringExtra(DownloadForegroundService.EXTRA_LOCAL_PATH)
+            )
+            DownloadForegroundService.STATUS_UNAVAILABLE -> ProviderResult.Unavailable(
+                intent.getStringExtra(DownloadForegroundService.EXTRA_MESSAGE) ?: "El audio no está disponible."
+            )
+            DownloadForegroundService.STATUS_CANCELLED -> ProviderResult.Error(
+                intent.getStringExtra(DownloadForegroundService.EXTRA_MESSAGE) ?: "Descarga cancelada"
+            )
+            else -> ProviderResult.Error(
+                intent.getStringExtra(DownloadForegroundService.EXTRA_MESSAGE)
+                    ?: "La descarga terminó con un error desconocido."
+            )
+        }
+
+        if (result is ProviderResult.Success) {
+            _downloadProgress.value = _downloadProgress.value + (id to 100)
+        }
+
+        val waiters = synchronized(downloadLock) { downloadWaiters.remove(id).orEmpty().toList() }
+        viewModelScope.launch(Dispatchers.IO) {
+            waiters.forEach { callback -> runCatching { callback(result) } }
+            when (result) {
+                is ProviderResult.Unavailable -> showError(result.reason)
+                is ProviderResult.Error -> showError(result.message)
+                is ProviderResult.Success -> Unit
+            }
+            _downloadProgress.value = _downloadProgress.value - id
+            synchronized(downloadLock) { downloadJobs.remove(id) }
+        }
     }
 
     fun cancelDownload(id: String) {
         synchronized(downloadLock) { downloadJobs.remove(id)?.cancel() }
-        Providers.cancel(id)
+        DownloadForegroundService.cancel(appContext, id)
         _downloadProgress.value = _downloadProgress.value - id
     }
 
-    fun clearProviderMessage() { _providerMessage.value = null }
-    fun clearError() { _errorMessage.value = null }
+    fun clearProviderMessage() {
+        providerAutoClearJob?.cancel()
+        providerAutoClearJob = null
+        _providerMessage.value = null
+    }
+    fun clearError() {
+        errorAutoClearJob?.cancel()
+        errorAutoClearJob = null
+        _errorMessage.value = null
+    }
+
+    private fun showError(message: String) {
+        // Errors stay visible until the user dismisses them. Five seconds was
+        // too short for Huawei/EMUI failures and made it look as if nothing
+        // had happened.
+        errorAutoClearJob?.cancel()
+        errorAutoClearJob = null
+        _errorMessage.value = message
+        _providerMessage.value = null
+    }
+
+    private fun showProvider(message: String) {
+        providerAutoClearJob?.cancel()
+        _providerMessage.value = message
+        providerAutoClearJob = viewModelScope.launch {
+            delay(messageDisplayMs)
+            _providerMessage.value = null
+            providerAutoClearJob = null
+        }
+    }
+
+    /**
+     * Llamado por MainActivity cuando el usuario responde al diálogo de
+     * permisos de almacenamiento.
+     *
+     * - Si granted=true: se resetea el contador de denegaciones para que en
+     *   futuras invocaciones se vuelva a consultar al sistema.
+     * - Si granted=false: incrementa el contador. Tras dos denegaciones el
+     *   ViewModel asume que el sistema ya no mostrará el diálogo (la app
+     *   queda en estado "denied permanently") y MainActivity deja de lanzar
+     *   el diálogo para no spamear al usuario.
+     */
+    fun onStoragePermissionResult(granted: Boolean, totalRequested: Int, denied: Int) {
+        storagePermissionPrompted = true
+        if (granted) {
+            storagePermissionDeniedCount = 0
+        } else if (denied > 0) {
+            storagePermissionDeniedCount += denied
+        }
+    }
+
+    /**
+     * Re-sincroniza el estado interno con la realidad del sistema. Llamado
+     * desde MainActivity.onResume() para detectar si el usuario habilitó el
+     * permiso manualmente desde Ajustes.
+     */
+    fun refreshStoragePermissionState() {
+        if (StoragePermissions.hasAll(appContext)) {
+            storagePermissionDeniedCount = 0
+            storagePermissionPrompted = true
+        }
+    }
+
+    /**
+     * Devuelve true si el ViewModel considera que aún vale la pena volver a
+     * mostrar el diálogo de permisos. MainActivity lo consulta antes de
+     * relanzar el launcher.
+     */
+    fun shouldPromptForStoragePermissions(): Boolean {
+        if (StoragePermissions.hasAll(appContext)) return false
+        // Android deja de mostrar el diálogo tras dos denegaciones. A partir
+        // de ahí, seguir lanzándolo no tiene efecto y solo incomoda.
+        return storagePermissionDeniedCount < 2
+    }
 
     override fun onCleared() {
+        runCatching { appContext.unregisterReceiver(downloadReceiver) }
         synchronized(downloadLock) {
-            downloadJobs.keys.toList().forEach { Providers.cancel(it) }
+            // Do NOT cancel the foreground service here. Its purpose is to keep
+            // downloads alive when the Activity/ViewModel is recreated or the
+            // user leaves the UI.
             downloadJobs.values.forEach { it.cancel() }
             downloadJobs.clear()
             downloadWaiters.clear()
@@ -1441,7 +1614,6 @@ class MusicVaultViewModel(
     private fun displaySource(track: CatalogTrack): String = track.source
         ?: when (track.provider) {
             YouTubeMetadataProvider.PROVIDER_ID -> YouTubeMetadataProvider.SOURCE_NAME
-            "itunes" -> "iTunes"
             "deezer" -> "Deezer"
             "musicbrainz" -> "MusicBrainz"
             else -> track.provider

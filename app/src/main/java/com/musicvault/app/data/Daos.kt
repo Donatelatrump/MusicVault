@@ -5,14 +5,16 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface TrackDao {
-    @Query("SELECT * FROM tracks ORDER BY title") fun observeAll(): Flow<List<TrackEntity>>
+    @Query("SELECT * FROM tracks WHERE userRemoved = 0 ORDER BY title") fun observeAll(): Flow<List<TrackEntity>>
     @Query("SELECT COUNT(*) FROM tracks") suspend fun count(): Int
     @Query(
         """
         SELECT * FROM tracks
-        WHERE title LIKE '%' || REPLACE(REPLACE(:query, '%', '\\%'), '_', '\\_') || '%' ESCAPE '\\'
-        OR artistName LIKE '%' || REPLACE(REPLACE(:query, '%', '\\%'), '_', '\\_') || '%' ESCAPE '\\'
-        OR albumTitle LIKE '%' || REPLACE(REPLACE(:query, '%', '\\%'), '_', '\\_') || '%' ESCAPE '\\'
+        WHERE userRemoved = 0 AND (
+            title LIKE '%' || REPLACE(REPLACE(:query, '%', '\\%'), '_', '\\_') || '%' ESCAPE '\\'
+            OR artistName LIKE '%' || REPLACE(REPLACE(:query, '%', '\\%'), '_', '\\_') || '%' ESCAPE '\\'
+            OR albumTitle LIKE '%' || REPLACE(REPLACE(:query, '%', '\\%'), '_', '\\_') || '%' ESCAPE '\\'
+        )
         ORDER BY title
         """
     )
@@ -22,10 +24,12 @@ interface TrackDao {
     // Catalog metadata is a placeholder: it must never clobber an existing row,
     // otherwise REPLACE would reset isDownloaded/audioUri of already downloaded tracks.
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertIfAbsent(items: List<TrackEntity>)
-    @Query("DELETE FROM tracks WHERE id LIKE 'local:%'") suspend fun deleteLocalScannedTracks()
+    @Query("DELETE FROM tracks WHERE id LIKE 'local:%' AND userRemoved = 0") suspend fun deleteLocalScannedTracks()
+    @Query("UPDATE tracks SET userRemoved = 1 WHERE id = :id") suspend fun markRemoved(id: String)
+    @Query("UPDATE tracks SET userRemoved = 0 WHERE id = :id") suspend fun unmarkRemoved(id: String)
     @Update suspend fun update(item: TrackEntity)
     @Query("DELETE FROM tracks WHERE id = :id") suspend fun delete(id: String)
-    @Query("SELECT * FROM tracks WHERE isDownloaded = 1 ORDER BY title") fun observeDownloaded(): Flow<List<TrackEntity>>
+    @Query("SELECT * FROM tracks WHERE isDownloaded = 1 AND userRemoved = 0 ORDER BY title") fun observeDownloaded(): Flow<List<TrackEntity>>
     @Query("SELECT * FROM tracks WHERE id IN (:ids)") suspend fun getByIds(ids: List<String>): List<TrackEntity>
 }
 

@@ -9,17 +9,28 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Multi-provider metadata facade.
- * iTunes/Deezer are fast public sources; MusicBrainz is retained as a structured fallback.
- * Track and album searches race independently so one category never delays the other.
+ * Deezer is the primary metadata source: clean track/artist titles, accurate
+ * metadata, fast public API. YouTube is the secondary provider and only kicks
+ * in when Deezer comes back empty or with low-quality matches (very low top
+ * score vs the query). Track and album searches race independently so one
+ * category never delays the other.
  */
 class MetadataCatalogProvider(
-    private val providers: List<CatalogProvider> = listOf(
-        YouTubeMetadataProvider(),
-        ItunesCatalogProvider(),
-        DeezerCatalogProvider(),
-        MusicBrainzCatalogProvider()
-    )
+    private val primaryProviders: List<CatalogProvider> = listOf(
+        DeezerCatalogProvider()
+    ),
+    private val secondaryProviders: List<CatalogProvider> = listOf(
+        YouTubeMetadataProvider()
+    ),
+    private val fallbackProviders: List<CatalogProvider> = emptyList()
 ) : CatalogProvider {
+
+    private val providers: List<CatalogProvider> =
+        primaryProviders + secondaryProviders + fallbackProviders
+
+    /** Providers whose result is considered authoritative when non-empty. */
+    val effectiveProviders: List<CatalogProvider> get() = providers
+
     data class SearchResult(
         val tracks: List<CatalogTrack>,
         val albums: List<CatalogAlbum>
@@ -85,33 +96,66 @@ class MetadataCatalogProvider(
             normalized.contains("charla") ||
             normalized.contains("talk") ||
             normalized.contains("conferencia")
-        val youtubeProviders = providers.filterIsInstance<YouTubeMetadataProvider>()
-        val others = providers.filterNot { it is YouTubeMetadataProvider }
-        return if (youtubeFirst) youtubeProviders + others else others + youtubeProviders
-    }
-
-    suspend fun searchTracksOnly(query: String, limit: Int = 20): List<CatalogTrack> {
-        val ordered = orderedTrackProviders(query)
-        val fast = coroutineScope {
-            firstNonEmpty(ordered.map { provider ->
-                async { safeCall { provider.searchTracks(query, limit) } }
-            })
+        return if (youtubeFirst) {
+            secondaryProviders + primaryProviders + fallbackProviders
+        } else {
+            primaryProviders + secondaryProviders + fallbackProviders
         }
-        if (fast.size >= FALLBACK_THRESHOLD) {
-            return SearchScorer.mergeAndRank(query, listOf(fast)).take(limit)
-        }
-
-        val enriched = withTimeoutOrNull(FALLBACK_TIMEOUT_MS) {
-            searchTracksMerged(query, limit)
-        } ?: fast
-
-        return SearchScorer.mergeAndRank(query, listOf(fast, enriched)).take(limit)
     }
 
     /**
-     * Same scoring as [searchTracksOnly] but always merges across every provider
-     * (no early-exit on first non-empty list). Used when we want the best
-     * precision even at the cost of latency.
+     * Returns the first non-empty list across [providers] using a soft
+     * quality gate. The fastest non-empty response wins the race as long as
+     * its top match is strong enough relative to the query. If the primary
+     * provider is slow, the secondary provider's first non-empty response
+     * is shown immediately instead of waiting.
+     */
+    private suspend fun <T : Any> fastWithQualityGate(
+        query: String,
+        fetch: suspend (CatalogProvider) -> List<T>,
+        score: (T, String) -> Float
+    ): List<T> = coroutineScope {
+        if (providers.isEmpty()) return@coroutineScope emptyList()
+        val channel = Channel<List<T>>(providers.size)
+        val forwarders = providers.map { provider ->
+            async {
+                try {
+                    channel.send(fetch(provider))
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    channel.send(emptyList())
+                }
+            }
+        }
+        var remaining = providers.size
+        var winner: List<T>? = null
+        while (remaining > 0 && winner == null) {
+            val result = channel.receive()
+            remaining--
+            if (result.isNotEmpty()) {
+                val top = result.maxOf { score(it, query) }
+                if (top >= PRIMARY_WEAK_THRESHOLD) {
+                    winner = result
+                }
+            }
+        }
+        forwarders.forEach { it.cancel() }
+        channel.close()
+        winner ?: emptyList()
+    }
+
+    suspend fun searchTracksFast(query: String, limit: Int = 20): List<CatalogTrack> =
+        fastWithQualityGate(
+            query,
+            fetch = { p -> safeCall { p.searchTracks(query, limit) } },
+            score = { t, q -> SearchScorer.score(t, q, 0, 1) }
+        )
+
+    /**
+     * Same scoring as [searchTracksFast] but always merges across every
+     * provider (no early-exit on first non-empty list). Used when the UI wants
+     * the best precision even at the cost of latency.
      */
     suspend fun searchTracksMerged(query: String, limit: Int = 20): List<CatalogTrack> = coroutineScope {
         val ordered = orderedTrackProviders(query)
@@ -121,42 +165,67 @@ class MetadataCatalogProvider(
         SearchScorer.mergeAndRank(query, listOf(results)).take(limit)
     }
 
-    suspend fun searchAlbumsOnly(query: String, limit: Int = 10): List<CatalogAlbum> {
+    suspend fun searchAlbumsFast(query: String, limit: Int = 10): List<CatalogAlbum> =
+        filterReachableAlbums(
+            fastWithQualityGate(
+                query,
+                fetch = { p -> safeCall { p.searchAlbums(query, limit) }.filterValidAlbums() },
+                score = { a, q -> SearchScorer.scoreAlbum(a, q, 0, 1) }
+            )
+        )
+
+    suspend fun searchAlbumsMerged(query: String, limit: Int = 10): List<CatalogAlbum> = coroutineScope {
         val ordered = orderedTrackProviders(query)
-        val fast = coroutineScope {
-            firstNonEmpty(ordered.map { provider ->
-                async { safeCall { provider.searchAlbums(query, limit) } }
-            })
-        }.filterValidAlbums()
-        if (fast.size >= FALLBACK_THRESHOLD) {
-            return SearchScorer.mergeAndRankAlbums(query, listOf(fast)).take(limit)
+        val results = mergeAll(ordered.map { provider ->
+            async { safeCall { provider.searchAlbums(query, limit) }.filterValidAlbums() }
+        })
+        SearchScorer.mergeAndRankAlbums(query, listOf(results)).take(limit)
+    }
+
+    /**
+     * Returns [albums] with the ones whose [tracksForAlbum] would return empty
+     * removed. Probing is bounded by [ALBUM_PROBE_TIMEOUT_MS] so a slow network
+     * does not stall the search result list.
+     */
+    private suspend fun filterReachableAlbums(albums: List<CatalogAlbum>): List<CatalogAlbum> = coroutineScope {
+        if (albums.isEmpty()) return@coroutineScope albums
+        val probes = albums.map { album ->
+            async {
+                val ok = try {
+                    withTimeoutOrNull(ALBUM_PROBE_TIMEOUT_MS) {
+                        tracksForAlbum(album, 1).isNotEmpty()
+                    } ?: false
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    false
+                }
+                if (ok) album else null
+            }
         }
-        val enriched = withTimeoutOrNull(FALLBACK_TIMEOUT_MS) {
-            coroutineScope {
-                mergeAll(ordered.map { provider ->
-                    async { safeCall { provider.searchAlbums(query, limit) } }
-                })
-            }.filterValidAlbums()
-        } ?: fast
-        return SearchScorer.mergeAndRankAlbums(query, listOf(fast, enriched)).take(limit)
+        probes.mapNotNull { it.await() }
     }
 
     suspend fun searchAll(query: String, limitTracks: Int = 20, limitAlbums: Int = 10): SearchResult = coroutineScope {
-        val tracksDeferred = async { searchTracksOnly(query, limitTracks) }
-        val albumsDeferred = async { searchAlbumsOnly(query, limitAlbums) }
+        val tracksDeferred = async { searchTracksFast(query, limitTracks) }
+        val albumsDeferred = async { searchAlbumsFast(query, limitAlbums) }
         SearchResult(
             tracks = tracksDeferred.await(),
             albums = albumsDeferred.await()
         )
     }
 
-    override suspend fun searchTracks(query: String, limit: Int): List<CatalogTrack> = searchTracksOnly(query, limit)
+    override suspend fun searchTracks(query: String, limit: Int): List<CatalogTrack> =
+        searchTracksMerged(query, limit)
+
     override suspend fun searchArtists(query: String, limit: Int): List<CatalogArtist> = coroutineScope {
         firstNonEmpty(providers.map { provider ->
             async { safeCall { provider.searchArtists(query, limit) } }
         })
     }
-    override suspend fun searchAlbums(query: String, limit: Int): List<CatalogAlbum> = searchAlbumsOnly(query, limit)
+
+    override suspend fun searchAlbums(query: String, limit: Int): List<CatalogAlbum> =
+        searchAlbumsMerged(query, limit)
 
     suspend fun tracksForAlbum(album: CatalogAlbum, limit: Int = 50): List<CatalogTrack> {
         if (!album.isValid()) return emptyList()
@@ -223,7 +292,6 @@ class MetadataCatalogProvider(
 
     private fun itName(provider: CatalogProvider): String = when (provider) {
         is YouTubeMetadataProvider -> "youtube"
-        is ItunesCatalogProvider -> "itunes"
         is DeezerCatalogProvider -> "deezer"
         is MusicBrainzCatalogProvider -> "musicbrainz"
         else -> ""
@@ -231,12 +299,17 @@ class MetadataCatalogProvider(
 
     companion object {
         /**
-         * When the fast path returns fewer than this many results, we still
-         * fan out to every provider before declaring "nothing to show".
-         * Tuned for the average user: most real songs match on iTunes/Deezer,
-         * but obscure queries (regional artists, ASMR, podcasts) need YouTube.
+         * Per-album timeout for the "is this album reachable?" probe that runs
+         * after ranking. Keeps a slow provider from blocking the whole list.
          */
-        private const val FALLBACK_THRESHOLD = 3
-        private const val FALLBACK_TIMEOUT_MS = 1_500L
+        private const val ALBUM_PROBE_TIMEOUT_MS = 1_500L
+
+        /**
+         * Below this score the top primary-provider match is considered
+         * weak and the fast-path falls through to the secondary provider.
+         * Threshold tuned empirically: a clean "Friends - Marshmello" hit
+         * scores around 140, while off-topic matches cluster below 60.
+         */
+        private const val PRIMARY_WEAK_THRESHOLD = 60f
     }
 }
