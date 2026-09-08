@@ -58,6 +58,7 @@ class PlayerController(context: Context) {
     private val _crossfadeSeconds = MutableStateFlow(settings.getInt("crossfade_seconds", 5).coerceIn(0, 12))
     val crossfadeSeconds: StateFlow<Int> = _crossfadeSeconds
     private val _queue = MutableStateFlow<List<Track>>(emptyList())
+    private val knownTracks = mutableMapOf<String, Track>()
     val queue: StateFlow<List<Track>> = _queue
     private val _queueIndex = MutableStateFlow(-1)
     val queueIndex: StateFlow<Int> = _queueIndex
@@ -119,6 +120,7 @@ class PlayerController(context: Context) {
                         if (playbackState == androidx.media3.common.Player.STATE_ENDED) _ended.value = System.nanoTime()
                     }
                     override fun onRepeatModeChanged(repeatMode: Int) { _repeatMode.value = repeatMode }
+                    override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) { _shuffle.value = shuffleModeEnabled }
                 })
                 _isPlaying.value = controller.isPlaying
                 _shuffle.value = controller.shuffleModeEnabled
@@ -179,9 +181,20 @@ class PlayerController(context: Context) {
     }
 
     private fun publishQueue(controller: MediaController) {
-        val current = _queue.value
-        if (current.isEmpty()) return
-        _queueIndex.value = controller.currentMediaItemIndex
+        _queue.value = List(controller.mediaItemCount) { index ->
+            val item = controller.getMediaItemAt(index)
+            knownTracks[item.mediaId] ?: Track(
+                id = item.mediaId,
+                title = item.mediaMetadata.title?.toString().orEmpty(),
+                artistName = item.mediaMetadata.artist?.toString().orEmpty(),
+                albumId = "unknown",
+                albumTitle = item.mediaMetadata.albumTitle?.toString().orEmpty(),
+                durationMs = 0L,
+                audioUri = item.localConfiguration?.uri?.toString(),
+                coverUri = item.mediaMetadata.artworkUri?.toString()
+            )
+        }
+        _queueIndex.value = if (controller.mediaItemCount == 0) -1 else controller.currentMediaItemIndex
     }
 
     private fun mediaItem(track: Track): MediaItem? {
@@ -201,12 +214,13 @@ class PlayerController(context: Context) {
 
     fun play(track: Track) {
         val item = mediaItem(track) ?: return
+        knownTracks[track.id] = track
         withController { controller ->
             controller.setVolume(1f)
             controller.setMediaItem(item)
             controller.prepare()
             controller.play()
-            _queue.value = listOf(track)
+            publishQueue(controller)
             publishProgress(controller)
         }
     }
@@ -215,6 +229,7 @@ class PlayerController(context: Context) {
         val playable = tracks.filter { it.audioUri != null }
         val items = playable.mapNotNull(::mediaItem)
         if (items.isEmpty()) return
+        playable.forEach { knownTracks[it.id] = it }
         val safeIndex = startIndex.coerceIn(0, items.lastIndex)
         withController { controller ->
             controller.setVolume(1f)
@@ -222,14 +237,29 @@ class PlayerController(context: Context) {
             controller.shuffleModeEnabled = shuffle
             controller.prepare()
             controller.play()
-            _queue.value = playable
-            _queueIndex.value = safeIndex
+            publishQueue(controller)
             publishProgress(controller)
         }
     }
 
     fun toggle() = withController { controller ->
         if (controller.isPlaying) controller.pause() else controller.play()
+        publishProgress(controller)
+    }
+
+    /**
+     * Reasserts the live session state after the app returns to the foreground.
+     *
+     * Some devices leave the session marked as playing while the audio sink is
+     * effectively muted or ducked after a background/foreground round-trip.
+     * Reapplying the intended volume and play state is harmless when playback
+     * is already healthy and fixes the silent-but-playing case.
+     */
+    fun refreshPlaybackState() = withController { controller ->
+        controller.setVolume(1f)
+        if (controller.isPlaying) {
+            controller.play()
+        }
         publishProgress(controller)
     }
 
@@ -266,11 +296,12 @@ class PlayerController(context: Context) {
         publishProgress(controller)
     }
 
-    fun append(track: Track) {
+    fun append(track: Track, afterTrackId: String? = null) {
         val item = mediaItem(track) ?: return
+        knownTracks[track.id] = track
         withController { controller ->
+            if (afterTrackId != null && (controller.currentMediaItem?.mediaId != afterTrackId || controller.hasNextMediaItem())) return@withController
             controller.addMediaItem(item)
-            _queue.value = _queue.value + track
             publishQueue(controller)
         }
     }
@@ -286,7 +317,6 @@ class PlayerController(context: Context) {
     fun removeQueueItem(index: Int) = withController { controller ->
         if (index in 0 until controller.mediaItemCount) {
             controller.removeMediaItem(index)
-            _queue.value = _queue.value.toMutableList().also { it.removeAt(index) }
             publishQueue(controller)
         }
     }
@@ -294,10 +324,6 @@ class PlayerController(context: Context) {
     fun moveQueueItem(from: Int, to: Int) = withController { controller ->
         if (from in 0 until controller.mediaItemCount && to in 0 until controller.mediaItemCount && from != to) {
             controller.moveMediaItem(from, to)
-            _queue.value = _queue.value.toMutableList().also {
-                val item = it.removeAt(from)
-                it.add(to, item)
-            }
             publishQueue(controller)
         }
     }

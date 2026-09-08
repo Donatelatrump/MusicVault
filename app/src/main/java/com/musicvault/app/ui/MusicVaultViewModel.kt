@@ -178,13 +178,22 @@ class MusicVaultViewModel(
     // True only when the user explicitly created/selected a playback queue.
     // A normal single-track play also creates a Media3 item, but that must not
     // force Next to stay on a one-item queue.
+    private data class PendingQueueEntry(var ready: Boolean = false, var track: Track? = null)
+    private val pendingQueueEntries = mutableListOf<PendingQueueEntry>()
+    private var queueGeneration = 0L
     private var explicitQueueMode = false
+        set(value) {
+            field = value
+            queueGeneration++
+            pendingQueueEntries.clear()
+        }
     private var albumJob: Job? = null
     private var historyJob: Job? = null
     private var lastHistoryUpdateAt = 0L
     // Cached resolution of the currently playing track for the history writer.
     private var historyTrackId: String? = null
     private var historyTrack: Track? = null
+    private val whitespaceRegex = Regex("\\s+")
 
     private val localTracks = repository.tracks()
     private val downloaded = repository.downloaded()
@@ -352,15 +361,23 @@ class MusicVaultViewModel(
         val downloadedAlbumTitles = downloaded.mapTo(HashSet()) { it.albumTitle.trim().lowercase() }
 
         val tokens = searches.asSequence()
-            .flatMap { it.lowercase().split(Regex("\\s+")).asSequence() }
+            .flatMap { it.lowercase().split(whitespaceRegex).asSequence() }
             .filter { it.length >= 2 }
             .take(24)
             .toList()
 
+        fun scoreMatches(haystack: String): Int {
+            var hits = 0
+            for (token in tokens) {
+                if (haystack.contains(token)) hits++
+            }
+            return hits
+        }
+
         fun scoreTrack(t: Track): Int {
             val artist = t.artistName.trim().lowercase()
             val hay = "${t.title} $artist ${t.albumTitle}".lowercase()
-            var score = tokens.count { hay.contains(it) } * 4
+            var score = scoreMatches(hay) * 4
             // Artists/albums from the vault dominate the ranking.
             if (artist in topArtists) score += 100
             if (t.albumTitle.trim().lowercase() in downloadedAlbumTitles) score += 30
@@ -370,7 +387,7 @@ class MusicVaultViewModel(
 
         fun scoreAlbum(a: Album): Int {
             val hay = "${a.title} ${a.artistName}".lowercase()
-            var score = tokens.count { hay.contains(it) } * 8
+            var score = scoreMatches(hay) * 8
             if (a.artistName.trim().lowercase() in topArtists) score += 100
             return score
         }
@@ -387,15 +404,19 @@ class MusicVaultViewModel(
         val tracksList = tracksResult
             .distinctBy { it.id }
             .filter { it.id !in downloadedIds }
-            .sortedByDescending(::scoreTrack)
+            .map { it to scoreTrack(it) }
+            .sortedByDescending { it.second }
             .take(24)
+            .map { it.first }
             .toList()
 
         val albumsResult = catalogAlbums.asSequence()
             .filter { !it.id.startsWith("album:custom:") }
             .distinctBy { it.id }
-            .sortedWith(compareByDescending<Album> { scoreAlbum(it) }.thenBy { it.title.lowercase() })
+            .map { it to scoreAlbum(it) }
+            .sortedWith(compareByDescending<Pair<Album, Int>> { it.second }.thenBy { it.first.title.lowercase() })
             .take(12).toList()
+            .map { it.first }
         tracksList to albumsResult
     }.flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList<Track>() to emptyList())
@@ -455,11 +476,12 @@ class MusicVaultViewModel(
         // Explicit queues (playlists) manage their own items and are skipped.
         player.onNextItemNeeded = { finishedTrackId ->
             if (!explicitQueueMode) {
+                val generation = queueGeneration
                 viewModelScope.launch {
                     val current = finishedTrackId
                         ?.let { id -> state.value.tracks.firstOrNull { it.id == id } }
                         ?: _selectedTrack.value
-                    if (current != null) appendSmartSuccessor(current)
+                    if (current != null && generation == queueGeneration) appendSmartSuccessor(current)
                 }
             }
         }
@@ -755,6 +777,7 @@ class MusicVaultViewModel(
 
     fun togglePlayback() = player.toggle()
     fun seekTo(positionMs: Long) = player.seekTo(positionMs)
+    fun refreshPlaybackState() = player.refreshPlaybackState()
     fun openFullPlayer() { if (_selectedTrack.value != null) _fullPlayer.value = true }
     fun closeFullPlayer() { _fullPlayer.value = false }
 
@@ -778,11 +801,11 @@ class MusicVaultViewModel(
                 return@launch
             }
             activePlaylistId = playlist.id
-            explicitQueueMode = true
             _selectedPlaylist.value = playlist
             _selectedPlaylistTracks.value = tracks
             _shuffle.value = shuffle
             withContext(Dispatchers.Main.immediate) {
+                explicitQueueMode = true
                 // When shuffle is requested, start from a genuinely random item
                 // instead of always beginning with item 0. Media3 then keeps the
                 // rest of the queue shuffled within this playlist.
@@ -804,11 +827,11 @@ class MusicVaultViewModel(
                 return@launch
             }
             activePlaylistId = playlist.id
-            explicitQueueMode = true
             _selectedPlaylist.value = playlist
             _selectedPlaylistTracks.value = tracks
             _shuffle.value = shuffle
             withContext(Dispatchers.Main.immediate) {
+                explicitQueueMode = true
                 player.playQueue(tracks, index, shuffle)
                 _selectedTrack.value = tracks[index]
                 repository.recordPlay(tracks[index], 0f)
@@ -847,21 +870,50 @@ class MusicVaultViewModel(
         if (!track.isDownloaded || track.audioUri == null) {
             return
         }
-        explicitQueueMode = true
-        player.append(track)
+        activateExplicitQueueMode()
+        pendingQueueEntries += PendingQueueEntry(ready = true, track = track)
+        flushPendingQueue()
     }
 
     fun addRemoteTrackToQueue(track: CatalogTrack) {
         val localId = "${track.provider}:recording:${track.id}"
         val local = state.value.tracks.firstOrNull { it.id == localId && it.isDownloaded && it.audioUri != null }
         if (local != null) {
-            explicitQueueMode = true
-            player.append(local)
+            addToQueue(local)
             return
         }
+        // Queue intent is explicit as soon as the user presses "add to queue";
+        // otherwise smart-next can keep appending auto-picked successors while
+        // the download is still in flight.
+        activateExplicitQueueMode()
+        val generation = queueGeneration
+        val entry = PendingQueueEntry()
+        pendingQueueEntries += entry
         requestRemoteDownload(track, autoPlay = false) { ready ->
-            explicitQueueMode = true
-            ready?.let { player.append(it) }
+            withContext(Dispatchers.Main.immediate) {
+                if (generation == queueGeneration) {
+                    entry.ready = true
+                    entry.track = ready
+                    flushPendingQueue()
+                }
+            }
+        }
+    }
+
+    private fun flushPendingQueue() {
+        while (pendingQueueEntries.firstOrNull()?.ready == true) {
+            pendingQueueEntries.removeAt(0).track?.let { player.append(it) }
+        }
+    }
+
+    private fun activateExplicitQueueMode() {
+        if (explicitQueueMode) return
+        explicitQueueMode = true
+        val currentIndex = queueIndex.value
+        if (currentIndex < 0) return
+        val tail = queue.value.lastIndex
+        for (index in tail downTo currentIndex + 1) {
+            player.removeQueueItem(index)
         }
     }
 
@@ -1004,6 +1056,8 @@ class MusicVaultViewModel(
     }
 
     private suspend fun appendSmartSuccessor(current: Track) {
+        if (explicitQueueMode) return
+        val generation = queueGeneration
         val localAlbumTracks = when {
             _selectedLocalAlbum.value != null -> _selectedLocalAlbumTracks.value
             current.albumId.startsWith("album:custom:") -> repository.getAlbumTracks(current.albumId)
@@ -1016,7 +1070,7 @@ class MusicVaultViewModel(
                 localAlbumTracks.drop(currentIndex + 1).filter { it.isDownloaded && it.audioUri != null }
             } else emptyList()
             val next = if (_shuffle.value) localCandidates.random() else orderedNext.firstOrNull() ?: localCandidates.first()
-            player.append(next)
+            appendSmartCandidate(current, next, generation)
             return
         }
 
@@ -1027,7 +1081,7 @@ class MusicVaultViewModel(
             val nextRemote = if (_shuffle.value && remaining.isNotEmpty()) remaining.randomOrNull() else remaining.firstOrNull()
             if (nextRemote != null) {
                 requestRemoteDownload(nextRemote, autoPlay = false) { ready ->
-                    ready?.let { player.append(it) }
+                    ready?.let { appendSmartCandidate(current, it, generation) }
                 }
                 return
             }
@@ -1044,16 +1098,24 @@ class MusicVaultViewModel(
                 val currentIndex = ordered.indexOfFirst { it.id == current.id }
                 ordered.getOrNull(currentIndex + 1) ?: pool.first()
             }
-            player.append(next)
+            appendSmartCandidate(current, next, generation)
         } else if (_shuffle.value) {
-            findAndDownloadRelated(current)
+            findAndDownloadRelated(current, generation)
         }
     }
 
-    private suspend fun findAndDownloadRelated(current: Track) {
+    private suspend fun appendSmartCandidate(current: Track, candidate: Track, generation: Long) {
+        withContext(Dispatchers.Main.immediate) {
+            if (!explicitQueueMode && generation == queueGeneration) {
+                player.append(candidate, afterTrackId = current.id)
+            }
+        }
+    }
+
+    private suspend fun findAndDownloadRelated(current: Track, generation: Long = queueGeneration) {
         val localCandidates = state.value.downloaded.filter { it.id != current.id && it.audioUri != null }
         if (!isOnline()) {
-            localCandidates.randomOrNull()?.let { player.append(it) }
+            localCandidates.randomOrNull()?.let { appendSmartCandidate(current, it, generation) }
             return
         }
         if (!Providers.isInitialized()) return
@@ -1065,13 +1127,13 @@ class MusicVaultViewModel(
             }
             if (candidate != null) {
                 requestRemoteDownload(candidate, autoPlay = false) { ready ->
-                    ready?.let { player.append(it) }
+                    ready?.let { appendSmartCandidate(current, it, generation) }
                 }
             } else {
-                localCandidates.randomOrNull()?.let { player.append(it) }
+                localCandidates.randomOrNull()?.let { appendSmartCandidate(current, it, generation) }
             }
         } catch (_: Exception) {
-            localCandidates.randomOrNull()?.let { player.append(it) }
+            localCandidates.randomOrNull()?.let { appendSmartCandidate(current, it, generation) }
         }
     }
 

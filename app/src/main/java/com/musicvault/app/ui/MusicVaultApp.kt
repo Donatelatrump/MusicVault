@@ -587,6 +587,15 @@ private fun SearchScreen(
             }
         )
     }
+    // The downloaded-id set only changes when the library changes; rebuilding it
+    // on every unrelated recomposition was pure churn for the search list.
+    val downloadedIds = remember(state.downloaded) {
+        state.downloaded
+            .asSequence()
+            .filter { it.isDownloaded }
+            .map { it.id }
+            .toSet()
+    }
 
     val resultItems = remember(state.remoteAlbums, state.remoteTracks) {
         buildList<RemoteResultItem> {
@@ -683,16 +692,6 @@ private fun SearchScreen(
                         // screen keeps observing flows (download progress ticks),
                         // but pushing state into a hidden RecyclerView is wasted
                         // work. The first update after reactivation repushes all.
-                        // Use the repository's authoritative downloaded list. Its IDs are
-                        // already the exact provider:recording:<id> keys used by remote
-                        // downloads, so search rows switch to the post-download state as
-                        // soon as persistence completes. Do not guess a provider here.
-                        val downloadedIds = state.downloaded
-                            .asSequence()
-                            .filter { it.isDownloaded }
-                            .map { it.id }
-                            .toSet()
-
                         adapter.updateState(
                             downloadedIds = downloadedIds,
                             progress = downloadProgress,

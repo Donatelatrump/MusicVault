@@ -53,6 +53,8 @@ interface AlbumTrackDao {
 
 @Dao
 interface PlaylistDao {
+    @Query("SELECT COALESCE(MAX(position), -1) + 1 FROM playlist_tracks WHERE playlistId=:playlistId") suspend fun nextPosition(playlistId: String): Int
+    @Query("SELECT trackId FROM playlist_tracks WHERE playlistId=:playlistId") suspend fun trackIds(playlistId: String): List<String>
     @Query("SELECT * FROM playlists ORDER BY title") fun observeAll(): Flow<List<PlaylistEntity>>
     @Query("SELECT t.* FROM tracks t INNER JOIN playlist_tracks pt ON pt.trackId=t.id WHERE pt.playlistId=:playlistId ORDER BY pt.position") fun observeTracks(playlistId: String): Flow<List<TrackEntity>>
     @Query("SELECT t.* FROM tracks t INNER JOIN playlist_tracks pt ON pt.trackId=t.id WHERE pt.playlistId=:playlistId ORDER BY pt.position") suspend fun getTracks(playlistId: String): List<TrackEntity>

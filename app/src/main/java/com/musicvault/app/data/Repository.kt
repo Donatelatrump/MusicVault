@@ -1,5 +1,6 @@
 package com.musicvault.app.data
 
+import androidx.room.withTransaction
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.Dispatchers
@@ -54,10 +55,13 @@ class MusicRepository(private val db: MusicDatabase) {
 
     suspend fun addTracksToPlaylist(id: String, tracks: List<Track>) {
         if (tracks.isEmpty()) return
-        // Preserve the existing ordering by appending after the current count.
-        val current = db.playlistDao().getTracks(id)
-        val start = current.size
-        db.playlistDao().upsertTracks(tracks.mapIndexed { index, track -> PlaylistTrackEntity(id, track.id, start + index) })
+        db.withTransaction {
+            val dao = db.playlistDao()
+            val existing = dao.trackIds(id).toHashSet()
+            val additions = tracks.filter { existing.add(it.id) }
+            val start = dao.nextPosition(id)
+            dao.upsertTracks(additions.mapIndexed { index, track -> PlaylistTrackEntity(id, track.id, start + index) })
+        }
     }
 
     suspend fun addTrackToPlaylist(id: String, track: Track) = addTracksToPlaylist(id, listOf(track))

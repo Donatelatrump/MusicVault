@@ -93,6 +93,10 @@ class MainActivity : ComponentActivity() {
         // el permiso, lo volvemos a evaluar para mantener el estado interno
         // del ViewModel sincronizado.
         viewModel.refreshStoragePermissionState()
+        // Reassert the playback session when the app returns to the foreground
+        // so a background/foreground round-trip cannot leave the session alive
+        // but muted on some devices.
+        viewModel.refreshPlaybackState()
         requestStoragePermissionsIfNeeded()
     }
 

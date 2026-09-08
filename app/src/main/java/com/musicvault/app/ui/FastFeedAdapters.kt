@@ -105,6 +105,7 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
     private var recommendedAlbumsCache: List<Album> = emptyList()
     private var recommendationsCache: List<Track> = emptyList()
     private val progressFlows = HashMap<String, Flow<Int?>>()
+    private val trackPositionById = HashMap<String, Int>()
 
     init { setHasStableIds(true) }
 
@@ -116,6 +117,23 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
         HomeFeedItem.RecommendedAlbums -> TYPE_RECOMMENDED_ALBUMS
         is HomeFeedItem.SongsHeader -> TYPE_SONGS_HEADER
         is HomeFeedItem.TrackItem -> TYPE_TRACK
+    }
+
+    private fun rebuildTrackPositionIndex() {
+        trackPositionById.clear()
+        currentList.forEachIndexed { position, item ->
+            if (item is HomeFeedItem.TrackItem) {
+                trackPositionById[item.track.id] = position
+            }
+        }
+    }
+
+    private inline fun <T> sameIds(oldList: List<T>, newList: List<T>, crossinline idOf: (T) -> String): Boolean {
+        if (oldList.size != newList.size) return false
+        for (index in oldList.indices) {
+            if (idOf(oldList[index]) != idOf(newList[index])) return false
+        }
+        return true
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder =
@@ -138,9 +156,9 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
         // across recompositions, so the element-wise map/equals only runs when
         // a genuinely new list arrived.
         val recommendationsChanged =
-            (recommendedTracks !== recommendedTracksCache && recommendedTracks.map { it.id } != recommendedTracksCache.map { it.id }) ||
-                (recommendedAlbums !== recommendedAlbumsCache && recommendedAlbums.map { it.id } != recommendedAlbumsCache.map { it.id }) ||
-                (recommendations !== recommendationsCache && recommendations.map { it.id } != recommendationsCache.map { it.id })
+            (recommendedTracks !== recommendedTracksCache && !sameIds(recommendedTracksCache, recommendedTracks) { it.id }) ||
+                (recommendedAlbums !== recommendedAlbumsCache && !sameIds(recommendedAlbumsCache, recommendedAlbums) { it.id }) ||
+                (recommendations !== recommendationsCache && !sameIds(recommendationsCache, recommendations) { it.id })
         val auxiliaryDataChanged = this.playlists != playlists || this.customAlbums != customAlbums
         val downloadsChanged = this.albumDownloads != albumDownloads
 
@@ -174,6 +192,7 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
         }
 
         submitList(newItems) {
+            rebuildTrackPositionIndex()
             if (auxiliaryDataChanged) currentList.forEachIndexed { i, item ->
                 if (item is HomeFeedItem.TrackItem) notifyItemChanged(i)
             }
@@ -188,10 +207,9 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
 
     private fun notifyPlayerRows(oldSelected: String?, newSelected: String?, oldPlaying: Boolean, newPlaying: Boolean) {
         if (oldSelected == newSelected && oldPlaying == newPlaying) return
-        currentList.forEachIndexed { index, item ->
-            if (item is HomeFeedItem.TrackItem && (item.track.id == oldSelected || item.track.id == newSelected)) {
-                notifyItemChanged(index, FeedPayload.PLAYER_STATE)
-            }
+        if (oldSelected != null) trackPositionById[oldSelected]?.let { notifyItemChanged(it, FeedPayload.PLAYER_STATE) }
+        if (newSelected != null && newSelected != oldSelected) {
+            trackPositionById[newSelected]?.let { notifyItemChanged(it, FeedPayload.PLAYER_STATE) }
         }
     }
 

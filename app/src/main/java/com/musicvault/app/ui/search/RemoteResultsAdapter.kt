@@ -99,6 +99,11 @@ class RemoteResultsAdapter(
         selectedTrackId: String?,
         isPlaying: Boolean
     ) {
+        if (this.downloadedIds === downloadedIds &&
+            this.progress === progress &&
+            this.selectedTrackId == selectedTrackId &&
+            this.isPlaying == isPlaying
+        ) return
         if (this.downloadedIds == downloadedIds &&
             this.progress == progress &&
             this.selectedTrackId == selectedTrackId &&
