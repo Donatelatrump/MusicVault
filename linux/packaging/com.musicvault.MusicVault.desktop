@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=MusicVault
+GenericName=Music player
+GenericName[es]=Reproductor de música
+Comment=Your music, your collection
+Comment[es]=Tu música, tu colección
+Exec=musicvault %U
+Icon=com.musicvault.MusicVault
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+MimeType=audio/mpeg;audio/flac;audio/ogg;audio/opus;audio/mp4;audio/x-wav;audio/aac;
+StartupNotify=true
+StartupWMClass=MusicVault
