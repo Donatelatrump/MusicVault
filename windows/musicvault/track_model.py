@@ -1,6 +1,5 @@
 """Virtual track rows: no per-cell widgets or artwork requests outside the viewport."""
 from collections import OrderedDict
-from pathlib import Path
 
 from PyQt6.QtCore import QAbstractTableModel, QModelIndex, Qt, QSize, QTimer, pyqtSignal, QPoint
 from PyQt6.QtGui import QColor, QImageReader, QPixmap
@@ -53,7 +52,7 @@ class TrackModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.TextAlignmentRole and column in (0, 4):
             return Qt.AlignmentFlag.AlignCenter
 
-    def set_tracks(self, tracks, records, active_downloads, current_id):
+    def set_tracks(self, tracks, records, active_downloads, current_id, availability=None):
         same_order = [t.id for t in tracks] == [t.id for t in self.tracks]
         if not same_order:
             self.beginResetModel()
@@ -61,9 +60,10 @@ class TrackModel(QAbstractTableModel):
         self.current_id = current_id
         self.rows = {track.id: row for row, track in enumerate(tracks)}
         self.states = {}
+        availability = availability or {}
         for track in tracks:
             record = records.get(track.id, {})
-            local = bool(track.path and Path(track.path).is_file())
+            local = availability.get(track.id, False)
             failed = record.get("status") in ("error", "cancelled", "interrupted")
             state = ("En tu biblioteca" if local else
                      f"{record.get('progress', 0)}% · descargando" if track.id in active_downloads else

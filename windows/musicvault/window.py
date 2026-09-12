@@ -244,6 +244,7 @@ class Window(QMainWindow):
 
     def refresh_tracks(self):
         query = self.search.text()
+        availability = {}
         if self.remote_album:
             tracks = [self.db.get_track(t.id) or t for t in self.remote_tracks]
         elif self.local_album is not None:
@@ -251,17 +252,12 @@ class Window(QMainWindow):
         elif self.collection:
             tracks = self.db.tracks(query, collection=self.collection)
         elif self.route in ("Biblioteca", "Favoritos"):
-            all_tracks = self.db.library_tracks(favorites=self.route == "Favoritos")
-            self.refresh_library_filters(all_tracks)
-            words = query.casefold().split()
+            favorites = self.route == "Favoritos"
+            self.refresh_library_filters(self.db.library_facets(favorites=favorites))
             artist = self.artist_filter.currentData() or ""
             album = self.album_filter.currentData() or ""
-            tracks = [
-                track for track in all_tracks
-                if (not artist or track.artist == artist)
-                and (not album or track.album == album)
-                and all(word in f"{track.title} {track.artist} {track.album}".casefold() for word in words)
-            ]
+            tracks = self.db.library_tracks(query, favorites=favorites, availability=availability,
+                                            artist=artist, album=album)
             order = self.library_sort.currentData()
             def sort_text(value):
                 return "".join(
@@ -276,21 +272,21 @@ class Window(QMainWindow):
             elif order == "album":
                 tracks.sort(key=lambda track: (sort_text(track.album), sort_text(track.artist), sort_text(track.title)))
         elif self.route == "Inicio":
-            recent = self.db.library_tracks(query, recent=True)
+            recent = self.db.library_tracks(query, recent=True, availability=availability)
             seen = {t.id for t in recent}
-            tracks = recent + [t for t in self.db.library_tracks(query) if t.id not in seen]
+            tracks = recent + [t for t in self.db.library_tracks(query, availability=availability) if t.id not in seen]
         elif self.route == "Buscar":
             local = self.db.tracks(query)
             seen = {t.id for t in local}
             tracks = local + [self.db.get_track(t.id) or t for t in self.remote_tracks if t.id not in seen] if query else []
         else:
-            tracks = self.db.library_tracks(query)
-        self.render_tracks(tracks)
+            tracks = self.db.library_tracks(query, availability=availability)
+        self.render_tracks(tracks, availability)
 
-    def refresh_library_filters(self, tracks):
+    def refresh_library_filters(self, facets):
         """Refresh facet choices without discarding the listener's selection."""
-        artists = tuple(sorted({track.artist.strip() for track in tracks if track.artist.strip()}, key=str.casefold))
-        albums = tuple(sorted({track.album.strip() for track in tracks if track.album.strip()}, key=str.casefold))
+        artists = tuple(value.strip() for value in facets[0] if value.strip())
+        albums = tuple(value.strip() for value in facets[1] if value.strip())
         signature = (artists, albums)
         if signature == self.library_filters_signature:
             return
@@ -310,13 +306,18 @@ class Window(QMainWindow):
         refill(self.artist_filter, "Todos los artistas", artists)
         refill(self.album_filter, "Todos los álbumes", albums)
 
-    def render_tracks(self, tracks):
+    def render_tracks(self, tracks, availability=None):
         selected = {t.id for t in self.selected_tracks()}
         prior_ids = [t.id for t in self.shown_tracks]
         self.shown_tracks = tracks
         records = {r["track_id"]: r for r in self.db.downloads()}
         current = self.player.current
-        self.track_model.set_tracks(tracks, records, self.download_jobs, current.id if current else None)
+        availability = availability or {}
+        for track in tracks:
+            if track.id not in availability:
+                availability[track.id] = bool(track.path and Path(track.path).is_file())
+        self.track_model.set_tracks(tracks, records, self.download_jobs,
+                                    current.id if current else None, availability)
         # The table is part of the page, so it exposes all rows to the outer
         # scroll surface rather than keeping an independent vertical scroll.
         header_height = self.table.horizontalHeader().height() or 34
@@ -1094,6 +1095,7 @@ class Window(QMainWindow):
         if getattr(self, "error_track_id", None) == track.id:
             self.message_bar.hide()
         completed = []
+        persisted_progress = {"value": -1, "time": 0.0}
 
         def progress(value):
             if completed or (track.id in self.download_jobs and self.download_jobs[track.id].cancel.is_set()):
@@ -1101,7 +1103,11 @@ class Window(QMainWindow):
             if self.download_progress_values.get(track.id) == value:
                 return
             self.download_progress_values[track.id] = value
-            self.db.set_download(track, "downloading", value)
+            now = time.monotonic()
+            if (persisted_progress["value"] < 0 or value >= persisted_progress["value"] + 5
+                    or now - persisted_progress["time"] >= 1.0):
+                self.db.set_download(track, "downloading", value)
+                persisted_progress.update(value=value, time=now)
             self.track_model.set_progress(track.id, value)
             if self.route == "Descargas":
                 self.schedule_download_refresh()

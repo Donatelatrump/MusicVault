@@ -55,7 +55,7 @@ def read_track(path, cache=None):
 
 def scan(paths, db, cancel=None, progress=None, minimum=0, explicit=False):
     imported, errors, seen = [], [], set()
-    existing_paths = {t.path: t for t in db.tracks(include_removed=True) if t.path}
+    existing_paths = db.scanned_files()
 
     def candidates():
         for path in paths:
@@ -78,15 +78,26 @@ def scan(paths, db, cancel=None, progress=None, minimum=0, explicit=False):
             continue
         seen.add(canonical)
         try:
+            stat = path.stat()
+            prior_record = existing_paths.get(canonical)
+            if (prior_record and prior_record[1] == stat.st_size
+                    and prior_record[2] == stat.st_mtime_ns):
+                prior, _size, _modified, removed = prior_record
+                if explicit and removed:
+                    prior = db.save_track(prior, restore=True)
+                imported.append(prior)
+                if progress:
+                    progress(len(imported), path.name)
+                continue
             track = read_track(path)
             if track.duration < minimum:
                 continue
             # Downloads can retain a catalog ID, so avoid a duplicate local ID.
-            prior = existing_paths.get(canonical)
+            prior = prior_record[0] if prior_record else None
             if prior:
                 track = replace(track, id=prior.id, source=prior.source, source_id=prior.source_id, url=prior.url)
-            db.save_track(track, restore=explicit)
-            existing_paths[canonical] = track
+            track = db.save_scanned_track(track, stat.st_size, stat.st_mtime_ns, restore=explicit)
+            existing_paths[canonical] = (track, stat.st_size, stat.st_mtime_ns, False)
             imported.append(track)
             if progress:
                 progress(len(imported), path.name)

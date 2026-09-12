@@ -2,6 +2,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import sqlite3
 
+import pytest
+
 from musicvault.database import Database
 from musicvault.library import read_track, scan
 from musicvault.models import Track, parse_lrc
@@ -15,6 +17,19 @@ def test_metadata_import_unicode_and_duplicate_paths(db, audio_file):
     assert tracks[0].title == "canción"
     assert tracks[0].duration == 2.5
     assert path.exists()
+
+
+def test_unchanged_scan_reuses_saved_metadata(db, audio_file, monkeypatch):
+    path = audio_file("colección/estable.wav", 2.5)
+    first, errors = scan([path.parent], db, explicit=True)
+    assert not errors and len(first) == 1
+
+    monkeypatch.setattr("musicvault.library.read_track", lambda _path: pytest.fail(
+        "an unchanged file must not have its metadata read again"))
+    second, errors = scan([path.parent], db)
+
+    assert not errors
+    assert second == first
 
 
 def test_removed_download_not_resurrected_by_scan(db, audio_file):
