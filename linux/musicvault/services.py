@@ -19,6 +19,7 @@ from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
 from .library import read_track
 from .downloader import downloader_command, youtube_arguments, explain_download_error
 from .models import Track, data_dir, parse_lrc, stable_id
+from .songmirror import import_spotify_playlist, import_spotify_track
 
 USER_AGENT = "MusicVault/0.6.0 (Linux desktop music library)"
 MUSICBRAINZ_LOCK = threading.Lock()
@@ -198,6 +199,14 @@ class Catalog:
             raise RuntimeError("El proveedor no devolvió canciones para este álbum.")
         self.db.cache_put(key, [t.to_dict() for t in tracks])
         return tracks
+
+    def spotify_playlist(self, url, progress=None):
+        return import_spotify_playlist(
+            url, self.db.cache_get, self.db.cache_put, progress,
+        )
+
+    def spotify_track(self, url):
+        return import_spotify_track(url, self.db.cache_get, self.db.cache_put)
 
 
 def youtube_search(query, cancel=None):

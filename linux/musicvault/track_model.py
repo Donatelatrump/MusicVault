@@ -2,7 +2,7 @@
 from collections import OrderedDict
 from pathlib import Path
 
-from PyQt6.QtCore import QAbstractTableModel, QModelIndex, Qt, QSize, QTimer, pyqtSignal
+from PyQt6.QtCore import QAbstractTableModel, QModelIndex, Qt, QSize, QTimer, pyqtSignal, QPoint
 from PyQt6.QtGui import QColor, QImageReader, QPixmap
 from PyQt6.QtWidgets import QTableView
 
@@ -14,6 +14,7 @@ class TrackModel(QAbstractTableModel):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.page_scroll = None
         self.tracks, self.rows, self.states = [], {}, {}
         self.current_id = None
         self.covers = OrderedDict()
@@ -130,8 +131,33 @@ class TrackTable(QTableView):
     def visible_rows(self):
         if not self.isVisible() or not self.model().rowCount():
             return range(0)
+        if self.page_scroll:
+            viewport = self.page_scroll.viewport()
+            top = self.mapFromGlobal(viewport.mapToGlobal(QPoint(0, 0))).y() - self.horizontalHeader().height()
+            bottom = self.mapFromGlobal(viewport.mapToGlobal(QPoint(0, viewport.height()))).y() - self.horizontalHeader().height()
+            row_height = self.verticalHeader().defaultSectionSize()
+            first = max(0, top // row_height)
+            last = min(self.model().rowCount() - 1, max(0, bottom // row_height))
+            return range(first, min(self.model().rowCount(), last + 4))
         first = max(0, self.rowAt(0))
         last = self.rowAt(self.viewport().height() - 1)
         if last < 0:
             last = min(self.model().rowCount() - 1, first + self.viewport().height() // 60)
         return range(first, min(self.model().rowCount(), last + 4))
+
+    def wheelEvent(self, event):
+        if self.page_scroll:
+            delta = event.pixelDelta().y() or event.angleDelta().y()
+            if delta:
+                bar = self.page_scroll.verticalScrollBar()
+                bar.setValue(bar.value() - delta)
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+    def scrollToBottom(self):
+        if self.page_scroll:
+            bar = self.page_scroll.verticalScrollBar()
+            bar.setValue(bar.maximum())
+            return
+        super().scrollToBottom()

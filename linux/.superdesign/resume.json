@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "targets": {
+    "android:home": {
+      "targetKind": "existing-ui",
+      "projectId": "764c0bec-b00a-46a9-a8c4-2de94d0d4009",
+      "baselineDraftId": "8a94a9cf-272d-4980-b27c-518f5fede170",
+      "activeDraftId": "a6b88553-9317-4980-bef2-274f3d66bee3",
+      "designSystemPath": ".superdesign/design-system.md",
+      "referenceIds": [],
+      "contextFiles": [
+        ".superdesign/design-system.md",
+        ".superdesign/init/components.md",
+        ".superdesign/init/layouts.md",
+        ".superdesign/init/routes.md",
+        ".superdesign/init/theme.md",
+        ".superdesign/init/pages.md"
+      ],
+      "fingerprints": {
+        ".superdesign/design-system.md": "69a7b10869b18664bdc544a9924e76295ec1b921cd4609ca55f6d81708dc3b5b",
+        ".superdesign/init/components.md": "2543725bfd6f8b61e218cc154b96ac1af2ff2b08c15fb8fc262b52a68bdba226",
+        ".superdesign/init/layouts.md": "7861d167f7fa15fd9d5364f462cf73277e65bcffc69b624aeca66c6263e8037a",
+        ".superdesign/init/routes.md": "816f60f13131554e8e278db76c1e6e5091e1272d05bf8fe7f9893480d69321b0",
+        ".superdesign/init/theme.md": "b048b3edb3ff4eefc95cfdbe597e650f627fa46535753cc047860611a774ec9f",
+        ".superdesign/init/pages.md": "199e2d30f2efed20c443cefebbb799890be16946aa486c6880edbcdb0e423e74"
+      },
+      "components": [],
+      "drafts": {
+        "8a94a9cf-272d-4980-b27c-518f5fede170": {
+          "title": "Estado actual — Inicio",
+          "visualDirection": "reproducción base de la interfaz Compose actual",
+          "currentVersion": 1
+        },
+        "a6b88553-9317-4980-bef2-274f3d66bee3": {
+          "title": "Híbrido intuitivo",
+          "visualDirection": "claridad de catálogo con jerarquía editorial contenida y dock unificado",
+          "parentDraftId": "8a94a9cf-272d-4980-b27c-518f5fede170",
+          "currentVersion": 3
+        },
+        "0274287d-0b55-4411-96ce-21eca525f459": {
+          "title": "Bóveda editorial",
+          "visualDirection": "editorial, centrada en portadas y metadatos de archivo",
+          "parentDraftId": "8a94a9cf-272d-4980-b27c-518f5fede170",
+          "currentVersion": 1
+        }
+      },
+      "updatedAt": "2026-09-11T08:47:30-06:00"
+    }
+  }
+}

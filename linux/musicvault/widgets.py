@@ -39,6 +39,9 @@ def icon(name, color="#F1EAD9", size=24):
         p.drawPath(path)
     elif name == "search":
         p.drawEllipse(QRectF(4, 3, 12, 12)); p.drawLine(14, 14, 21, 21)
+    elif name == "user":
+        p.drawEllipse(QRectF(8, 3, 8, 8))
+        p.drawArc(QRectF(4, 12, 16, 10), 0, 180 * 16)
     elif name == "home":
         path = QPainterPath(QPointF(3, 11)); path.lineTo(12, 3); path.lineTo(21, 11)
         path.moveTo(5, 9); path.lineTo(5, 21); path.lineTo(10, 21); path.lineTo(10, 15)
@@ -97,44 +100,47 @@ def icon(name, color="#F1EAD9", size=24):
 
 STYLE = """
 QWidget { background: transparent; color: #F1EAD9; font-family: 'Inter'; font-size: 13px; }
-QMainWindow, QDialog { background: #121110; }
+QMainWindow, QDialog { background: #0F0E0D; }
 QLabel { background: transparent; }
 QLabel#eyebrow { color: #E0A458; font-family: 'IBM Plex Mono'; font-size: 11px; letter-spacing: 1px; }
-QLabel#heading { font-family: 'Space Grotesk'; font-size: 32px; font-weight: 700; }
-QLabel#section { font-family: 'Space Grotesk'; font-size: 20px; font-weight: 600; }
+QLabel#heading { font-family: 'Space Grotesk'; font-size: 34px; font-weight: 700; letter-spacing: -0.5px; }
+QLabel#section { font-family: 'Space Grotesk'; font-size: 21px; font-weight: 650; letter-spacing: -0.25px; }
 QLabel#brand { font-family: 'Space Grotesk'; font-size: 21px; font-weight: 700; }
 QLabel#muted { color: #B3A992; }
 QLabel#mono { color: #7E7666; font-family: 'IBM Plex Mono'; font-size: 11px; }
 QFrame#navigation { background: #171514; border-top: 1px solid #322C25; }
 QFrame#message { background: #292420; border: 1px solid #7a4a32; border-radius: 10px; }
 QFrame#message QLabel { color: #D96A55; }
-QFrame#card { background: transparent; border: none; border-radius: 8px; }
-QFrame#card:hover { background: #292420; }
-QFrame#sidebar { background: #191715; border: none; border-radius: 10px; }
-QFrame#mainPanel { background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #292420, stop:0.4 #1A1816, stop:1 #191715); border-radius: 10px; }
-QFrame#emptyPanel { background: #211E1A; border: 1px solid #322C25; border-radius: 12px; }
+QFrame#clipboardPrompt { background: #29251F; border: 1px solid #74522D; border-radius: 10px; }
+QFrame#clipboardPrompt QLabel { color: #F1EAD9; }
+QFrame#card { background: #201D1A; border: none; border-radius: 8px; }
+QFrame#card:hover { background: #302A24; }
+QFrame#sidebar { background: #171514; border: none; border-radius: 10px; }
+QFrame#mainPanel { background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #332A21, stop:0.19 #211D19, stop:0.55 #191715, stop:1 #171514); border-radius: 10px; }
+QFrame#emptyPanel { background: #211E1A; border: 1px solid #382F26; border-radius: 10px; }
 QLabel#trackTitle { font-weight: 600; }
-QListWidget#sidebarCollections::item { border: none; padding: 10px 4px; border-radius: 5px; }
-QListWidget#sidebarCollections::item:hover { background: #292420; }
-QPushButton#quickAccess { background: #332C25; border: none; border-radius: 6px; text-align: left; padding: 8px 14px; font-weight: 600; }
-QPushButton#quickAccess:hover { background: #483A2C; }
+QListWidget#sidebarCollections::item { border: none; padding: 8px 6px; border-radius: 5px; color: #B3A992; }
+QListWidget#sidebarCollections::item:hover { background: #292420; color: #F1EAD9; }
 QPushButton#textButton { background: transparent; border: none; color: #B3A992; font-size: 11px; padding: 3px; }
 QPushButton#textButton:hover { color: #F1EAD9; }
-QPushButton#albumCover { background: #292420; border: none; border-radius: 6px; padding: 0; }
+QPushButton#albumCover { background: #292420; border: none; border-radius: 5px; padding: 0; }
 QPushButton#albumCover:hover { border: 2px solid #E0A458; }
-QLineEdit#globalSearch { background: #302B25; border: 1px solid #453B30; border-radius: 22px; padding: 12px 16px; }
-QLineEdit#globalSearch:focus { border: 1px solid #E0A458; }
+QLineEdit#globalSearch { background: #2B2722; border: 1px solid #514433; border-radius: 20px; padding: 11px 16px; font-size: 13px; }
+QLineEdit#globalSearch:hover { border-color: #776043; }
+QLineEdit#globalSearch:focus { background: #302B25; border: 1px solid #E0A458; }
+QProgressBar#spotifyLoading { background: #3A332B; border: none; border-radius: 3px; }
+QProgressBar#spotifyLoading::chunk { background: #E0A458; border-radius: 3px; }
 
-QFrame#transport { background: #121110; border: none; }
+QFrame#transport { background: #0F0E0D; border: none; border-top: 1px solid #28221C; }
 QPushButton { background: #28231d; border: 1px solid #3b332a; border-radius: 7px; padding: 9px 14px; }
 QPushButton:hover { background: #3a3023; border-color: #b97f35; }
 QPushButton:pressed { background: #534029; }
 QPushButton:checked { background: #3a2e1d; color: #e0a458; border-color: #74522d; }
 QPushButton:disabled { color: #746c61; border-color: #29251f; }
 QPushButton#primary { background: #e0a458; color: #19130b; border: none; font-weight: 700; }
-QPushButton#nav { padding: 10px 12px; border: none; background: transparent; color: #B3A992; text-align: left; border-radius: 6px; font-weight: 600; }
+QPushButton#nav { padding: 10px 12px; border: none; background: transparent; color: #B3A992; text-align: left; border-radius: 5px; font-weight: 650; }
 QPushButton#nav:hover { background: #292420; color: #F1EAD9; }
-QPushButton#nav:checked { background: #3A2E1D; color: #E0A458; border: none; border-left: 3px solid #E0A458; }
+QPushButton#nav:checked { background: #382D20; color: #F1EAD9; border: none; }
 QPushButton#icon { background: transparent; border: none; padding: 8px; border-radius: 20px; }
 QPushButton#icon:hover { background: #292420; }
 QPushButton#playCircle { background: #E0A458; border: none; border-radius: 19px; padding: 0; }
@@ -147,7 +153,8 @@ QLineEdit:focus { border-color: #e0a458; }
 QTableView, QListWidget, QTextBrowser { background: transparent; border: none; alternate-background-color: #121110; }
 QTableView::item, QListWidget::item { padding: 8px; border: none; }
 QTableView::item:selected, QListWidget::item:selected { background: #493520; color: #ffe2b9; }
-QHeaderView::section { background: #1E1B18; color: #B3A992; border: none; border-bottom: 1px solid #3A332B; padding: 8px 6px; font-size: 11px; font-weight: 500; }
+QHeaderView::section { background: transparent; color: #B3A992; border: none; border-right: 1px solid #2F2923; border-bottom: 1px solid #3A332B; padding: 8px 6px; font-size: 11px; font-weight: 500; }
+QFrame#filterBar { background: #1D1A17; border: 1px solid #382F26; border-radius: 8px; }
 QTableView::item:hover { background: #2C2721; }
 QSlider::groove:horizontal { height: 5px; background: #4a3c2b; border-radius: 2px; }
 QSlider::sub-page:horizontal { background: #e0a458; border-radius: 2px; }
@@ -157,13 +164,13 @@ QSlider::handle:vertical { height: 14px; margin: 0 -5px; border-radius: 6px; bac
 QMenu { background: #26211b; border: 1px solid #5c4730; padding: 6px; }
 QMenu::item { padding: 8px 22px; }
 QMenu::item:selected { background: #4e3921; }
-QScrollBar:vertical { background: #191612; width: 10px; }
-QScrollBar::handle:vertical { background: #574631; min-height: 30px; border-radius: 4px; }
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-QScrollBar:horizontal { background: transparent; height: 7px; }
-QScrollBar::handle:horizontal { background: #574631; min-width: 30px; border-radius: 3px; }
-QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
-QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; }
+/* Spotify usa desplazamiento directo; las barras no forman parte de la UI. */
+QScrollBar:vertical, QScrollBar:horizontal { background: transparent; width: 0px; height: 0px; margin: 0; }
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal { background: transparent; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal,
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical,
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; border: none; }
 QTabWidget::pane { border: 1px solid #3b332a; }
 QTabBar::tab { background: #211d18; padding: 10px 20px; }
 QTabBar::tab:selected { color: #e0a458; border-bottom: 2px solid #e0a458; }
@@ -204,14 +211,16 @@ class TrackDelegate(QStyledItemDelegate):
         painter.setClipping(False)
         x += 58
         width = max(0, option.rect.right() - x - 8)
+        show_artist = not option.widget or option.widget.isColumnHidden(2)
         painter.setFont(QFont("Inter", 10, QFont.Weight.DemiBold))
         painter.setPen(QColor("#E0A458" if index.data(Qt.ItemDataRole.UserRole) else "#F1EAD9"))
-        painter.drawText(QRectF(x, y+10, width, 21), Qt.AlignmentFlag.AlignVCenter,
+        painter.drawText(QRectF(x, y + (10 if show_artist else 19), width, 21), Qt.AlignmentFlag.AlignVCenter,
                          painter.fontMetrics().elidedText(index.data() or "", Qt.TextElideMode.ElideRight, width))
-        painter.setFont(QFont("Inter", 9))
-        painter.setPen(QColor("#B3A992"))
-        painter.drawText(QRectF(x, y+31, width, 19), Qt.AlignmentFlag.AlignVCenter,
-                         painter.fontMetrics().elidedText(index.siblingAtColumn(2).data() or "", Qt.TextElideMode.ElideRight, width))
+        if show_artist:
+            painter.setFont(QFont("Inter", 9))
+            painter.setPen(QColor("#B3A992"))
+            painter.drawText(QRectF(x, y+31, width, 19), Qt.AlignmentFlag.AlignVCenter,
+                             painter.fontMetrics().elidedText(index.siblingAtColumn(2).data() or "", Qt.TextElideMode.ElideRight, width))
         painter.restore()
 
 

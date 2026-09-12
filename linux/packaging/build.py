@@ -17,6 +17,7 @@ def copy_app(destination):
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     shutil.copy2(ROOT / "README.md", destination / "README.md")
     shutil.copy2(ROOT / "VERIFICATION.md", destination / "VERIFICATION.md")
+    shutil.copy2(ROOT / "THIRD_PARTY_NOTICES.md", destination / "THIRD_PARTY_NOTICES.md")
 
 
 def main():
@@ -60,7 +61,7 @@ Priority: optional
 Architecture: amd64
 Maintainer: MusicVault contributors <musicvault@localhost>
 Installed-Size: {size}
-Depends: python3 (>= 3.10), python3-pyqt6, python3-mutagen, python3-dbus, python3-gi, libmpv2, ffmpeg, yt-dlp
+Depends: python3 (>= 3.10), python3-pyqt6, python3-pyqt6.qtwebengine, python3-mutagen, python3-dbus, python3-gi, libmpv2, ffmpeg, yt-dlp
 Recommends: nodejs (>= 22) | deno (>= 2.3)
 Description: Native desktop music library for Linux
  Local playback, editable queues, playlists, lyrics, downloads and MPRIS controls.

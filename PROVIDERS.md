@@ -1,5 +1,15 @@
 # Providers
 
+## Linux 0.6.0
+
+La versión Linux usa `linux/musicvault/services.py`: Deezer, iTunes y MusicBrainz para metadatos; búsqueda explícita de YouTube mediante yt-dlp; LRCLib para letras. Las operaciones se ejecutan fuera del hilo de la interfaz.
+
+El proveedor de descarga recibe un `Track`, la carpeta destino, una señal de cancelación y una función de progreso. Ejecuta yt-dlp/FFmpeg como procesos con argumentos separados, valida el audio en un directorio temporal y publica el archivo al terminar. Devuelve un `Track` con ruta local absoluta. Las solicitudes duplicadas comparten trabajo y pueden tener varios consumidores.
+
+Desde Linux 0.6.1 se incluye yt-dlp oficial con EJS y checksum verificado. Se detecta Node.js ≥22 o Deno ≥2.3 incluso en un lanzamiento desde el escritorio con nvm. FFmpeg se instala mediante el sistema. Los errores de descarga no se presentan como archivos de la biblioteca y el reintento es explícito. Véase [linux/README.md](linux/README.md).
+
+## Android (contrato original)
+
 Este archivo documenta el contrato que debe implementar cualquier proveedor de audio.
 
 ## Entrada
@@ -52,7 +62,7 @@ ProviderResult.Error("Motivo")
 Modificar únicamente:
 
 ```text
-app/src/main/java/com/musicvault/app/providers/Providers.kt
+android/app/src/main/java/com/musicvault/app/providers/Providers.kt
 ```
 
 La UI y el ViewModel no deben depender de las clases internas del proveedor.

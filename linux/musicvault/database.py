@@ -23,7 +23,9 @@ class Database:
                 CREATE TABLE IF NOT EXISTS favorites (
                     track_id TEXT PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE);
                 CREATE TABLE IF NOT EXISTS collections (
-                    id TEXT PRIMARY KEY, title TEXT NOT NULL, kind TEXT NOT NULL);
+                    id TEXT PRIMARY KEY, title TEXT NOT NULL, kind TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT '', source_id TEXT NOT NULL DEFAULT '',
+                    url TEXT NOT NULL DEFAULT '', cover TEXT NOT NULL DEFAULT '');
                 CREATE TABLE IF NOT EXISTS members (
                     collection_id TEXT REFERENCES collections(id) ON DELETE CASCADE,
                     track_id TEXT REFERENCES tracks(id) ON DELETE CASCADE, position INTEGER NOT NULL,
@@ -40,6 +42,10 @@ class Database:
                     progress INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '');
                 PRAGMA user_version=1;
             """)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(collections)")}
+            for name in ("source", "source_id", "url", "cover"):
+                if name not in columns:
+                    db.execute(f"ALTER TABLE collections ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
             db.execute("UPDATE downloads SET status='interrupted' WHERE status IN ('queued','downloading')")
 
     @contextmanager
@@ -53,24 +59,41 @@ class Database:
         finally:
             db.close()
 
+    @staticmethod
+    def _save_track_row(db, track, restore=False, added=None):
+        """Merge and write one track using an already-owned transaction."""
+        # A stale catalog row must not overwrite a file path published by a
+        # downloader, and a scan must not resurrect a manually removed track.
+        prior = db.execute("SELECT payload FROM tracks WHERE id=?", (track.id,)).fetchone()
+        if prior:
+            old = Track.from_dict(json.loads(prior[0]))
+            if old.path and (not track.path or (Path(old.path).is_file() and not Path(track.path).is_file())):
+                track = replace(track, path=old.path)
+            if not track.cover and old.cover:
+                track = replace(track, cover=old.cover)
+        db.execute("""INSERT INTO tracks(id,payload,added) VALUES (?,?,?)
+            ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,
+            removed=CASE WHEN ? THEN 0 ELSE tracks.removed END""",
+                   (track.id, json.dumps(track.to_dict()), added or time.time(), restore))
+        return track
+
     def save_track(self, track, restore=False):
         with self.connect() as db:
-            # Serialise read/merge/write so a stale catalog row cannot overwrite a
-            # file path being published by the downloader on another thread.
             db.execute("BEGIN IMMEDIATE")
-            # A rescan must not resurrect something removed by the user.
-            prior = db.execute("SELECT payload FROM tracks WHERE id=?", (track.id,)).fetchone()
-            if prior:
-                old = Track.from_dict(json.loads(prior[0]))
-                if old.path and (not track.path or (Path(old.path).is_file() and not Path(track.path).is_file())):
-                    track = replace(track, path=old.path)
-                if not track.cover and old.cover:
-                    track = replace(track, cover=old.cover)
-            db.execute("""INSERT INTO tracks(id,payload,added) VALUES (?,?,?)
-                ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,
-                removed=CASE WHEN ? THEN 0 ELSE tracks.removed END""",
-                       (track.id, json.dumps(track.to_dict()), time.time(), restore))
+            track = self._save_track_row(db, track, restore)
         return track
+
+    def save_tracks(self, tracks, restore=False):
+        """Persist many tracks in one transaction while preserving their order."""
+        items = tuple(tracks)
+        now = time.time()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            result = tuple(
+                self._save_track_row(db, track, restore, now + index * 1e-6)
+                for index, track in enumerate(items)
+            )
+        return result
 
     def get_track(self, track_id):
         with self.connect() as db:
@@ -97,11 +120,11 @@ class Database:
                 return resolved
         return stored or track
 
-    def library_tracks(self, query="", recent=False):
+    def library_tracks(self, query="", recent=False, favorites=False):
         """Only completed local audio belongs in the user's offline library."""
         records = {r['track_id']:r for r in self.downloads() if r['status']=='complete'}
         result=[]
-        for item in self.tracks(query, recent=recent):
+        for item in self.tracks(query, recent=recent, favorites=favorites):
             if item.path and Path(item.path).is_file():
                 result.append(item)
             elif item.id in records:
@@ -151,13 +174,45 @@ class Database:
             return [dict(r) for r in db.execute("""SELECT c.*, COUNT(m.track_id) AS count FROM collections c
                 LEFT JOIN members m ON m.collection_id=c.id GROUP BY c.id ORDER BY c.title COLLATE NOCASE""")]
 
-    def create_collection(self, title, kind="playlist"):
+    def create_collection(self, title, kind="playlist", source="", source_id="", url="", cover=""):
         if not title.strip() or kind not in ("playlist", "album"):
             raise ValueError("Escribe un nombre para la colección.")
         key = uuid.uuid4().hex
         with self.connect() as db:
-            db.execute("INSERT INTO collections VALUES (?,?,?)", (key, title.strip(), kind))
+            db.execute("INSERT INTO collections(id,title,kind,source,source_id,url,cover) VALUES (?,?,?,?,?,?,?)",
+                       (key, title.strip(), kind, source, source_id, url, cover))
         return key
+
+    def collection_by_source(self, source, source_id, kind=None):
+        with self.connect() as db:
+            sql = "SELECT * FROM collections WHERE source=? AND source_id=?"
+            values = [source, source_id]
+            if kind:
+                sql += " AND kind=?"
+                values.append(kind)
+            row = db.execute(sql, values).fetchone()
+        return dict(row) if row else None
+
+    def replace_collection(self, key, title, tracks, source="", source_id="", url="", cover=""):
+        """Replace metadata and members atomically, even for very large playlists."""
+        unique = []
+        seen = set()
+        for track in tracks:
+            if track.id not in seen:
+                unique.append(track)
+                seen.add(track.id)
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("UPDATE collections SET title=?,source=?,source_id=?,url=?,cover=? WHERE id=?",
+                       (title.strip(), source, source_id, url, cover, key))
+            db.execute("DELETE FROM members WHERE collection_id=?", (key,))
+            now = time.time()
+            for position, track in enumerate(unique):
+                self._save_track_row(db, track, restore=True, added=now + position * 1e-6)
+            db.executemany(
+                "INSERT INTO members(collection_id,track_id,position) VALUES (?,?,?)",
+                [(key, track.id, position) for position, track in enumerate(unique)],
+            )
 
     def rename_collection(self, key, title):
         if not title.strip():
@@ -234,6 +289,22 @@ class Database:
         with self.connect() as db:
             db.execute("INSERT OR REPLACE INTO downloads VALUES (?,?,?,?,?)",
                        (track.id, json.dumps(track.to_dict()), status, progress, error))
+
+    def queue_downloads(self, tracks):
+        """Persist a download batch without one transaction per track."""
+        items = tuple(tracks)
+        now = time.time()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            merged = tuple(
+                self._save_track_row(db, track, restore=True, added=now + index * 1e-6)
+                for index, track in enumerate(items)
+            )
+            db.executemany(
+                "INSERT OR REPLACE INTO downloads VALUES (?,?,?,?,?)",
+                [(track.id, json.dumps(track.to_dict()), "queued", 0, "") for track in merged],
+            )
+        return merged
 
     def downloads(self):
         with self.connect() as db:

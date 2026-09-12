@@ -17,6 +17,10 @@ def doctor():
               "python": platform.python_version(), "libmpv": find_library("mpv")}
     for module in ("PyQt6", "mutagen", "dbus", "gi"):
         checks[module] = importlib.util.find_spec(module) is not None
+    try:
+        checks["PyQt6.QtWebEngineWidgets"] = importlib.util.find_spec("PyQt6.QtWebEngineWidgets") is not None
+    except ModuleNotFoundError:
+        checks["PyQt6.QtWebEngineWidgets"] = False
     for command in ("ffmpeg", "ffprobe", "yt-dlp"):
         checks[command] = shutil.which(command)
     try:
@@ -44,6 +48,9 @@ def main():
     if sys.platform != "linux" or platform.machine() not in ("x86_64", "amd64"):
         parser.error("Esta distribución está preparada para Linux x86_64 (64 bits).")
     try:
+        # Qt WebEngine must be imported before QApplication is constructed.
+        # Importing it lazily from the Spotify dialog is too late on Qt 6.10+.
+        from PyQt6 import QtWebEngineWidgets as _qt_webengine_widgets
         from PyQt6.QtCore import QTimer, QLockFile, QStandardPaths, QUrl
         from PyQt6.QtWidgets import QApplication, QMessageBox
         from .database import Database

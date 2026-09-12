@@ -1,159 +1,39 @@
-# MusicVault 🎵
+# MusicVault
 
-MusicVault es un reproductor musical local para Android enfocado en crear una biblioteca personal de música sin depender de servicios de streaming.
+Versiones organizadas por plataforma:
 
-La aplicación permite organizar, reproducir y gestionar música almacenada en el dispositivo mediante una interfaz moderna inspirada en reproductores actuales, manteniendo los archivos bajo control del usuario.
+- **[Android](android/README.md)**: aplicación Kotlin/Jetpack Compose, módulo `app/`, Gradle y configuración de compilación dentro de `android/`. Abre esa carpeta en Android Studio.
+- **[Linux](linux/README.md)**: aplicación Python/Qt, pruebas, empaquetador y paquetes generados dentro de `linux/`.
+- **[Windows](windows/README.md)**: aplicación portable Qt para Windows x64, con lanzador nativo `MusicVault.exe`. Descarga el ZIP completo en [Releases](https://github.com/Donatelatrump/MusicVault/releases), extráelo y abre el ejecutable.
+- [iOS](ios/MusicVault/README.md): implementación conservada en `ios/`.
 
----
+## Android
 
-## Características principales
-
-- Reproducción de música local.
-- Reproductor en segundo plano mediante Media3.
-- Cola de reproducción editable.
-- Mini reproductor y reproductor a pantalla completa.
-- Favoritos persistentes.
-- Playlists y álbumes personalizados.
-- Escaneo automático de archivos de audio del dispositivo.
-- Búsqueda de información musical.
-- Portadas automáticas.
-- Ecualizador nativo de Android.
-- Crossfade configurable.
-- Descarga de canciones con progreso individual.
-
----
-
-## Tecnologías utilizadas
-
-MusicVault está desarrollado utilizando tecnologías modernas del ecosistema Android:
-
-- Kotlin
-- Jetpack Compose
-- Material 3
-- Room Database
-- AndroidX Media3
-- MediaSessionService
-- Coroutines
-- FFmpeg
-- yt-dlp mediante youtubedl-android
-
----
-
-# Arquitectura del proyecto
-
-
-app/src/main/java/com/musicvault/app/
-
-├── catalog/
-│ ├── MusicBrainzCatalogProvider.kt
-│ ├── CoverArt.kt
-│ └── CatalogRepository.kt
-│
-├── data/
-│ ├── MusicDatabase.kt
-│ ├── Daos.kt
-│ ├── Entities.kt
-│ └── Repository.kt
-│
-├── providers/
-│ └── Providers.kt
-│
-├── player/
-│ ├── MusicPlaybackService.kt
-│ └── PlayerController.kt
-│
-├── library/
-│ └── LocalAudioScanner.kt
-│
-└── ui/
-├── MusicVaultApp.kt
-└── MusicVaultViewModel.kt
-
-
----
-
-# Metadata musical
-
-MusicVault utiliza diferentes fuentes para completar información de canciones y álbumes:
-
-- **MusicBrainz** para información musical.
-- **Cover Art Archive** para portadas.
-- **iTunes Search** y **Deezer** como fuentes alternativas.
-
-El sistema utiliza un modelo de proveedores con fallback para evitar depender de una única fuente.
-
-Si un proveedor no devuelve resultados, automáticamente se intenta con otra fuente disponible.
-
----
-
-# Descargas
-
-El sistema de descarga está separado del resto de la aplicación mediante:
-
-
-providers/Providers.kt
-
-
-Esto permite reemplazar el proveedor de descarga sin modificar la lógica principal del reproductor.
-
-Flujo general:
-
-
-Usuario solicita descarga
-↓
-MusicVaultViewModel
-↓
-Provider de descarga
-↓
-yt-dlp + FFmpeg
-↓
-Archivo local
-↓
-Registro en Room
-↓
-Disponible en biblioteca
-
-
----
-
-# Reproductor
-
-MusicVault utiliza AndroidX Media3 para manejar:
-
-- Reproducción en segundo plano.
-- Controles multimedia del sistema.
-- Cola de reproducción.
-- Seek.
-- Shuffle.
-- Reproducción siguiente/anterior.
-- Estado persistente del reproductor.
-
----
-
-# Versión 0.5.0
-
-Cambios principales:
-
-- Nueva pantalla de ajustes.
-- Crossfade configurable y persistente.
-- Eliminación del control de crossfade del reproductor principal.
-- Ecualizador nativo conectado a la sesión de audio Media3.
-- Favoritos almacenados mediante Room.
-- Cola de reproducción visible desde la interfaz.
-- Reordenamiento y eliminación de canciones en la cola.
-
----
-
-# Compilar el proyecto
-
-## Requisitos
-
-- Android Studio reciente.
-- JDK 17.
-- Android SDK Platform 35.
-- Android Build Tools 34 o superior.
-
-Compilar:
+Desde la raíz del repositorio:
 
 ```bash
+cd android
 ./gradlew assembleDebug
+```
+
+APK generado en `android/app/build/outputs/apk/debug/`.
+
+## Linux
+
+Desde la raíz del repositorio:
+
+```bash
+./linux/run.sh --doctor
+./linux/run.sh
+```
+
+Para generar e instalar el paquete Debian/Ubuntu:
+
+```bash
+python3 linux/packaging/build.py
+sudo apt install ./linux/dist/musicvault_0.7.1_amd64.deb
+```
+
+El empaquetador también genera `linux/dist/MusicVault-0.7.1-linux-x86_64.tar.gz`. Consulta las dependencias y pruebas en la [guía de Linux](linux/README.md).
+
+Los recursos de marca compartidos están en `branding/`. El historial del proyecto y la documentación de proveedores siguen en [PROJECT_STATUS.md](PROJECT_STATUS.md) y [PROVIDERS.md](PROVIDERS.md).

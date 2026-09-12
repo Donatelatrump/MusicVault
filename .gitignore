@@ -37,3 +37,11 @@ Thumbs.db
 
 # Firebase / secrets
 google-services.json
+
+# Linux desktop
+__pycache__/
+.pytest_cache/
+*.pyc
+*.egg-info/
+.venv/
+dist/

@@ -18,10 +18,10 @@ La versión 0.7.1 adopta una distribución inspirada en Spotify de escritorio: b
 En Debian 12/13 o Ubuntu 24.04/26.04, instala las dependencias si el diagnóstico indica que faltan:
 
 ```bash
-sudo apt install python3 python3-pyqt6 python3-mutagen python3-dbus python3-gi libmpv2 ffmpeg yt-dlp
+sudo apt install python3 python3-pyqt6 python3-pyqt6.qtwebengine python3-mutagen python3-dbus python3-gi libmpv2 ffmpeg yt-dlp
 ```
 
-En otras distribuciones hacen falta sus paquetes equivalentes: Python ≥ 3.10, PyQt6 ≥ 6.4, Mutagen, dbus-python, PyGObject/GLib, libmpv con ABI 2, FFmpeg y yt-dlp. La compatibilidad con esas distribuciones depende de sus paquetes; la verificación local se realizó en Ubuntu 26.04 x86_64 con Qt 6.10.2 y Python 3.14.4.
+En otras distribuciones hacen falta sus paquetes equivalentes: Python ≥ 3.10, PyQt6 y PyQt6-WebEngine ≥ 6.4, Mutagen, dbus-python, PyGObject/GLib, libmpv con ABI 2, FFmpeg y yt-dlp. La compatibilidad con esas distribuciones depende de sus paquetes; la verificación local se realizó en Ubuntu 26.04 x86_64 con Qt 6.10.2 y Python 3.14.4.
 
 Para descargar de YouTube también se necesita **Node.js ≥22 o Deno ≥2.3**. El diagnóstico `--doctor` comprueba el motor disponible. La app encuentra Node instalado con nvm aunque se abra desde el menú del escritorio. Se incluye yt-dlp 2026.08.19 con EJS para no depender de la versión antigua de APT. Estos requisitos siguen la [guía EJS oficial de yt-dlp](https://github.com/yt-dlp/yt-dlp/wiki/EJS).
 
@@ -76,6 +76,9 @@ El paquete no incluye ejecutables de audio compilados en este equipo: utiliza la
 - Ecualizador de cinco bandas, ocho presets, ganancia y amplitud estéreo, con limitador. Los efectos afectan el audio de MusicVault.
 - Temporizador de sueño. Continuación opcional con canciones relacionadas de la biblioteca; prioriza álbum, artista y favoritos.
 - Búsqueda en Deezer con alternativas iTunes y MusicBrainz; búsqueda explícita en YouTube. Álbumes completos de Deezer/iTunes. Historial con autocompletado y caché de 30 minutos; resultados guardados como alternativa sin conexión.
+- Importación de playlists de Spotify mediante el lector de SongMirror integrado: en **Importar música → Playlist de Spotify mediante SongMirror…** pega el enlace, revisa las canciones y desmarca las que no quieras antes de guardarla. No requiere instalar SongMirror, Docker ni una cuenta Premium. Con una cuenta conectada, MusicVault también detecta enlaces de canciones o playlists de Spotify copiados al portapapeles y muestra una opción para importarlos.
+- Biblioteca con filtros por artista y álbum, orden por fecha/título/artista/álbum y columnas redimensionables que conservan su ancho.
+- Al descargar un álbum completo se guarda también como álbum en **Álbumes**; cada canción terminada aparece individualmente en **Biblioteca**.
 - Descargas mediante yt-dlp/FFmpeg, progreso individual, cancelación, reintento y recuperación de registros interrumpidos. Las solicitudes simultáneas de una canción comparten el mismo trabajo. Los archivos se validan y publican al terminar; las descargas parciales se limpian al cancelar.
 - Reproducir un resultado remoto descarga el audio completo antes de reproducirlo. Precarga opcional de la siguiente canción y descarga de álbum completo. Deezer/iTunes/MusicBrainz proporcionan metadatos; para esos resultados yt-dlp busca el audio por artista y título. La coincidencia depende del proveedor.
 - Portadas en el reproductor y álbumes del catálogo, con caché en disco. Letras LRCLib y archivos `.lrc`/`.txt` vecinos al audio; letras sincronizadas con desplazamiento y seek al hacer doble clic.
@@ -95,6 +98,15 @@ Para llevar los datos en una carpeta elegida:
 Los audios importados y descargados se referencian mediante rutas absolutas. Mover solamente la base de datos no traslada esos archivos ni reescribe sus rutas. La exportación de Ajustes respalda la base de datos; copia la música por separado y conserva sus rutas, o vuelve a importarla en el destino.
 
 Las bases Android/iOS y sus URI no se importan automáticamente. Para llevar música de Android, copia los archivos de audio a Linux y usa Importar. El código móvil original se conserva en `../android/app/` e `../ios/`.
+
+### Usar SongMirror con una playlist de Spotify
+
+1. En MusicVault abre **Importar música → Agregar cuenta de Spotify para SongMirror…**.
+2. Pulsa **Iniciar sesión con Spotify** y completa el acceso en el navegador integrado. Una cuenta gratuita funciona.
+3. MusicVault comprueba la sesión y guarda solamente el valor que necesita SongMirror en un archivo privado con permisos `0600`; no forma parte de las copias de la base de datos.
+4. Usa **Importar música → Playlist de Spotify mediante SongMirror…** y pega el enlace.
+
+El conector de solo lectura está incluido en MusicVault, por lo que no hace falta instalar SongMirror ni mantener un servidor local. El navegador integrado usa un perfil temporal y descarta sus datos al cerrar; MusicVault no lee ni almacena la contraseña. Cada laptop conserva solamente su propia cookie de sesión y el usuario puede eliminarla desde **Importar música → Administrar cuenta de Spotify para SongMirror… → Desconectar**.
 
 ## Atajos
 

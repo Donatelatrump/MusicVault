@@ -1,7 +1,8 @@
 from dataclasses import replace
 import threading
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QTimer, QSize
+from PyQt6.QtGui import QColor, QPixmap
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QDialog
 
@@ -56,6 +57,145 @@ def test_native_window_navigation_player_collections_and_settings(app, db, audio
         QTest.qWait(50)
         assert window.centralWidget().width() <= 920
         window.grab().save(str(tmp_path / "window.png"))
+    finally:
+        window.quit_app()
+
+
+def test_search_album_covers_keep_full_square_geometry(app, db, monkeypatch, tmp_path):
+    cover_path = tmp_path / "cover.png"
+    cover = QPixmap(300, 300)
+    cover.fill(QColor("#e0a458"))
+    assert cover.save(str(cover_path))
+    player = Player(db, audio_output="null")
+    window = Window(db, player)
+    try:
+        window.catalog.search = lambda *args: {
+            "tracks": [],
+            "albums": [{
+                "id": "album-1", "title": "Álbum", "artist": "Artista",
+                "cover": "https://images.example/cover.jpg", "source": "deezer",
+            }],
+        }
+        monkeypatch.setattr(window, "load_cover", lambda source, callback: callback(str(cover_path)))
+        window.show()
+        window.show_route("Buscar")
+        window.search.setText("album")
+        window.submit_search()
+        until(lambda: window.album_list.count() == 1)
+
+        item = window.album_list.item(0)
+        assert window.album_list.height() == 224
+        assert item.sizeHint() == QSize(180, 216)
+        assert item.icon().actualSize(QSize(148, 148)) == QSize(148, 148)
+    finally:
+        window.quit_app()
+
+
+def test_import_menu_offers_spotify_account_for_songmirror(app, db, monkeypatch):
+    player = Player(db, audio_output="null")
+    window = Window(db, player)
+    captured = []
+    try:
+        monkeypatch.setattr("musicvault.window.session_configured", lambda: False)
+
+        def capture(menu, _position):
+            captured.extend(action.text() for action in menu.actions() if not action.isSeparator())
+
+        monkeypatch.setattr("musicvault.window.QMenu.exec", capture)
+        window.import_dialog()
+        assert "Agregar cuenta de Spotify para SongMirror…" in captured
+        assert "Playlist de Spotify mediante SongMirror…" in captured
+        assert "Importar archivo de SongMirror…" not in captured
+    finally:
+        window.quit_app()
+
+
+def test_connected_account_offers_copied_spotify_track(app, db, monkeypatch):
+    monkeypatch.setattr("musicvault.window.session_configured", lambda: True)
+    player = Player(db, audio_output="null")
+    window = Window(db, player)
+    imported = []
+    try:
+        monkeypatch.setattr(window, "import_spotify_track", imported.append)
+        window.clipboard.setText(
+            "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC?si=copied"
+        )
+        window.check_spotify_clipboard(force=True)
+
+        assert not window.clipboard_prompt.isHidden()
+        assert "una canción" in window.clipboard_prompt_text.text()
+        window.import_spotify_clipboard()
+        assert imported == ["https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC"]
+        assert window.clipboard_prompt.isHidden()
+    finally:
+        window.clipboard.clear()
+        window.quit_app()
+
+
+def test_clipboard_spotify_offer_requires_connected_account(app, db, monkeypatch):
+    monkeypatch.setattr("musicvault.window.session_configured", lambda: False)
+    player = Player(db, audio_output="null")
+    window = Window(db, player)
+    try:
+        window.clipboard.setText(
+            "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"
+        )
+        window.check_spotify_clipboard(force=True)
+        assert window.clipboard_prompt.isHidden()
+    finally:
+        window.clipboard.clear()
+        window.quit_app()
+
+
+def test_library_filters_sorting_and_resizable_columns(app, db, audio_file):
+    tracks = [
+        replace(read_track(audio_file("zeta.wav", 2)), title="Zeta", artist="Beta", album="Dos"),
+        replace(read_track(audio_file("alfa.wav", 2)), title="Alfa", artist="Ámbar", album="Uno"),
+        replace(read_track(audio_file("medio.wav", 2)), title="Medio", artist="Beta", album="Uno"),
+    ]
+    for track in tracks:
+        db.save_track(track)
+    player = Player(db, audio_output="null")
+    window = Window(db, player)
+    try:
+        window.show()
+        window.show_route("Biblioteca")
+        assert window.library_filters.isVisible()
+        window.artist_filter.setCurrentIndex(window.artist_filter.findData("Beta"))
+        assert {track.artist for track in window.shown_tracks} == {"Beta"}
+        window.artist_filter.setCurrentIndex(0)
+        window.library_sort.setCurrentIndex(window.library_sort.findData("title"))
+        assert [track.title for track in window.shown_tracks] == ["Alfa", "Medio", "Zeta"]
+        window.album_filter.setCurrentIndex(window.album_filter.findData("Uno"))
+        assert {track.album for track in window.shown_tracks} == {"Uno"}
+        window.album_filter.setCurrentIndex(0)
+        window.library_sort.setCurrentIndex(window.library_sort.findData("artist"))
+        assert [track.artist for track in window.shown_tracks] == ["Ámbar", "Beta", "Beta"]
+        window.resize(1440, 900)
+        window.table.horizontalHeader().resizeSection(1, 444)
+        QTest.qWait(300)
+        assert db.setting("track_column_widths")["title"] == 444
+    finally:
+        window.quit_app()
+
+
+def test_downloading_catalog_album_creates_album_collection(app, db, monkeypatch):
+    from musicvault.models import Track
+    album = {"id": "album-7", "title": "Disco", "artist": "Artista", "cover": "cover", "source": "deezer"}
+    tracks = [Track(f"deezer:{index}", f"Tema {index}", "Artista", "Disco", source="deezer") for index in range(4)]
+    player = Player(db, audio_output="null")
+    window = Window(db, player)
+    started = []
+    try:
+        window.remote_album = album
+        window.shown_tracks = tracks
+        monkeypatch.setattr(window, "start_download", lambda track, **kwargs: started.append((track, kwargs)))
+        window.download_all()
+        collection = db.collection_by_source("deezer", "album-7", kind="album")
+        assert collection and collection["title"] == "Disco" and collection["kind"] == "album"
+        assert [track.id for track in db.tracks(collection=collection["id"])] == [track.id for track in tracks]
+        assert [track.id for track, _kwargs in started] == [track.id for track in tracks]
+        assert all(kwargs["prepared"] and kwargs["defer_refresh"] for _track, kwargs in started)
     finally:
         window.quit_app()
 

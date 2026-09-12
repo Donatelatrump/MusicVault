@@ -50,6 +50,39 @@ def test_collection_order_favorites_persistence_and_backup(db, audio_file, tmp_p
     assert len(db.tracks()) == 3
 
 
+def test_large_collection_replace_uses_one_transaction_and_keeps_order(db, monkeypatch):
+    tracks = [Track(f"spotify:{index}", f"Canción {index}", "Artista", "Álbum") for index in range(150)]
+    key = db.create_collection("Grande")
+    connections = 0
+    original_connect = db.connect
+
+    def counted_connect():
+        nonlocal connections
+        connections += 1
+        return original_connect()
+
+    monkeypatch.setattr(db, "connect", counted_connect)
+    db.replace_collection(key, "Grande", tracks, "spotify", "large")
+
+    assert connections == 1
+    assert [track.id for track in db.tracks(collection=key)] == [track.id for track in tracks]
+
+
+def test_queue_downloads_uses_one_transaction(db, monkeypatch):
+    tracks = [Track(f"remote:{index}", f"Canción {index}", source="remote") for index in range(150)]
+    connections = 0
+    original_connect = db.connect
+
+    def counted_connect():
+        nonlocal connections
+        connections += 1
+        return original_connect()
+
+    monkeypatch.setattr(db, "connect", counted_connect)
+    assert len(db.queue_downloads(tracks)) == 150
+    assert connections == 1
+
+
 def test_concurrent_writes_and_preserved_download_path(db):
     track = Track("id", "Title", path="/music/file.mp3")
     db.save_track(track)
