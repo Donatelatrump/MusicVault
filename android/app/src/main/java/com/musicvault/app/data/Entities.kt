@@ -1,6 +1,8 @@
 package com.musicvault.app.data
 
 import androidx.room.Entity
+import androidx.room.Fts4
+import androidx.room.ColumnInfo
 import androidx.room.Index
 import androidx.room.PrimaryKey
 
@@ -42,6 +44,17 @@ data class TrackEntity(
      * them.
      */
     val userRemoved: Boolean = false
+)
+
+/** Standalone FTS index. Triggers keep it synchronized with String-keyed tracks. */
+@Fts4
+@Entity(tableName = "tracks_fts")
+data class TrackSearchEntity(
+    @PrimaryKey @ColumnInfo(name = "rowid") val rowId: Int,
+    val trackId: String,
+    val title: String,
+    val artistName: String,
+    val albumTitle: String
 )
 
 @Entity(tableName = "playlists")

@@ -7,24 +7,19 @@ import kotlinx.coroutines.flow.Flow
 interface TrackDao {
     @Query("SELECT * FROM tracks WHERE userRemoved = 0 ORDER BY title") fun observeAll(): Flow<List<TrackEntity>>
     @Query("SELECT COUNT(*) FROM tracks") suspend fun count(): Int
-    @Query(
-        """
-        SELECT * FROM tracks
-        WHERE userRemoved = 0 AND (
-            title LIKE '%' || REPLACE(REPLACE(:query, '%', '\\%'), '_', '\\_') || '%' ESCAPE '\\'
-            OR artistName LIKE '%' || REPLACE(REPLACE(:query, '%', '\\%'), '_', '\\_') || '%' ESCAPE '\\'
-            OR albumTitle LIKE '%' || REPLACE(REPLACE(:query, '%', '\\%'), '_', '\\_') || '%' ESCAPE '\\'
-        )
-        ORDER BY title
-        """
-    )
+    @Query("""SELECT t.* FROM tracks t INNER JOIN tracks_fts f ON f.trackId=t.id
+        WHERE t.userRemoved=0 AND tracks_fts MATCH :query ORDER BY t.title""")
     fun search(query: String): Flow<List<TrackEntity>>
     @Query("SELECT * FROM tracks WHERE id = :id LIMIT 1") suspend fun get(id: String): TrackEntity?
+    @Query("SELECT EXISTS(SELECT 1 FROM tracks WHERE sourceId = :sourceId AND LOWER(source) = 'spotify' AND userRemoved = 0)")
+    suspend fun containsSpotifyTrack(sourceId: String): Boolean
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertAll(items: List<TrackEntity>)
     // Catalog metadata is a placeholder: it must never clobber an existing row,
     // otherwise REPLACE would reset isDownloaded/audioUri of already downloaded tracks.
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertIfAbsent(items: List<TrackEntity>)
     @Query("DELETE FROM tracks WHERE id LIKE 'local:%' AND userRemoved = 0") suspend fun deleteLocalScannedTracks()
+    @Query("SELECT * FROM tracks WHERE id LIKE 'local:%'") suspend fun localScannedTracks(): List<TrackEntity>
+    @Query("DELETE FROM tracks WHERE id IN (:ids)") suspend fun deleteByIds(ids: List<String>)
     @Query("UPDATE tracks SET userRemoved = 1 WHERE id = :id") suspend fun markRemoved(id: String)
     @Query("UPDATE tracks SET userRemoved = 0 WHERE id = :id") suspend fun unmarkRemoved(id: String)
     @Update suspend fun update(item: TrackEntity)
@@ -56,6 +51,7 @@ interface PlaylistDao {
     @Query("SELECT COALESCE(MAX(position), -1) + 1 FROM playlist_tracks WHERE playlistId=:playlistId") suspend fun nextPosition(playlistId: String): Int
     @Query("SELECT trackId FROM playlist_tracks WHERE playlistId=:playlistId") suspend fun trackIds(playlistId: String): List<String>
     @Query("SELECT * FROM playlists ORDER BY title") fun observeAll(): Flow<List<PlaylistEntity>>
+    @Query("SELECT EXISTS(SELECT 1 FROM playlists WHERE id = :id)") suspend fun contains(id: String): Boolean
     @Query("SELECT t.* FROM tracks t INNER JOIN playlist_tracks pt ON pt.trackId=t.id WHERE pt.playlistId=:playlistId ORDER BY pt.position") fun observeTracks(playlistId: String): Flow<List<TrackEntity>>
     @Query("SELECT t.* FROM tracks t INNER JOIN playlist_tracks pt ON pt.trackId=t.id WHERE pt.playlistId=:playlistId ORDER BY pt.position") suspend fun getTracks(playlistId: String): List<TrackEntity>
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertAll(items: List<PlaylistEntity>)
@@ -71,6 +67,8 @@ interface HistoryDao {
     @Query("SELECT id FROM play_history WHERE trackId=:trackId ORDER BY playedAt DESC LIMIT 1") suspend fun latestId(trackId: String): Long?
     @Query("UPDATE play_history SET completionRatio=:ratio WHERE id=:id") suspend fun updateCompletion(id: Long, ratio: Float)
     @Query("SELECT * FROM play_history ORDER BY playedAt DESC LIMIT :limit") fun observeRecent(limit: Int): Flow<List<PlayHistoryEntity>>
+    @Query("DELETE FROM play_history WHERE id NOT IN (SELECT id FROM play_history ORDER BY playedAt DESC LIMIT :limit)")
+    suspend fun trim(limit: Int)
 }
 
 @Dao
@@ -87,6 +85,9 @@ interface SearchHistoryDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun add(item: SearchHistoryEntity)
     @Query("SELECT * FROM search_history ORDER BY searchedAt DESC LIMIT :limit") fun recent(limit: Int): Flow<List<SearchHistoryEntity>>
     @Query("DELETE FROM search_history") suspend fun clear()
+    @Query("DELETE FROM search_history WHERE LOWER(TRIM(query)) = LOWER(TRIM(:query))") suspend fun deleteQuery(query: String)
+    @Query("DELETE FROM search_history WHERE id NOT IN (SELECT id FROM search_history ORDER BY searchedAt DESC LIMIT :limit)")
+    suspend fun trim(limit: Int)
 }
 
 @Dao

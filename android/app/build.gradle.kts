@@ -16,9 +16,16 @@ android {
         versionCode = 11
         versionName = "0.5.0"
 
-        ndk {
-            // ✅ Optimización: Solo ARMs para reducir tamaño APK (-40%)
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+    }
+
+    // Each device receives only its native FFmpeg/Python payload. Play bundles
+    // split automatically; direct APK builds emit one file per supported ABI.
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a")
+            isUniversalApk = false
         }
     }
     

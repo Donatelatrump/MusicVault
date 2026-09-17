@@ -497,14 +497,9 @@ class MusicVaultViewModel(
             addAction(DownloadForegroundService.ACTION_PROGRESS)
             addAction(DownloadForegroundService.ACTION_RESULT)
         }
-        if (Build.VERSION.SDK_INT >= 33) {
-            ContextCompat.registerReceiver(
-                appContext, downloadReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED
-            )
-        } else {
-            @Suppress("DEPRECATION")
-            appContext.registerReceiver(downloadReceiver, filter)
-        }
+        ContextCompat.registerReceiver(
+            appContext, downloadReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED
+        )
 
         viewModelScope.launch(Dispatchers.IO) {
             // Favorites is a permanent user collection backed by the existing playlist tables.
@@ -625,10 +620,22 @@ class MusicVaultViewModel(
         val canonical = link?.canonicalUrl
         if (canonical == lastSpotifyClipboardUrl) return
         lastSpotifyClipboardUrl = canonical
+        if (link == null) {
+            _spotifyOffer.value = null
+            return
+        }
         // Keep the offer even when Spotify is disconnected. The link is still
         // valid and useful; importSpotifyLink() will explain that the account
         // must be connected instead of silently ignoring the clipboard.
-        _spotifyOffer.value = link
+        viewModelScope.launch(Dispatchers.IO) {
+            val kind = if (link.kind == SpotifyLinkKind.TRACK) "track" else "playlist"
+            val alreadyImported = repository.containsSpotifyImport(kind, link.id)
+            // Clipboard inspection is asynchronous. Never publish an older result
+            // after the user has copied a different link in the meantime.
+            if (lastSpotifyClipboardUrl == canonical) {
+                _spotifyOffer.value = link.takeUnless { alreadyImported }
+            }
+        }
     }
 
     fun clearSpotifyOffer() {
@@ -1509,21 +1516,7 @@ class MusicVaultViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val scanned = LocalAudioScanner(context.contentResolver).scan()
-                // Drop any scanned entry that was previously hidden by the user.
-                // The file may still exist on the device (we could not delete
-                // it through ContentResolver on API >= 30), so MediaStore keeps
-                // reporting it and the next rescan would otherwise resurrect it.
-                val hiddenIds = database.trackDao().getByIds(scanned.map { it.id })
-                    .filter { it.userRemoved }
-                    .map { it.id }
-                    .toSet()
-                val toInsert = scanned.filterNot { it.id in hiddenIds }
-                // Replace only the entries created by the device scanner.
-                // Downloaded/provider tracks use different IDs and therefore
-                // survive rescans. userRemoved tracks survive too, so the user
-                // decision is not silently reverted.
-                database.trackDao().deleteLocalScannedTracks()
-                database.trackDao().upsertAll(toInsert)
+                repository.syncScannedTracks(scanned)
             } catch (e: Exception) {
                 _errorMessage.value = "No se pudo escanear el almacenamiento."
             } finally {

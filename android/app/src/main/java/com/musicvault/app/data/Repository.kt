@@ -14,9 +14,15 @@ class MusicRepository(private val db: MusicDatabase) {
 
     fun search(query: String): Flow<List<Track>> {
         val normalizedQuery = query.trim()
-        return if (normalizedQuery.isBlank()) emptyFlow()
-        else db.trackDao().search(normalizedQuery).map { list -> list.map(::toTrack) }.flowOn(Dispatchers.IO)
+        val expression = ftsQuery(normalizedQuery)
+        return if (expression.isBlank()) emptyFlow()
+        else db.trackDao().search(expression).map { list -> list.map(::toTrack) }.flowOn(Dispatchers.IO)
     }
+
+    private fun ftsQuery(query: String): String = Regex("[\\p{L}\\p{Nd}]+")
+        .findAll(query)
+        .map { "\"${it.value.replace("\"", "\"\"")}\"*" }
+        .joinToString(" AND ")
 
     fun downloaded(): Flow<List<Track>> =
         db.trackDao().observeDownloaded().distinctUntilChanged().map { list -> list.map(::toTrack) }.flowOn(Dispatchers.IO)
@@ -44,6 +50,12 @@ class MusicRepository(private val db: MusicDatabase) {
 
     suspend fun getPlaylistTracks(id: String): List<Track> =
         db.playlistDao().getTracks(id).map(::toTrack)
+
+    suspend fun containsSpotifyImport(kind: String, spotifyId: String): Boolean = when (kind) {
+        "track" -> db.trackDao().containsSpotifyTrack(spotifyId)
+        "playlist" -> db.playlistDao().contains("playlist:spotify:$spotifyId")
+        else -> false
+    }
 
     suspend fun createPlaylist(id: String, title: String, description: String) {
         db.playlistDao().upsertAll(listOf(PlaylistEntity(id, title, description)))
@@ -135,7 +147,11 @@ class MusicRepository(private val db: MusicDatabase) {
     suspend fun recordSearch(query: String) {
         val normalized = query.trim()
         if (normalized.isBlank()) return
-        db.searchHistoryDao().add(SearchHistoryEntity(query = normalized))
+        db.withTransaction {
+            db.searchHistoryDao().deleteQuery(normalized)
+            db.searchHistoryDao().add(SearchHistoryEntity(query = normalized))
+            db.searchHistoryDao().trim(50)
+        }
     }
 
     fun favorites(): Flow<Set<String>> =
@@ -152,13 +168,32 @@ class MusicRepository(private val db: MusicDatabase) {
     }
 
     suspend fun recordPlay(track: Track, completionRatio: Float) {
-        db.historyDao().insert(
-            PlayHistoryEntity(
-                trackId = track.id,
-                playedAt = System.currentTimeMillis(),
-                completionRatio = completionRatio
+        db.withTransaction {
+            db.historyDao().insert(
+                PlayHistoryEntity(
+                    trackId = track.id,
+                    playedAt = System.currentTimeMillis(),
+                    completionRatio = completionRatio
+                )
             )
-        )
+            db.historyDao().trim(2_000)
+        }
+    }
+
+    /** Apply a MediaStore snapshot without invalidating Room when nothing changed. */
+    suspend fun syncScannedTracks(scanned: List<TrackEntity>) = db.withTransaction {
+        val dao = db.trackDao()
+        val existing = dao.localScannedTracks().associateBy { it.id }
+        val incomingIds = scanned.mapTo(HashSet(scanned.size)) { it.id }
+        val changed = scanned.filter { incoming ->
+            val current = existing[incoming.id]
+            current?.userRemoved != true && current != incoming
+        }
+        val removed = existing.values.asSequence()
+            .filter { !it.userRemoved && it.id !in incomingIds }
+            .map { it.id }.toList()
+        changed.chunked(500).forEach { dao.upsertAll(it) }
+        removed.chunked(500).forEach { dao.deleteByIds(it) }
     }
 
     suspend fun updateLatestCompletion(trackId: String, completionRatio: Float) {

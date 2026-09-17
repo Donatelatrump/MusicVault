@@ -271,6 +271,23 @@ fun MusicVaultApp(vm: MusicVaultViewModel) {
     ) { uri -> uri?.let(vm::chooseDownloadTree) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
     var showSpotifyLogin by rememberSaveable { mutableStateOf(false) }
+    val searchState = remember(
+        state.search, state.downloaded, state.remoteTracks, state.remoteAlbums,
+        state.isSearching, state.selectedTrack?.id, state.playlists, state.section
+    ) {
+        SearchScreenState(
+            state.search, state.downloaded, state.remoteTracks, state.remoteAlbums,
+            state.isSearching, state.selectedTrack?.id, state.playlists, state.section == AppSection.SEARCH
+        )
+    }
+    val libraryState = remember(
+        state.downloaded, state.playlists, state.albums, state.selectedTrack?.id, state.section
+    ) {
+        LibraryScreenState(
+            state.downloaded, state.playlists, state.albums,
+            state.selectedTrack?.id, state.section == AppSection.LIBRARY
+        )
+    }
 
     // Android only exposes clipboard contents while an app is in the foreground.
     // Register for exactly that lifecycle window and also inspect once on resume.
@@ -451,13 +468,13 @@ fun MusicVaultApp(vm: MusicVaultViewModel) {
                             active = state.section == AppSection.SEARCH,
                             label = "Buscar"
                         ) {
-                            SearchScreen(state, isPlaying, vm)
+                            SearchScreen(searchState, isPlaying, vm)
                         }
                         PersistentSection(
                             active = state.section == AppSection.LIBRARY,
                             label = "Biblioteca"
                         ) {
-                            LibraryScreen(state, isPlaying, vm)
+                            LibraryScreen(libraryState, isPlaying, vm)
                         }
                         PersistentSection(
                             active = state.section == AppSection.PLAYLISTS,
@@ -514,6 +531,7 @@ fun MusicVaultApp(vm: MusicVaultViewModel) {
                         selectedTrackId = state.selectedTrack?.id,
                         playlists = state.playlists,
                         albums = state.albums,
+                        favoriteIds = state.favoriteIds,
                         vm = vm
                     )
                 }
@@ -1028,9 +1046,21 @@ internal fun greetingForNow(): String {
 }
 
 
+@Immutable
+private data class SearchScreenState(
+    val search: String,
+    val downloaded: List<Track>,
+    val remoteTracks: List<CatalogTrack>,
+    val remoteAlbums: List<CatalogAlbum>,
+    val isSearching: Boolean,
+    val selectedTrackId: String?,
+    val playlists: List<Playlist>,
+    val active: Boolean
+)
+
 @Composable
 private fun SearchScreen(
-    state: MusicUiState,
+    state: SearchScreenState,
     isPlaying: Boolean,
     vm: MusicVaultViewModel
 ) {
@@ -1042,7 +1072,7 @@ private fun SearchScreen(
     var newAlbumName by remember { mutableStateOf("") }
     var deleteSearchTrack by remember { mutableStateOf<CatalogTrack?>(null) }
     val latestIsPlaying by rememberUpdatedState(isPlaying)
-    val latestSelectedTrackId by rememberUpdatedState(state.selectedTrack?.id)
+    val latestSelectedTrackId by rememberUpdatedState(state.selectedTrackId)
 
     val adapter = remember {
         RemoteResultsAdapter(
@@ -1183,7 +1213,7 @@ private fun SearchScreen(
                 update = { recyclerView ->
                     // Hidden-tab guard: don't rebuild items while the tab is
                     // hidden; results only change while the tab is visible.
-                    if (state.section == AppSection.SEARCH) {
+                    if (state.active) {
                         adapter.updateItems(resultItems)
 
                         // Skip state pushes while the tab is hidden (alpha 0): the
@@ -1193,7 +1223,7 @@ private fun SearchScreen(
                         adapter.updateState(
                             downloadedIds = downloadedIds,
                             progress = downloadProgress,
-                            selectedTrackId = state.selectedTrack?.id,
+                            selectedTrackId = state.selectedTrackId,
                             isPlaying = isPlaying
                         )
                     }
@@ -1381,8 +1411,17 @@ private fun RemoteTrackRow(
     }
 }
 
+@Immutable
+private data class LibraryScreenState(
+    val downloaded: List<Track>,
+    val playlists: List<Playlist>,
+    val albums: List<Album>,
+    val selectedTrackId: String?,
+    val active: Boolean
+)
+
 @Composable
-private fun LibraryScreen(state: MusicUiState, isPlaying: Boolean, vm: MusicVaultViewModel) {
+private fun LibraryScreen(state: LibraryScreenState, isPlaying: Boolean, vm: MusicVaultViewModel) {
     val context = LocalContext.current
     val permission = if (Build.VERSION.SDK_INT >= 33) {
         Manifest.permission.READ_MEDIA_AUDIO
@@ -1399,8 +1438,8 @@ private fun LibraryScreen(state: MusicUiState, isPlaying: Boolean, vm: MusicVaul
     val adapter = remember(hybrid) { LibraryFeedAdapter(vm, hybrid) }
     val customAlbums = remember(state.albums) { state.albums.filter { a -> a.id.startsWith("album:custom:") } }
 
-    LaunchedEffect(state.section) {
-        if (state.section == AppSection.LIBRARY && !permissionRequested) {
+    LaunchedEffect(state.active) {
+        if (state.active && !permissionRequested) {
             permissionRequested = true
             if (ContextCompat.checkSelfPermission(context, permission) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
                 vm.scanLocalAudio(context)
@@ -1430,12 +1469,12 @@ private fun LibraryScreen(state: MusicUiState, isPlaying: Boolean, vm: MusicVaul
         },
         update = {
             // Hidden-tab guard: same rationale as HomeScreen.
-            if (state.section == AppSection.LIBRARY) {
+            if (state.active) {
                 adapter.update(
                     tracks = state.downloaded,
                     playlists = state.playlists,
                     customAlbums = customAlbums,
-                    selectedTrackId = state.selectedTrack?.id,
+                    selectedTrackId = state.selectedTrackId,
                     isPlaying = isPlaying
                 )
             }
@@ -1718,6 +1757,7 @@ private fun PlaylistDetail(
     selectedTrackId: String?,
     playlists: List<Playlist>,
     albums: List<Album>,
+    favoriteIds: Set<String>,
     vm: MusicVaultViewModel
 ) {
     val hybrid = LocalHybridDesign.current
@@ -1823,7 +1863,7 @@ private fun PlaylistDetail(
                 isPlaying = isPlaying && selectedTrackId == track.id,
                 onPlayToggle = { if (selectedTrackId == track.id) vm.togglePlayback() else vm.playPlaylistTrack(playlist, track) },
                 onCancelDownload = { vm.cancelDownload(track.id) },
-                actions = { TrackActionsMenu(track, playlists, customAlbums, vm, track.id in vm.state.value.favoriteIds) },
+                actions = { TrackActionsMenu(track, playlists, customAlbums, vm, track.id in favoriteIds) },
                 modifier = if (animatePlaylistChanges) Modifier.animateItem() else Modifier
             )
         }
@@ -3795,36 +3835,42 @@ internal fun TrackActionsMenu(
     favorite: Boolean = false
 ) {
     val currentFavorite = vm.isFavorite(track.id)
-    var expanded by remember { mutableStateOf(false) }
     var showAlbums by remember { mutableStateOf(false) }
     var showCreateAlbum by remember { mutableStateOf(false) }
     var newAlbumName by remember { mutableStateOf("") }
     var confirmDelete by remember { mutableStateOf(false) }
 
-    Box {
-        IconButton(onClick = { expanded = true }) {
-            Icon(Icons.Default.MoreVert, "Más opciones", tint = VaultColors.TextPrimary)
-        }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            DropdownMenuItem(
-                text = { Text("Agregar a cola de reproducción") },
-                onClick = { vm.addToQueue(track); expanded = false }
-            )
-            DropdownMenuItem(
-                leadingIcon = { Icon(if (currentFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder, null) },
-                text = { Text(if (currentFavorite) "Quitar de Me gusta" else "Me gusta") },
-                onClick = { vm.toggleFavorite(track); expanded = false }
-            )
-            DropdownMenuItem(text = { Text("Agregar a álbum") }, onClick = { expanded = false; showAlbums = true })
-            if (track.isDownloaded) {
-                DropdownMenuItem(
-                    leadingIcon = { Icon(VaultIcons.DeleteOutline, null, tint = MaterialTheme.colorScheme.error) },
-                    text = { Text("Eliminar canción", color = MaterialTheme.colorScheme.error) },
-                    onClick = { expanded = false; confirmDelete = true }
-                )
+    AndroidView(
+        modifier = Modifier.size(48.dp),
+        factory = { context ->
+            android.widget.ImageButton(context).apply {
+                setImageResource(android.R.drawable.ic_menu_more)
+                setColorFilter(android.graphics.Color.rgb(241, 234, 217))
+                background = null
+                contentDescription = "Más opciones"
+            }
+        },
+        update = { button ->
+            button.setOnClickListener {
+                android.widget.PopupMenu(button.context, button, android.view.Gravity.END).apply {
+                    menu.add(0, 1, 0, "Agregar a cola de reproducción")
+                    menu.add(0, 2, 1, if (currentFavorite) "Quitar de Me gusta" else "Me gusta")
+                    menu.add(0, 3, 2, "Agregar a álbum")
+                    if (track.isDownloaded) menu.add(0, 4, 3, "Eliminar canción")
+                    setOnMenuItemClickListener { item ->
+                        when (item.itemId) {
+                            1 -> vm.addToQueue(track)
+                            2 -> vm.toggleFavorite(track)
+                            3 -> showAlbums = true
+                            4 -> confirmDelete = true
+                        }
+                        true
+                    }
+                    show()
+                }
             }
         }
-    }
+    )
 
     if (confirmDelete) {
         AlertDialog(

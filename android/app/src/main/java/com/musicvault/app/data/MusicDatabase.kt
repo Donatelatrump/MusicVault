@@ -10,6 +10,7 @@ import androidx.room.RoomDatabase
         ArtistEntity::class,
         AlbumEntity::class,
         TrackEntity::class,
+        TrackSearchEntity::class,
         PlaylistEntity::class,
         PlaylistTrackEntity::class,
         AlbumTrackEntity::class,
@@ -19,7 +20,7 @@ import androidx.room.RoomDatabase
         DownloadRecordEntity::class,
         CatalogSearchCacheEntity::class
     ],
-    version = 15,
+    version = 16,
     exportSchema = false
 )
 abstract class MusicDatabase : RoomDatabase() {
@@ -116,6 +117,27 @@ abstract class MusicDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_tracks_userRemoved_isDownloaded_title ON tracks(userRemoved, isDownloaded, title)")
             }
         }
+        val MIGRATION_15_16 = object : androidx.room.migration.Migration(15, 16) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("CREATE VIRTUAL TABLE IF NOT EXISTS tracks_fts USING FTS4(trackId TEXT NOT NULL, title TEXT NOT NULL, artistName TEXT NOT NULL, albumTitle TEXT NOT NULL)")
+                db.execSQL("INSERT INTO tracks_fts(trackId,title,artistName,albumTitle) SELECT id,title,artistName,albumTitle FROM tracks")
+                createFtsTriggers(db)
+            }
+        }
+
+        private fun createFtsTriggers(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+            db.execSQL("""CREATE TRIGGER IF NOT EXISTS tracks_fts_insert AFTER INSERT ON tracks BEGIN
+                DELETE FROM tracks_fts WHERE trackId=new.id;
+                INSERT INTO tracks_fts(trackId,title,artistName,albumTitle) VALUES(new.id,new.title,new.artistName,new.albumTitle);
+                END""")
+            db.execSQL("""CREATE TRIGGER IF NOT EXISTS tracks_fts_update AFTER UPDATE OF title,artistName,albumTitle ON tracks BEGIN
+                DELETE FROM tracks_fts WHERE trackId=old.id;
+                INSERT INTO tracks_fts(trackId,title,artistName,albumTitle) VALUES(new.id,new.title,new.artistName,new.albumTitle);
+                END""")
+            db.execSQL("""CREATE TRIGGER IF NOT EXISTS tracks_fts_delete AFTER DELETE ON tracks BEGIN
+                DELETE FROM tracks_fts WHERE trackId=old.id;
+                END""")
+        }
 
         fun get(context: Context): MusicDatabase =
             INSTANCE ?: synchronized(this) {
@@ -126,7 +148,12 @@ abstract class MusicDatabase : RoomDatabase() {
                 )
                 .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14)
                 // ✅ Performance optimizations for Room
-                .addMigrations(MIGRATION_14_15)
+                .addMigrations(MIGRATION_14_15, MIGRATION_15_16)
+                .addCallback(object : RoomDatabase.Callback() {
+                    override fun onOpen(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                        createFtsTriggers(db)
+                    }
+                })
                 .setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING) // Mejores operaciones concurrentes
                 .setQueryExecutor(java.util.concurrent.Executors.newFixedThreadPool(4)) // Pool de queries
                 .build().also { INSTANCE = it }

@@ -8,6 +8,7 @@ import android.content.SharedPreferences
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -21,14 +22,20 @@ import android.view.KeyEvent
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionResult
+import androidx.media3.session.SessionError
 import com.musicvault.app.MainActivity
 
+@androidx.annotation.OptIn(markerClass = [UnstableApi::class])
 class MusicPlaybackService : MediaSessionService() {
     private lateinit var player: ExoPlayer
     private var mediaSession: MediaSession? = null
     private lateinit var settings: SharedPreferences
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var crossfadeJob: Job? = null
+    private var crossfadeMonitorJob: Job? = null
+    private val settingsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == "crossfade_seconds") updateCrossfadeMonitor()
+    }
     private var crossfadeTargetIndex = androidx.media3.common.C.INDEX_UNSET
     private val mediaAudioAttributes = AudioAttributes.Builder()
         .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
@@ -39,10 +46,11 @@ class MusicPlaybackService : MediaSessionService() {
         super.onCreate()
 
         settings = getSharedPreferences("musicvault.settings", MODE_PRIVATE)
+        settings.registerOnSharedPreferenceChangeListener(settingsListener)
         player = buildPlayer()
         attachPlayerListeners(player)
         AudioSessionBridge.sessionId = player.audioSessionId
-        startCrossfadeMonitor()
+        updateCrossfadeMonitor()
 
         val intent = Intent(this, MainActivity::class.java)
         val pendingIntent = PendingIntent.getActivity(
@@ -63,7 +71,7 @@ class MusicPlaybackService : MediaSessionService() {
                     if (playerCommand == Player.COMMAND_SEEK_TO_NEXT || playerCommand == Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM) {
                         if (!player.hasNextMediaItem()) {
                             Log.d("MusicPlaybackService", "Bluetooth Next requested with no next item: preventing song restart")
-                            return SessionResult.RESULT_ERROR_NOT_SUPPORTED
+                            return SessionError.ERROR_NOT_SUPPORTED
                         }
                     }
                     return SessionResult.RESULT_SUCCESS
@@ -126,7 +134,8 @@ class MusicPlaybackService : MediaSessionService() {
         .build()
 
     private fun startCrossfadeMonitor() {
-        serviceScope.launch {
+        if (crossfadeMonitorJob?.isActive == true) return
+        crossfadeMonitorJob = serviceScope.launch {
             while (isActive) {
                 // Nothing can crossfade while paused: sleep long and skip the
                 // prefs read instead of waking every 2 s for the whole session.
@@ -157,6 +166,15 @@ class MusicPlaybackService : MediaSessionService() {
                     delay(2000L)
                 }
             }
+        }
+    }
+
+    private fun updateCrossfadeMonitor() {
+        if (settings.getInt("crossfade_seconds", 5).coerceIn(0, 12) == 0) {
+            crossfadeMonitorJob?.cancel()
+            crossfadeMonitorJob = null
+        } else {
+            startCrossfadeMonitor()
         }
     }
 
@@ -330,6 +348,8 @@ class MusicPlaybackService : MediaSessionService() {
         mediaSession
 
     override fun onDestroy() {
+        settings.unregisterOnSharedPreferenceChangeListener(settingsListener)
+        crossfadeMonitorJob?.cancel()
         crossfadeJob?.cancel()
         serviceScope.coroutineContext[Job]?.cancel()
         mediaSession?.release()

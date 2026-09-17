@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import com.musicvault.app.R
 import com.musicvault.app.data.DownloadRecordEntity
@@ -31,6 +32,7 @@ import java.util.concurrent.ConcurrentHashMap
 class DownloadForegroundService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val running = ConcurrentHashMap<String, Boolean>()
+    private val lastProgress = ConcurrentHashMap<String, ProgressEmission>()
 
     override fun onCreate() {
         super.onCreate()
@@ -112,6 +114,7 @@ class DownloadForegroundService : Service() {
                 )
             } finally {
                 running.remove(id)
+                lastProgress.remove(id)
                 updateNotification()
                 if (running.isEmpty()) stopSelf()
             }
@@ -121,11 +124,17 @@ class DownloadForegroundService : Service() {
     }
 
     private fun broadcastProgress(id: String, progress: Int) {
+        val value = progress.coerceIn(0, 100)
+        val now = SystemClock.elapsedRealtime()
+        val prior = lastProgress[id]
+        if (prior != null && value != 100 && value == prior.value) return
+        if (prior != null && value != 100 && value - prior.value < 2 && now - prior.sentAt < 500L) return
+        lastProgress[id] = ProgressEmission(value, now)
         val intent = Intent(ACTION_PROGRESS).setPackage(packageName)
             .putExtra(EXTRA_ID, id)
-            .putExtra(EXTRA_PROGRESS, progress.coerceIn(0, 100))
+            .putExtra(EXTRA_PROGRESS, value)
         sendBroadcast(intent)
-        updateNotification(id, progress)
+        updateNotification(id, value)
     }
 
     private fun broadcastResult(id: String, result: ProviderResult) {
@@ -199,6 +208,7 @@ class DownloadForegroundService : Service() {
     }
 
     companion object {
+        private data class ProgressEmission(val value: Int, val sentAt: Long)
         private const val TAG = "MusicVault/DownloadService"
         private const val CHANNEL_ID = "musicvault_downloads"
         private const val NOTIFICATION_ID = 7101

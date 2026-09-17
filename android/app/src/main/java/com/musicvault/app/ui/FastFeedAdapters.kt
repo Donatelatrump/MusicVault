@@ -13,6 +13,9 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.graphics.drawable.Drawable
 import android.widget.ProgressBar
+import android.widget.PopupMenu
+import android.widget.ScrollView
+import android.widget.EditText
 import android.widget.TextView
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyRow
@@ -27,10 +30,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Text
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.key
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.text.font.FontWeight
@@ -410,32 +409,18 @@ internal class NativeTrackHolder(context: Context, private val vm: MusicVaultVie
     private val subtitle = itemView.findViewWithTag<TextView>("subtitle")
     private val progress = itemView.findViewWithTag<ProgressBar>("progress")
     private val play = itemView.findViewWithTag<NativePlayButton>("play")
-    private val actions = itemView.findViewWithTag<ComposeView>("actions")
+    private val actions = itemView.findViewWithTag<NativeMoreButton>("actions")
     private var track: Track? = null
     private var boundCoverUrl: String? = null
     private var coverBound = false
     private var selectedId: String? = null
     private var currentPlaylists: List<Playlist> = emptyList()
-    private var currentAlbums: List<Album> = emptyList()
-    // Dedupe key for the Compose actions menu: setContent restarts composition,
-    // so it must run once per (track, favorite, lists) combination — not on
-    // every bind nor on every download-progress tick.
-    private data class MenuContent(val track: Track, val playlists: List<Playlist>, val albums: List<Album>, val favorite: Boolean)
-    private var menuContent by mutableStateOf<MenuContent?>(null)
     private var progressJob: Job? = null
     private var progressFlow: Flow<Int?>? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     init {
-        actions.setContent {
-            menuContent?.let { content ->
-                key(content.track.id) {
-                    androidx.compose.runtime.CompositionLocalProvider(LocalHybridDesign provides hybridDesign) {
-                        TrackActionsMenu(content.track, content.playlists, content.albums, vm, content.favorite)
-                    }
-                }
-            }
-        }
+        actions.setOnClickListener { showActionsMenu(it) }
         itemView.setOnClickListener { track?.let(vm::selectTrack) }
         play.setOnClickListener {
             val t = track ?: return@setOnClickListener
@@ -446,7 +431,6 @@ internal class NativeTrackHolder(context: Context, private val vm: MusicVaultVie
     fun bind(value: Track, flow: Flow<Int?>, playlists: List<Playlist>, albums: List<Album>, selectedId: String?, playing: Boolean) {
         track = value
         currentPlaylists = playlists
-        currentAlbums = albums
         this.selectedId = selectedId
         title.text = value.title
         subtitle.text = "${value.artistName} · ${value.albumTitle}"
@@ -485,11 +469,109 @@ internal class NativeTrackHolder(context: Context, private val vm: MusicVaultVie
         play.visibility = if (value.isDownloaded || downloading) View.GONE else View.VISIBLE
         actions.visibility = if (value.isDownloaded && !downloading) View.VISIBLE else View.GONE
         if (value.isDownloaded && !downloading) {
-            val favorite = vm.isFavorite(value.id)
-            menuContent = MenuContent(value, currentPlaylists, currentAlbums, favorite)
-        } else {
-            menuContent = null
+            actions.contentDescription = "Más opciones para ${value.title}"
         }
+    }
+
+    private fun showActionsMenu(anchor: View) {
+        val current = track ?: return
+        PopupMenu(anchor.context, anchor, Gravity.END).apply {
+            menu.add(0, MENU_QUEUE, 0, "Agregar a cola de reproducción")
+            menu.add(0, MENU_FAVORITE, 1, if (vm.isFavorite(current.id)) "Quitar de Me gusta" else "Me gusta")
+            menu.add(0, MENU_ALBUM, 2, "Agregar a álbum")
+            if (current.isDownloaded) menu.add(0, MENU_DELETE, 3, "Eliminar canción")
+            setOnMenuItemClickListener { item ->
+                when (item.itemId) {
+                    MENU_QUEUE -> vm.addToQueue(current)
+                    MENU_FAVORITE -> vm.toggleFavorite(current)
+                    MENU_ALBUM -> showAlbumChooser(current)
+                    MENU_DELETE -> confirmTrackDeletion(current)
+                }
+                true
+            }
+            show()
+        }
+    }
+
+    private fun showAlbumChooser(current: Track) {
+        val context = itemView.context
+        fun dp(value: Int) = (value * context.resources.displayMetrics.density).roundToInt()
+        val list = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(8), dp(4), dp(8), dp(8))
+        }
+        val dialog = android.app.AlertDialog.Builder(context)
+            .setTitle("Agregar a álbum")
+            .setView(ScrollView(context).apply { addView(list) })
+            .setNegativeButton("Cancelar", null)
+            .create()
+        list.addView(TextView(context).apply {
+            text = "+  Crear nuevo álbum"
+            textSize = 16f
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            setOnClickListener { dialog.dismiss(); showCreateAlbum(current) }
+        })
+        currentPlaylists.forEach { playlist ->
+            val row = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            row.addView(TextView(context).apply {
+                text = playlist.title
+                textSize = 16f
+                setPadding(dp(16), dp(14), dp(8), dp(14))
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                setOnClickListener { vm.addTrackToPlaylist(current, playlist.id); dialog.dismiss() }
+            })
+            if (playlist.id != "playlist:favorites") {
+                row.addView(ImageButton(context).apply {
+                    setImageResource(android.R.drawable.ic_menu_delete)
+                    contentDescription = "Eliminar ${playlist.title}"
+                    background = null
+                    layoutParams = LinearLayout.LayoutParams(dp(48), dp(48))
+                    setOnClickListener {
+                        android.app.AlertDialog.Builder(context)
+                            .setTitle("Eliminar álbum")
+                            .setMessage("¿Quieres eliminar \"${playlist.title}\"?")
+                            .setPositiveButton("Eliminar") { _, _ -> vm.deletePlaylist(playlist.id); dialog.dismiss() }
+                            .setNegativeButton("Cancelar", null)
+                            .show()
+                    }
+                })
+            }
+            list.addView(row)
+        }
+        dialog.show()
+    }
+
+    private fun showCreateAlbum(current: Track) {
+        val context = itemView.context
+        val input = EditText(context).apply { hint = "Nombre"; isSingleLine = true }
+        val dialog = android.app.AlertDialog.Builder(context)
+            .setTitle("Crear nuevo álbum")
+            .setView(input)
+            .setPositiveButton("Crear y agregar", null)
+            .setNegativeButton("Cancelar", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val name = input.text.toString().trim()
+                if (name.isNotEmpty()) {
+                    vm.createPlaylist(name, listOf(current))
+                    dialog.dismiss()
+                }
+            }
+        }
+        dialog.show()
+    }
+
+    private fun confirmTrackDeletion(current: Track) {
+        android.app.AlertDialog.Builder(itemView.context)
+            .setTitle("Eliminar canción")
+            .setMessage("¿Quieres eliminar \"${current.title}\" de las descargas de MusicVault?")
+            .setPositiveButton("Eliminar") { _, _ -> vm.deleteTrack(current) }
+            .setNegativeButton("Cancelar", null)
+            .show()
     }
 
     fun updatePlaybackState(selectedId: String?, playing: Boolean) {
@@ -504,7 +586,13 @@ internal class NativeTrackHolder(context: Context, private val vm: MusicVaultVie
         progressJob?.cancel()
         progressJob = null
         progressFlow = null
-        // Keep the pooled composition; key(track.id) resets menu state on reuse.
+    }
+
+    private companion object {
+        const val MENU_QUEUE = 1
+        const val MENU_FAVORITE = 2
+        const val MENU_ALBUM = 3
+        const val MENU_DELETE = 4
     }
 }
 
@@ -526,6 +614,20 @@ private class NativePlayButton(context: Context) : ImageButton(context) {
             canvas.drawRoundRect(cx-size*.45f, cy-size*.58f, cx-size*.08f, cy+size*.58f, size*.08f, size*.08f, paint)
             canvas.drawRoundRect(cx+size*.08f, cy-size*.58f, cx+size*.45f, cy+size*.58f, size*.08f, size*.08f, paint)
         }
+    }
+}
+
+private class NativeMoreButton(context: Context) : View(context) {
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(241, 234, 217) }
+    init { isClickable = true; isFocusable = true; background = null }
+    override fun onDraw(canvas: Canvas) {
+        val cx = width / 2f
+        val cy = height / 2f
+        val radius = (minOf(width, height) * .06f).coerceAtLeast(2f)
+        val gap = radius * 3.2f
+        canvas.drawCircle(cx, cy - gap, radius, paint)
+        canvas.drawCircle(cx, cy, radius, paint)
+        canvas.drawCircle(cx, cy + gap, radius, paint)
     }
 }
 
@@ -555,8 +657,8 @@ private fun makeTrackRow(context: Context, hybrid: Boolean): LinearLayout {
     text.addView(ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal).apply { tag="progress"; visibility=View.GONE; max=100; layoutParams=LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(2)).apply { topMargin=dp(3) } })
     row.addView(text)
     row.addView(NativePlayButton(context).apply { tag="play"; layoutParams=LinearLayout.LayoutParams(dp(48), dp(48)) })
-    row.addView(ComposeView(context).apply {
-        tag="actions"; layoutParams=LinearLayout.LayoutParams(dp(44), dp(48)); setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindowOrReleasedFromPool)
+    row.addView(NativeMoreButton(context).apply {
+        tag="actions"; layoutParams=LinearLayout.LayoutParams(dp(44), dp(48))
     })
     return row
 }

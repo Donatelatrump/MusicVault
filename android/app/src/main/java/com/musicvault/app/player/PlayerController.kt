@@ -27,7 +27,7 @@ import kotlinx.coroutines.launch
 import kotlin.math.max
 
 /** Non-blocking MediaController facade with seeking, queue and crossfade. */
-@OptIn(UnstableApi::class)
+@androidx.annotation.OptIn(markerClass = [UnstableApi::class])
 class PlayerController(context: Context) {
     data class PlaybackProgress(
         val trackId: String? = null,
@@ -87,7 +87,11 @@ class PlayerController(context: Context) {
             override fun onSuccess(controller: MediaController?) {
                 if (controller == null || released) return
                 controller.addListener(object : androidx.media3.common.Player.Listener {
-                    override fun onIsPlayingChanged(isPlaying: Boolean) { _isPlaying.value = isPlaying; publishProgress(controller) }
+                    override fun onIsPlayingChanged(isPlaying: Boolean) {
+                        _isPlaying.value = isPlaying
+                        publishProgress(controller)
+                        if (isPlaying) startTicker(controller) else stopTicker()
+                    }
                     override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                         publishQueue(controller)
                         publishProgress(controller)
@@ -127,7 +131,7 @@ class PlayerController(context: Context) {
                 _repeatMode.value = controller.repeatMode
                 _audioSessionId.value = AudioSessionBridge.sessionId
                 publishQueue(controller)
-                startTicker(controller)
+                if (controller.isPlaying) startTicker(controller)
             }
             override fun onFailure(t: Throwable) { _isPlaying.value = false }
         }, MoreExecutors.directExecutor())
@@ -138,14 +142,14 @@ class PlayerController(context: Context) {
         ticker = scope.launch {
             while (isActive && !released) {
                 publishProgress(controller)
-                // ✅ Adaptive polling based on playback state and UI visibility
-                delay(when {
-                    !controller.isPlaying -> 2000L           // Pausado: cada 2s  
-                    controller.isPlaying -> 500L             // Reproduciendo: cada 500ms (antes 250ms)
-                    else -> 1000L                            // Otros estados: cada 1s
-                })
+                delay(500L)
             }
         }
+    }
+
+    private fun stopTicker() {
+        ticker?.cancel()
+        ticker = null
     }
 
     private fun publishProgress(controller: MediaController) {
