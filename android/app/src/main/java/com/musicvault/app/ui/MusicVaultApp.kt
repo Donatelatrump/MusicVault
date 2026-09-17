@@ -44,6 +44,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.spring
@@ -96,6 +98,7 @@ import androidx.compose.ui.geometry.lerp
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.asComposeRenderEffect
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -531,7 +534,6 @@ fun MusicVaultApp(vm: MusicVaultViewModel) {
                         selectedTrackId = state.selectedTrack?.id,
                         playlists = state.playlists,
                         albums = state.albums,
-                        favoriteIds = state.favoriteIds,
                         vm = vm
                     )
                 }
@@ -722,7 +724,6 @@ private fun SpotifyLoginDialog(
                 ) {
                     Column(Modifier.weight(1f)) {
                         Text("Conectar Spotify", color = VaultColors.TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                        Text("MusicVault solo guardará la sesión necesaria para importar.", color = VaultColors.TextTertiary, fontSize = 11.sp)
                     }
                     IconButton(onClick = onDismiss, enabled = !busy) {
                         Icon(Icons.Default.Close, "Cerrar", tint = VaultColors.TextSecondary)
@@ -839,12 +840,6 @@ private fun SpotifyPlaylistReviewDialog(
         title = { Text(playlist.title) },
         text = {
             Column {
-                Text(
-                    "Desmarca las canciones que no quieras guardar.",
-                    color = VaultColors.TextSecondary,
-                    fontSize = 12.sp
-                )
-                Spacer(Modifier.height(8.dp))
                 LazyColumn(Modifier.heightIn(max = 420.dp)) {
                     items(playlist.tracks, key = { it.id }) { track ->
                         val checked = track.id in selected
@@ -1158,17 +1153,6 @@ private fun SearchScreen(
                 cursorColor = VaultColors.Accent
             )
         )
-
-        if (hybrid) {
-            Text(
-                "BUSCA EN EL CATÁLOGO O PEGA UN ENLACE DE SPOTIFY",
-                color = VaultColors.TextTertiary,
-                fontSize = 9.sp,
-                fontFamily = VaultFonts.Mono,
-                letterSpacing = 0.7.sp,
-                modifier = Modifier.padding(start = 4.dp, top = 8.dp)
-            )
-        }
 
         AnimatedVisibility(
             visible = state.isSearching,
@@ -1700,19 +1684,12 @@ private fun RemoteAlbumDetail(
                 loading -> Column(Modifier.fillMaxWidth()) {
                     repeat(4) { SkeletonRow() }
                 }
-                tracks.isEmpty() -> Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-                    Text(
-                        "No se encontraron canciones para este álbum.",
-                        color = VaultColors.TextSecondary,
-                        fontSize = 14.sp
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "Puede ser que el proveedor no tenga el catálogo completo. Intenta abrir otro álbum del mismo artista.",
-                        color = VaultColors.TextTertiary,
-                        fontSize = 12.sp
-                    )
-                }
+                tracks.isEmpty() -> Text(
+                    "No se encontraron canciones para este álbum.",
+                    color = VaultColors.TextSecondary,
+                    fontSize = 14.sp,
+                    modifier = Modifier.padding(vertical = 8.dp)
+                )
             }
             Spacer(Modifier.height(10.dp))
         }
@@ -1757,116 +1734,154 @@ private fun PlaylistDetail(
     selectedTrackId: String?,
     playlists: List<Playlist>,
     albums: List<Album>,
-    favoriteIds: Set<String>,
     vm: MusicVaultViewModel
 ) {
+    val context = LocalContext.current
     val hybrid = LocalHybridDesign.current
-    val downloadProgress by vm.downloadProgress.collectAsStateWithLifecycle()
+    val adapter = remember(vm, hybrid) { PlaylistDetailAdapter(vm, hybrid) }
     val customAlbums = remember(albums) { albums.filter { it.id.startsWith("album:custom:") } }
-    var animatePlaylistChanges by remember(playlist.id) { mutableStateOf(false) }
-    LaunchedEffect(playlist.id, tracks.isNotEmpty()) {
-        if (tracks.isNotEmpty()) {
-            // Let the first large snapshot settle without scheduling a placement
-            // animation for every row. Later inserts/removals remain animated.
-            withFrameNanos { }
-            animatePlaylistChanges = true
+    val pendingDownloads = remember(tracks) { tracks.count { !it.isDownloaded || it.audioUri == null } }
+    // Header identity only changes when what it renders changes; playback
+    // ticks rebind rows via payload instead of rebuilding the header.
+    val headerContent = remember(playlist, tracks.size, pendingDownloads, isDownloading) {
+        @Composable {
+            PlaylistDetailHeader(
+                playlist = playlist,
+                trackCount = tracks.size,
+                isDownloading = isDownloading,
+                pendingDownloads = pendingDownloads,
+                onBack = vm::clearSelection,
+                onPlay = { vm.playPlaylist(playlist, shuffle = false) },
+                onShuffle = { vm.playPlaylist(playlist, shuffle = true) },
+                onDownload = { vm.downloadPlaylist(playlist) }
+            )
         }
     }
-    LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(if (hybrid) 16.dp else 20.dp),
-        verticalArrangement = Arrangement.spacedBy(if (hybrid) 6.dp else 0.dp)
-    ) {
-        item {
-            IconButton(onClick = vm::clearSelection) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Atrás", tint = VaultColors.TextPrimary)
-            }
-            playlist.coverUri?.let { coverUri ->
-                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    CachedCover(
-                        url = coverUri,
-                        contentDescription = "Portada de ${playlist.title}",
-                        targetSizePx = 420,
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier
-                            .size(180.dp)
-                            .clip(RoundedCornerShape(if (hybrid) 18.dp else 12.dp))
-                            .border(1.dp, VaultColors.Divider, RoundedCornerShape(if (hybrid) 18.dp else 12.dp))
-                    )
+    AndroidView(
+        modifier = Modifier.fillMaxSize(),
+        factory = { ctx ->
+            RecyclerView(ctx).apply {
+                layoutManager = LinearLayoutManager(ctx).also {
+                    it.isItemPrefetchEnabled = true
+                    it.initialPrefetchItemCount = 6
                 }
-                Spacer(Modifier.height(16.dp))
+                setHasFixedSize(false)
+                setItemViewCacheSize(10)
+                recycledViewPool.setMaxRecycledViews(PlaylistDetailAdapter.TYPE_TRACK, 12)
+                itemAnimator = androidx.recyclerview.widget.DefaultItemAnimator().apply { supportsChangeAnimations = false }
+                setPadding(
+                    dp(context, if (hybrid) 16 else 20), 0,
+                    dp(context, if (hybrid) 16 else 20), dp(context, if (hybrid) 16 else 20)
+                )
+                overScrollMode = RecyclerView.OVER_SCROLL_IF_CONTENT_SCROLLS
+                this.adapter = adapter
             }
-            Text(playlist.title, color = VaultColors.TextPrimary, fontSize = if (hybrid) 26.sp else 28.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.5).sp)
-            Text(
-                buildString {
-                    if (playlist.description.isNotBlank()) append(playlist.description).append("  •  ")
-                    append(tracks.size).append(if (tracks.size == 1) " canción" else " canciones")
-                },
-                color = VaultColors.TextSecondary,
-                fontSize = if (hybrid) 12.sp else 14.sp,
-                fontFamily = if (hybrid) VaultFonts.Mono else VaultFonts.Body
+        },
+        update = {
+            adapter.update(
+                tracks = tracks,
+                playlists = playlists,
+                albums = customAlbums,
+                selectedTrackId = selectedTrackId,
+                isPlaying = isPlaying,
+                onRowClick = { vm.playPlaylistTrack(playlist, it) },
+                onPlayNew = { vm.playPlaylistTrack(playlist, it) },
+                header = headerContent
             )
-            Spacer(Modifier.height(14.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(
-                    onClick = { vm.playPlaylist(playlist, shuffle = false) },
-                    shape = RoundedCornerShape(50),
-                    colors = ButtonDefaults.buttonColors(containerColor = VaultColors.Accent, contentColor = Color.Black)
-                ) {
-                    Icon(Icons.Default.PlayArrow, null)
-                    Spacer(Modifier.width(6.dp))
-                    Text("Reproducir", fontWeight = FontWeight.Bold)
-                }
-                OutlinedButton(
-                    onClick = { vm.playPlaylist(playlist, shuffle = true) },
-                    shape = RoundedCornerShape(50)
-                ) {
-                    Icon(VaultIcons.Shuffle, null, tint = VaultColors.TextPrimary)
-                    Spacer(Modifier.width(6.dp))
-                    Text("Aleatorio", color = VaultColors.TextPrimary, fontWeight = FontWeight.Bold)
-                }
-            }
-            Spacer(Modifier.height(10.dp))
-            val pendingDownloads = tracks.count { !it.isDownloaded || it.audioUri == null }
-            OutlinedButton(
-                onClick = { vm.downloadPlaylist(playlist) },
-                enabled = pendingDownloads > 0 && !isDownloading,
-                shape = RoundedCornerShape(50),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                if (isDownloading) {
-                    DownloadDotsSpinner(modifier = Modifier.size(24.dp), dotColor = VaultColors.TextPrimary)
-                } else {
-                    Icon(VaultIcons.Download, null, tint = if (pendingDownloads > 0) VaultColors.TextPrimary else VaultColors.TextTertiary)
-                }
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    when {
-                        isDownloading -> "Descargando playlist…"
-                        pendingDownloads == 0 -> "Playlist descargada"
-                        else -> "Descargar playlist ($pendingDownloads)"
-                    },
-                    fontWeight = FontWeight.Bold
+        }
+    )
+}
+
+@Composable
+private fun PlaylistDetailHeader(
+    playlist: Playlist,
+    trackCount: Int,
+    isDownloading: Boolean,
+    pendingDownloads: Int,
+    onBack: () -> Unit,
+    onPlay: () -> Unit,
+    onShuffle: () -> Unit,
+    onDownload: () -> Unit
+) {
+    val hybrid = LocalHybridDesign.current
+    Column(
+        Modifier.fillMaxWidth().padding(
+            start = if (hybrid) 16.dp else 20.dp,
+            top = if (hybrid) 16.dp else 20.dp,
+            end = if (hybrid) 16.dp else 20.dp
+        )
+    ) {
+        IconButton(onClick = onBack) {
+            Icon(Icons.AutoMirrored.Filled.ArrowBack, "Atrás", tint = VaultColors.TextPrimary)
+        }
+        playlist.coverUri?.let { coverUri ->
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                CachedCover(
+                    url = coverUri,
+                    contentDescription = "Portada de ${playlist.title}",
+                    targetSizePx = 420,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .size(180.dp)
+                        .clip(RoundedCornerShape(if (hybrid) 18.dp else 12.dp))
+                        .border(1.dp, VaultColors.Divider, RoundedCornerShape(if (hybrid) 18.dp else 12.dp))
                 )
             }
-            Spacer(Modifier.height(20.dp))
+            Spacer(Modifier.height(16.dp))
         }
-        items(
-            items = tracks,
-            key = { it.id },
-            contentType = { "playlist-track" }
-        ) { track ->
-            TrackRow(
-                track = track,
-                progress = downloadProgress[track.id],
-                onClick = { vm.playPlaylistTrack(playlist, track) },
-                isPlaying = isPlaying && selectedTrackId == track.id,
-                onPlayToggle = { if (selectedTrackId == track.id) vm.togglePlayback() else vm.playPlaylistTrack(playlist, track) },
-                onCancelDownload = { vm.cancelDownload(track.id) },
-                actions = { TrackActionsMenu(track, playlists, customAlbums, vm, track.id in favoriteIds) },
-                modifier = if (animatePlaylistChanges) Modifier.animateItem() else Modifier
+        Text(playlist.title, color = VaultColors.TextPrimary, fontSize = if (hybrid) 26.sp else 28.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.5).sp)
+        Text(
+            buildString {
+                if (playlist.description.isNotBlank()) append(playlist.description).append("  •  ")
+                append(trackCount).append(if (trackCount == 1) " canción" else " canciones")
+            },
+            color = VaultColors.TextSecondary,
+            fontSize = if (hybrid) 12.sp else 14.sp,
+            fontFamily = if (hybrid) VaultFonts.Mono else VaultFonts.Body
+        )
+        Spacer(Modifier.height(14.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Button(
+                onClick = onPlay,
+                shape = RoundedCornerShape(50),
+                colors = ButtonDefaults.buttonColors(containerColor = VaultColors.Accent, contentColor = Color.Black)
+            ) {
+                Icon(Icons.Default.PlayArrow, null)
+                Spacer(Modifier.width(6.dp))
+                Text("Reproducir", fontWeight = FontWeight.Bold)
+            }
+            OutlinedButton(
+                onClick = onShuffle,
+                shape = RoundedCornerShape(50)
+            ) {
+                Icon(VaultIcons.Shuffle, null, tint = VaultColors.TextPrimary)
+                Spacer(Modifier.width(6.dp))
+                Text("Aleatorio", color = VaultColors.TextPrimary, fontWeight = FontWeight.Bold)
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        OutlinedButton(
+            onClick = onDownload,
+            enabled = pendingDownloads > 0 && !isDownloading,
+            shape = RoundedCornerShape(50),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            if (isDownloading) {
+                DownloadDotsSpinner(modifier = Modifier.size(24.dp), dotColor = VaultColors.TextPrimary)
+            } else {
+                Icon(VaultIcons.Download, null, tint = if (pendingDownloads > 0) VaultColors.TextPrimary else VaultColors.TextTertiary)
+            }
+            Spacer(Modifier.width(8.dp))
+            Text(
+                when {
+                    isDownloading -> "Descargando playlist…"
+                    pendingDownloads == 0 -> "Playlist descargada"
+                    else -> "Descargar playlist ($pendingDownloads)"
+                },
+                fontWeight = FontWeight.Bold
             )
         }
+        Spacer(Modifier.height(20.dp))
     }
 }
 
@@ -2085,8 +2100,9 @@ private fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean,
         // it down brings the vinyl back. Both transitions are one continuous
         // gesture because the sheet and the stage share the available height.
         val density = LocalDensity.current
-        // Two 2-line stanzas need more room than the old 1-line peek.
-        val peekHeight = 122.dp
+        // Two stanzas + the dimmed previous line need more room than a bare
+        // 1-line peek.
+        val peekHeight = 138.dp
         val peekPx = with(density) { peekHeight.toPx() }
         var areaPx by remember { mutableStateOf(0f) }
         var fixedPx by remember { mutableStateOf(0f) }
@@ -2422,67 +2438,96 @@ private fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean,
                         modifier = Modifier.fillMaxSize()
                     )
                 } else {
-                    // Collapsed peek: a compact synced view — the current line
-                    // enlarged and highlighted with the previous and next lines
-                    // dimmed around it. The lookup runs in derived state, so it
-                    // only recomposes when the line actually changes.
+                    // Collapsed / semi-open peek: the same Spotify treatment in
+                    // miniature — active stanza large and sharp, previous and
+                    // next dimmed and blurred around it. AnimatedContent keyed
+                    // by the active line index rolls the trio up (or down on
+                    // seek-back) with one shared spring, so line changes glide
+                    // instead of swapping text in place.
                     val synced = lyrics.synced
                     val plain = lyrics.plain
-                    val peek by remember(synced, plain) {
-                        derivedStateOf {
-                            if (synced.isEmpty()) null
-                            else {
-                                val index = synced.indexOfLast { it.timeMs <= lyricPosition.value }
-                                // Mini view: current + upcoming only. The already
-                                // sung line is dropped so both stanzas get two
-                                // full lines (long stanzas are never truncated).
-                                synced.getOrNull(index)?.text to synced.getOrNull(index + 1)?.text
+                    when {
+                        synced.isNotEmpty() -> {
+                            val peekIndex by remember(synced) {
+                                derivedStateOf { synced.indexOfLast { it.timeMs <= lyricPosition.value } }
+                            }
+                            AnimatedContent(
+                                targetState = peekIndex,
+                                transitionSpec = {
+                                    val forward = targetState >= initialState
+                                    if (forward) {
+                                        (
+                                            slideInVertically(
+                                                spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow)
+                                            ) { it / 3 } + fadeIn(tween(160))
+                                            ) togetherWith (
+                                            slideOutVertically(
+                                                spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow)
+                                            ) { -it / 3 } + fadeOut(tween(110))
+                                            )
+                                    } else {
+                                        (
+                                            slideInVertically(
+                                                spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow)
+                                            ) { -it / 3 } + fadeIn(tween(160))
+                                            ) togetherWith (
+                                            slideOutVertically(
+                                                spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow)
+                                            ) { it / 3 } + fadeOut(tween(110))
+                                            )
+                                    }
+                                },
+                                label = "lyricPeek"
+                            ) { index ->
+                                Column(
+                                    Modifier.fillMaxSize().padding(horizontal = 20.dp),
+                                    verticalArrangement = Arrangement.Center,
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    if (index < 0) {
+                                        synced.firstOrNull()?.let {
+                                            LyricStanza(
+                                                it.text, active = false, distance = 1,
+                                                compact = true, maxLines = 2, overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    } else {
+                                        synced.getOrNull(index - 1)?.let {
+                                            LyricStanza(
+                                                it.text, active = false, distance = -1,
+                                                compact = true, maxLines = 1, overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                        synced.getOrNull(index)?.let {
+                                            LyricStanza(
+                                                it.text, active = true, distance = 0,
+                                                compact = true, maxLines = 2, overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                        synced.getOrNull(index + 1)?.let {
+                                            LyricStanza(
+                                                it.text, active = false, distance = 1,
+                                                compact = true, maxLines = 1, overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
-                    }
-                    Column(
-                        Modifier.fillMaxSize().padding(horizontal = 20.dp),
-                        verticalArrangement = Arrangement.Center,
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        val view = peek
-                        when {
-                            view != null -> {
-                                Text(
-                                    view.first ?: " ",
-                                    color = VaultColors.Accent,
-                                    fontSize = 17.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    lineHeight = 22.sp,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis,
-                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                                )
-                                Text(
-                                    view.second ?: " ",
-                                    color = VaultColors.TextSecondary,
-                                    fontSize = 12.sp,
-                                    lineHeight = 16.sp,
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis,
-                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                                )
-                            }
-                            plain != null -> Text(
-                                plain.lineSequence().firstOrNull { it.isNotBlank() } ?: "Letra no disponible",
-                                color = VaultColors.TextSecondary,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Medium,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            else -> Text(
-                                "Letra no disponible",
-                                color = VaultColors.TextSecondary,
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.Medium
-                            )
-                        }
+                        plain != null -> Text(
+                            plain.lineSequence().firstOrNull { it.isNotBlank() } ?: "Letra no disponible",
+                            color = VaultColors.TextSecondary,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        else -> Text(
+                            "Letra no disponible",
+                            color = VaultColors.TextSecondary,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium
+                        )
                     }
                 }
             }
@@ -3004,6 +3049,93 @@ private fun LyricsPanel(
     }
 }
 
+/**
+ * One synced stanza with the Spotify treatment: the active line grows, turns
+ * bold-accented and stays sharp, while every other line fades, scales down and
+ * blurs progressively with its signed distance to the active one (negatives
+ * are already sung, positives upcoming; before the first line everything is
+ * upcoming). All properties share one spring curve so a role change reads as
+ * a single gliding movement. Alpha and blur are read inside graphicsLayer
+ * (draw phase): lines whose distance merely shifts animate without ever
+ * recomposing. On pre-API 31 devices the blur is skipped gracefully.
+ */
+@Composable
+private fun LyricStanza(
+    text: String,
+    active: Boolean,
+    distance: Int,
+    compact: Boolean = false,
+    maxLines: Int = Int.MAX_VALUE,
+    overflow: TextOverflow = TextOverflow.Clip
+) {
+    val sung = distance < 0
+    val focus = animateFloatAsState(
+        if (active) 1f else 0f,
+        spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow),
+        label = "lyricFocus"
+    )
+    val alphaTarget = when {
+        active -> 1f
+        sung -> (0.46f - 0.08f * (abs(distance) - 1)).coerceAtLeast(0.22f)
+        else -> (0.9f - 0.12f * (abs(distance) - 1)).coerceAtLeast(0.45f)
+    }
+    val lyricAlpha = animateFloatAsState(
+        alphaTarget,
+        spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow),
+        label = "lyricAlpha"
+    )
+    val blurUnit = if (compact) 0.6f else 1f
+    val blurTarget = if (active) 0f
+        else abs(distance).coerceAtMost(3) * (if (sung) 1.2f else 1f) * blurUnit
+    val lyricBlur = animateFloatAsState(
+        blurTarget,
+        spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow),
+        label = "lyricBlur"
+    )
+    val sizeFrom = if (compact) 12.sp else 15.sp
+    val sizeTo = if (compact) 18.sp else 22.sp
+    val leadFrom = if (compact) 16.sp else 22.sp
+    val leadTo = if (compact) 24.sp else 30.sp
+    val padFrom = if (compact) 2.dp else 6.dp
+    val padTo = if (compact) 5.dp else 10.dp
+    val blurCache = remember { HashMap<Int, androidx.compose.ui.graphics.RenderEffect>() }
+    val densityPx = with(LocalDensity.current) { 1.dp.toPx() }
+    Text(
+        text,
+        color = when {
+            active -> VaultColors.Accent
+            sung -> VaultColors.TextPrimary
+            else -> VaultColors.TextSecondary
+        },
+        fontSize = androidx.compose.ui.unit.lerp(sizeFrom, sizeTo, focus.value),
+        fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+        lineHeight = androidx.compose.ui.unit.lerp(leadFrom, leadTo, focus.value),
+        maxLines = maxLines,
+        overflow = overflow,
+        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = androidx.compose.ui.unit.lerp(padFrom, padTo, focus.value))
+            .graphicsLayer {
+                val s = 0.94f + 0.06f * focus.value
+                scaleX = s
+                scaleY = s
+                alpha = lyricAlpha.value
+                if (lyricBlur.value > 0.05f && Build.VERSION.SDK_INT >= 31) {
+                    val step = (lyricBlur.value * 4f).roundToInt().coerceAtLeast(1)
+                    renderEffect = blurCache.getOrPut(step) {
+                        val radius = step * 0.25f * densityPx
+                        android.graphics.RenderEffect
+                            .createBlurEffect(radius, radius, android.graphics.Shader.TileMode.CLAMP)
+                            .asComposeRenderEffect()
+                    }
+                } else {
+                    renderEffect = null
+                }
+            }
+    )
+}
+
 @Composable
 private fun SyncedLyricsList(lines: List<LyricLine>, positionState: State<Long>, modifier: Modifier = Modifier) {
     val listState = rememberLazyListState()
@@ -3027,47 +3159,48 @@ private fun SyncedLyricsList(lines: List<LyricLine>, positionState: State<Long>,
             holdAutoScroll = false
         }
     }
-    LazyColumn(
-        state = listState,
-        modifier = modifier
-            .fillMaxSize()
-            .pointerInput(Unit) {
-                awaitEachGesture {
-                    awaitFirstDown(requireUnconsumed = false)
-                    holdAutoScroll = true
-                }
-            },
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
-        contentPadding = PaddingValues(vertical = 40.dp)
-    ) {
-        itemsIndexed(lines) { index, line ->
-            val activeIndex = currentLine
-            val active = index == activeIndex
-            // Karaoke zoom: the active stanza scales up and takes the accent;
-            // sung lines fade back.
-            val scale by animateFloatAsState(
-                if (active) 1f else 0.94f,
-                spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
-                label = "lyricScale"
-            )
-            Text(
-                line.text,
-                color = when {
-                    active -> VaultColors.Accent
-                    activeIndex != null && index < activeIndex -> VaultColors.TextPrimary.copy(alpha = 0.4f)
-                    else -> VaultColors.TextSecondary
+    Box(modifier.fillMaxSize()) {
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        holdAutoScroll = true
+                    }
                 },
-                fontSize = if (active) 22.sp else 15.sp,
-                fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
-                lineHeight = if (active) 30.sp else 22.sp,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = if (active) 10.dp else 6.dp)
-                    .graphicsLayer { scaleX = scale; scaleY = scale }
-            )
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+            contentPadding = PaddingValues(vertical = 48.dp)
+        ) {
+            // Keyed by line identity: animation state travels with the stanza,
+            // and lines scrolled back into view start at their real values
+            // instead of inheriting a recycled slot's stale animation.
+            itemsIndexed(lines, key = { _, line -> "${line.timeMs}:${line.text}" }) { index, line ->
+                val activeIndex = currentLine
+                val active = index == activeIndex
+                val distance = activeIndex?.let { index - it } ?: 1
+                LyricStanza(line.text, active = active, distance = distance)
+            }
         }
+        // Vertical fade at both edges: stanzas enter and leave softly and the
+        // center band keeps the visual focus. Plain scrims never intercept the
+        // list's touch gestures.
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(56.dp)
+                .align(Alignment.TopCenter)
+                .background(Brush.verticalGradient(listOf(VaultColors.Surface1, Color.Transparent)))
+        )
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(72.dp)
+                .align(Alignment.BottomCenter)
+                .background(Brush.verticalGradient(listOf(Color.Transparent, VaultColors.Surface1)))
+        )
     }
 }
 

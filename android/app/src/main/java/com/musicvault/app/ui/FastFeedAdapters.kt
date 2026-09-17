@@ -402,8 +402,13 @@ internal class LibraryFeedAdapter(private val vm: MusicVaultViewModel, private v
 }
 
 /** Native track row: avoids a Compose tree for the most frequently repeated item. */
-internal class NativeTrackHolder(context: Context, private val vm: MusicVaultViewModel, private val hybridDesign: Boolean = false) :
-    RecyclerView.ViewHolder(makeTrackRow(context, hybridDesign)) {
+internal class NativeTrackHolder(
+    context: Context,
+    private val vm: MusicVaultViewModel,
+    private val hybridDesign: Boolean = false,
+    private val onRowClick: ((Track) -> Unit)? = null,
+    private val onPlayNew: ((Track) -> Unit)? = null
+) : RecyclerView.ViewHolder(makeTrackRow(context, hybridDesign)) {
     private val image = itemView.findViewWithTag<ImageView>("cover")
     private val title = itemView.findViewWithTag<TextView>("title")
     private val subtitle = itemView.findViewWithTag<TextView>("subtitle")
@@ -421,10 +426,11 @@ internal class NativeTrackHolder(context: Context, private val vm: MusicVaultVie
 
     init {
         actions.setOnClickListener { showActionsMenu(it) }
-        itemView.setOnClickListener { track?.let(vm::selectTrack) }
+        itemView.setOnClickListener { track?.let { t -> (onRowClick ?: vm::selectTrack).invoke(t) } }
         play.setOnClickListener {
             val t = track ?: return@setOnClickListener
-            if (t.id == selectedId) vm.togglePlayback() else vm.selectTrack(t)
+            if (t.id == selectedId) vm.togglePlayback()
+            else (onPlayNew ?: vm::selectTrack).invoke(t)
         }
     }
 
@@ -775,6 +781,122 @@ internal class LocalAlbumDetailAdapter(private val vm: MusicVaultViewModel, priv
 
 }
 
+/** Optimized playlist detail: Compose header + the same native track-row
+ *  pipeline the Library uses (DiffUtil, per-row progress flows, native menus),
+ *  so big playlists scroll with the same per-row cost as the Library. */
+internal class PlaylistDetailAdapter(
+    private val vm: MusicVaultViewModel,
+    private val hybridDesign: Boolean = false
+) : ListAdapter<Track, RecyclerView.ViewHolder>(LocalAlbumTrackDiff) {
+
+    companion object {
+        const val TYPE_HEADER = 40
+        const val TYPE_TRACK = 41
+        const val STATE_PAYLOAD = "player_state"
+    }
+
+    private var headerContent: (@Composable () -> Unit)? = null
+    private var rowClick: ((Track) -> Unit)? = null
+    private var playNew: ((Track) -> Unit)? = null
+    private var playlists: List<Playlist> = emptyList()
+    private var albums: List<Album> = emptyList()
+    private var tracksCache: List<Track> = emptyList()
+    private var selectedTrackId: String? = null
+    private var isPlaying: Boolean = false
+    private val progressFlows = HashMap<String, Flow<Int?>>()
+
+    init { setHasStableIds(true) }
+
+    override fun getItemCount(): Int = super.getItemCount() + 1
+
+    override fun getItemId(position: Int): Long =
+        if (position == 0) Long.MIN_VALUE + 40 else stableLongId("playlist-detail:${getItem(position - 1).id}")
+
+    override fun getItemViewType(position: Int): Int = if (position == 0) TYPE_HEADER else TYPE_TRACK
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder =
+        if (viewType == TYPE_HEADER) ComposeRowHolder(parent)
+        else NativeTrackHolder(parent.context, vm, hybridDesign, rowClick, playNew)
+
+    override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
+        if (position == 0) {
+            headerContent?.let { content -> (holder.itemView as ComposeView).setContent(content) }
+        } else {
+            val track = getItem(position - 1)
+            (holder as NativeTrackHolder).bind(
+                track,
+                progressFlow(track.id),
+                playlists,
+                albums,
+                selectedTrackId,
+                isPlaying
+            )
+        }
+    }
+
+    override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int, payloads: MutableList<Any>) {
+        if (payloads.contains(STATE_PAYLOAD) && position > 0 && holder is NativeTrackHolder) {
+            holder.updatePlaybackState(selectedTrackId, isPlaying)
+        } else {
+            onBindViewHolder(holder, position)
+        }
+    }
+
+    override fun onViewRecycled(holder: RecyclerView.ViewHolder) {
+        if (holder is NativeTrackHolder) holder.recycle()
+        super.onViewRecycled(holder)
+    }
+
+    private fun progressFlow(id: String): Flow<Int?> = progressFlows.getOrPut(id) { vm.downloadProgressFor(id) }
+
+    fun update(
+        tracks: List<Track>,
+        playlists: List<Playlist>,
+        albums: List<Album>,
+        selectedTrackId: String?,
+        isPlaying: Boolean,
+        onRowClick: (Track) -> Unit,
+        onPlayNew: (Track) -> Unit,
+        header: @Composable () -> Unit
+    ) {
+        // This update runs on every recomposition of the hosting screen. Skip
+        // the whole rebuild (and DiffUtil) when nothing the rows render changed.
+        val headerChanged = header !== headerContent
+        val tracksChanged = tracks !== tracksCache && tracks != tracksCache
+        val selectionChanged = this.selectedTrackId != selectedTrackId || this.isPlaying != isPlaying
+        val auxiliaryChanged = this.playlists != playlists || this.albums != albums
+        val oldSelected = this.selectedTrackId
+        if (!headerChanged && !tracksChanged && !selectionChanged && !auxiliaryChanged) return
+
+        this.headerContent = header
+        this.rowClick = onRowClick
+        this.playNew = onPlayNew
+        this.playlists = playlists
+        this.albums = albums
+        this.selectedTrackId = selectedTrackId
+        this.isPlaying = isPlaying
+
+        if (tracksChanged) {
+            tracksCache = tracks
+            submitList(tracks.toList()) {
+                if (headerChanged && itemCount > 0) notifyItemChanged(0)
+                if (selectionChanged) {
+                    if (oldSelected != null) currentList.indexOfFirst { it.id == oldSelected }.takeIf { it >= 0 }?.let { notifyItemChanged(it + 1, STATE_PAYLOAD) }
+                    if (selectedTrackId != null && selectedTrackId != oldSelected) currentList.indexOfFirst { it.id == selectedTrackId }.takeIf { it >= 0 }?.let { notifyItemChanged(it + 1, STATE_PAYLOAD) }
+                }
+            }
+        } else {
+            // Same row set: refresh only the header and the affected rows
+            // instead of running DiffUtil over the whole playlist again.
+            if (headerChanged && itemCount > 0) notifyItemChanged(0)
+            if (selectionChanged) {
+                if (oldSelected != null) currentList.indexOfFirst { it.id == oldSelected }.takeIf { it >= 0 }?.let { notifyItemChanged(it + 1, STATE_PAYLOAD) }
+                if (selectedTrackId != null && selectedTrackId != oldSelected) currentList.indexOfFirst { it.id == selectedTrackId }.takeIf { it >= 0 }?.let { notifyItemChanged(it + 1, STATE_PAYLOAD) }
+            }
+        }
+    }
+}
+
 private object LocalAlbumTrackDiff : DiffUtil.ItemCallback<Track>() {
     override fun areItemsTheSame(oldItem: Track, newItem: Track) = oldItem.id == newItem.id
     override fun areContentsTheSame(oldItem: Track, newItem: Track) = oldItem == newItem
@@ -916,7 +1038,6 @@ private fun makeAlbumHeader(context: Context, hybrid: Boolean): LinearLayout {
     }
     val text = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f) }
     text.addView(TextView(context).apply { this.text = "Álbumes"; setTextColor(Color.rgb(241,234,217)); textSize = if (hybrid) 24f else 28f; setTypeface(typeface, android.graphics.Typeface.BOLD) })
-    text.addView(TextView(context).apply { this.text = "Tus colecciones de canciones descargadas"; setTextColor(Color.rgb(179,169,146)); textSize = if (hybrid) 12f else 14f })
     root.addView(text)
     root.addView(ImageButton(context).apply {
         tag = "addAlbum"; background = null; setImageResource(android.R.drawable.ic_input_add); setColorFilter(Color.rgb(241,234,217));
