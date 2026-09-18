@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 import json
+import re
 import sqlite3
 import time
 import uuid
@@ -46,6 +47,48 @@ class Database:
             for name in ("source", "source_id", "url", "cover"):
                 if name not in columns:
                     db.execute(f"ALTER TABLE collections ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+            track_columns = {row[1] for row in db.execute("PRAGMA table_info(tracks)")}
+            for name, declaration in (
+                ("title", "TEXT NOT NULL DEFAULT ''"),
+                ("artist", "TEXT NOT NULL DEFAULT ''"),
+                ("album", "TEXT NOT NULL DEFAULT ''"),
+                ("path", "TEXT NOT NULL DEFAULT ''"),
+            ):
+                if name not in track_columns:
+                    db.execute(f"ALTER TABLE tracks ADD COLUMN {name} {declaration}")
+            # These columns let SQLite filter large libraries before Python
+            # deserializes the comparatively expensive JSON payloads.
+            for row in db.execute("SELECT id,payload FROM tracks WHERE title='' AND artist='' AND album='' AND path='' "):
+                track = Track.from_dict(json.loads(row["payload"]))
+                db.execute("UPDATE tracks SET title=?,artist=?,album=?,path=? WHERE id=?",
+                           (track.title, track.artist, track.album, track.path, track.id))
+            db.executescript("""
+                CREATE INDEX IF NOT EXISTS tracks_path ON tracks(path);
+                CREATE INDEX IF NOT EXISTS tracks_artist ON tracks(artist COLLATE NOCASE);
+                CREATE INDEX IF NOT EXISTS tracks_album ON tracks(album COLLATE NOCASE);
+                CREATE VIRTUAL TABLE IF NOT EXISTS track_search USING fts5(
+                    id UNINDEXED, title, artist, album,
+                    tokenize='unicode61 remove_diacritics 2');
+                CREATE TRIGGER IF NOT EXISTS track_search_insert AFTER INSERT ON tracks BEGIN
+                    INSERT INTO track_search(id,title,artist,album)
+                    VALUES (new.id,new.title,new.artist,new.album);
+                END;
+                CREATE TRIGGER IF NOT EXISTS track_search_update AFTER UPDATE OF title,artist,album ON tracks BEGIN
+                    DELETE FROM track_search WHERE id=old.id;
+                    INSERT INTO track_search(id,title,artist,album)
+                    VALUES (new.id,new.title,new.artist,new.album);
+                END;
+                CREATE TRIGGER IF NOT EXISTS track_search_delete AFTER DELETE ON tracks BEGIN
+                    DELETE FROM track_search WHERE id=old.id;
+                END;
+                CREATE TABLE IF NOT EXISTS scanned_files (
+                    path TEXT PRIMARY KEY, track_id TEXT NOT NULL,
+                    size INTEGER NOT NULL, modified_ns INTEGER NOT NULL);
+                CREATE INDEX IF NOT EXISTS scanned_files_track ON scanned_files(track_id);
+            """)
+            db.execute("""INSERT INTO track_search(id,title,artist,album)
+                SELECT t.id,t.title,t.artist,t.album FROM tracks t
+                WHERE NOT EXISTS (SELECT 1 FROM track_search s WHERE s.id=t.id)""")
             db.execute("UPDATE downloads SET status='interrupted' WHERE status IN ('queued','downloading')")
 
     @contextmanager
@@ -71,10 +114,12 @@ class Database:
                 track = replace(track, path=old.path)
             if not track.cover and old.cover:
                 track = replace(track, cover=old.cover)
-        db.execute("""INSERT INTO tracks(id,payload,added) VALUES (?,?,?)
-            ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,
+        db.execute("""INSERT INTO tracks(id,payload,added,title,artist,album,path) VALUES (?,?,?,?,?,?,?)
+            ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,title=excluded.title,
+            artist=excluded.artist,album=excluded.album,path=excluded.path,
             removed=CASE WHEN ? THEN 0 ELSE tracks.removed END""",
-                   (track.id, json.dumps(track.to_dict()), added or time.time(), restore))
+                   (track.id, json.dumps(track.to_dict()), added or time.time(), track.title,
+                    track.artist, track.album, track.path, restore))
         return track
 
     def save_track(self, track, restore=False):
@@ -120,35 +165,101 @@ class Database:
                 return resolved
         return stored or track
 
-    def library_tracks(self, query="", recent=False, favorites=False):
+    def library_tracks(self, query="", recent=False, favorites=False, availability=None,
+                       artist="", album=""):
         """Only completed local audio belongs in the user's offline library."""
         records = {r['track_id']:r for r in self.downloads() if r['status']=='complete'}
         result=[]
-        for item in self.tracks(query, recent=recent, favorites=favorites):
-            if item.path and Path(item.path).is_file():
+        available = availability if availability is not None else {}
+        for item in self.tracks(query, recent=recent, favorites=favorites, artist=artist, album=album):
+            local = available.setdefault(item.id, bool(item.path and Path(item.path).is_file()))
+            if local:
                 result.append(item)
             elif item.id in records:
                 saved=Track.from_dict(json.loads(records[item.id]['payload']))
                 if saved.path and Path(saved.path).is_file():
-                    result.append(self.save_track(replace(item,path=saved.path,duration=saved.duration)))
+                    restored = self.save_track(replace(item,path=saved.path,duration=saved.duration))
+                    available[item.id] = True
+                    result.append(restored)
         return result
 
-    def tracks(self, query="", favorites=False, collection=None, recent=False, include_removed=False):
+    @staticmethod
+    def _search_expression(query):
+        words = re.findall(r"[^\W_]+", query, flags=re.UNICODE)
+        return " AND ".join('"' + word.replace('"', '""') + '"*' for word in words)
+
+    def tracks(self, query="", favorites=False, collection=None, recent=False,
+               include_removed=False, artist="", album=""):
+        search = self._search_expression(query)
+        if query.strip() and not search:
+            return []
         with self.connect() as db:
             if collection:
-                rows = db.execute("""SELECT t.payload FROM members m JOIN tracks t ON t.id=m.track_id
-                    WHERE m.collection_id=? AND t.removed=0 ORDER BY m.position""", (collection,)).fetchall()
+                sql = """SELECT t.payload FROM members m JOIN tracks t ON t.id=m.track_id
+                    WHERE m.collection_id=? AND t.removed=0"""
+                values = [collection]
+                if search:
+                    sql += " AND t.id IN (SELECT id FROM track_search WHERE track_search MATCH ?)"
+                    values.append(search)
+                rows = db.execute(sql + " ORDER BY m.position", values).fetchall()
             elif recent:
-                rows = db.execute("""SELECT t.payload FROM tracks t JOIN history h ON h.track_id=t.id
-                    WHERE t.removed=0 GROUP BY t.id ORDER BY MAX(h.played) DESC LIMIT 50""").fetchall()
+                sql = """SELECT t.payload FROM tracks t JOIN history h ON h.track_id=t.id
+                    WHERE t.removed=0"""
+                values = []
+                if search:
+                    sql += " AND t.id IN (SELECT id FROM track_search WHERE track_search MATCH ?)"
+                    values.append(search)
+                rows = db.execute(sql + " GROUP BY t.id ORDER BY MAX(h.played) DESC LIMIT 50", values).fetchall()
             else:
                 sql = "SELECT payload FROM tracks WHERE 1" if include_removed else "SELECT payload FROM tracks WHERE removed=0"
+                values = []
                 if favorites:
                     sql += " AND id IN (SELECT track_id FROM favorites)"
-                rows = db.execute(sql + " ORDER BY added DESC").fetchall()
-        result = [Track.from_dict(json.loads(r[0])) for r in rows]
-        words = query.casefold().split()
-        return [t for t in result if all(w in f"{t.title} {t.artist} {t.album}".casefold() for w in words)]
+                if search:
+                    sql += " AND id IN (SELECT id FROM track_search WHERE track_search MATCH ?)"
+                    values.append(search)
+                if artist:
+                    sql += " AND artist=? COLLATE NOCASE"
+                    values.append(artist)
+                if album:
+                    sql += " AND album=? COLLATE NOCASE"
+                    values.append(album)
+                rows = db.execute(sql + " ORDER BY added DESC", values).fetchall()
+        return [Track.from_dict(json.loads(r[0])) for r in rows]
+
+    def library_facets(self, favorites=False):
+        clause = "removed=0"
+        if favorites:
+            clause += " AND id IN (SELECT track_id FROM favorites)"
+        with self.connect() as db:
+            artists = [r[0] for r in db.execute(
+                f"SELECT DISTINCT artist FROM tracks WHERE {clause} AND path<>'' ORDER BY artist COLLATE NOCASE")]
+            albums = [r[0] for r in db.execute(
+                f"SELECT DISTINCT album FROM tracks WHERE {clause} AND path<>'' ORDER BY album COLLATE NOCASE")]
+        return artists, albums
+
+    def scanned_files(self):
+        """Return prior scan signatures and tracks in one read transaction."""
+        with self.connect() as db:
+            rows = db.execute("""SELECT t.payload,t.removed,s.path,s.size,s.modified_ns
+                FROM scanned_files s JOIN tracks t ON t.id=s.track_id""").fetchall()
+            known = {r["path"]: (Track.from_dict(json.loads(r["payload"])), r["size"],
+                                  r["modified_ns"], bool(r["removed"])) for r in rows}
+            # Tracks created before scan signatures were introduced are read once.
+            legacy = db.execute("""SELECT payload,path,removed FROM tracks
+                WHERE path<>'' AND path NOT IN (SELECT path FROM scanned_files)""").fetchall()
+        for row in legacy:
+            known[row["path"]] = (Track.from_dict(json.loads(row["payload"])), None, None,
+                                  bool(row["removed"]))
+        return known
+
+    def save_scanned_track(self, track, size, modified_ns, restore=False):
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            track = self._save_track_row(db, track, restore)
+            db.execute("INSERT OR REPLACE INTO scanned_files VALUES (?,?,?,?)",
+                       (track.path, track.id, size, modified_ns))
+        return track
 
     def remove_track(self, track_id):
         with self.connect() as db:
@@ -201,6 +312,8 @@ class Database:
             if track.id not in seen:
                 unique.append(track)
                 seen.add(track.id)
+        if not cover:
+            cover = next((track.cover for track in unique if getattr(track, "cover", "")), "")
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             db.execute("UPDATE collections SET title=?,source=?,source_id=?,url=?,cover=? WHERE id=?",
@@ -229,6 +342,15 @@ class Database:
         with self.connect() as db:
             db.execute("""INSERT OR IGNORE INTO members VALUES (?,?,
                 (SELECT COALESCE(MAX(position),-1)+1 FROM members WHERE collection_id=?))""", (key, track.id, key))
+            if track.cover:
+                db.execute("UPDATE collections SET cover=? WHERE id=? AND (cover='' OR cover IS NULL)",
+                           (track.cover, key))
+
+    def set_collection_cover(self, key, cover):
+        if not cover:
+            return
+        with self.connect() as db:
+            db.execute("UPDATE collections SET cover=? WHERE id=?", (cover, key))
 
     def remove_member(self, key, track_id):
         with self.connect() as db:

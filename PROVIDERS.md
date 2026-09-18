@@ -1,8 +1,8 @@
 # Providers
 
-## Linux 0.6.0
+## Linux / Windows 0.8.0
 
-La versión Linux usa `linux/musicvault/services.py`: Deezer, iTunes y MusicBrainz para metadatos; búsqueda explícita de YouTube mediante yt-dlp; LRCLib para letras. Las operaciones se ejecutan fuera del hilo de la interfaz.
+Las versiones de escritorio usan `linux/musicvault/services.py` y `windows/musicvault/services.py`: Deezer, iTunes y MusicBrainz para metadatos; búsqueda explícita de YouTube mediante yt-dlp; LRCLib para letras. Las operaciones se ejecutan fuera del hilo de la interfaz.
 
 El proveedor de descarga recibe un `Track`, la carpeta destino, una señal de cancelación y una función de progreso. Ejecuta yt-dlp/FFmpeg como procesos con argumentos separados, valida el audio en un directorio temporal y publica el archivo al terminar. Devuelve un `Track` con ruta local absoluta. Las solicitudes duplicadas comparten trabajo y pueden tener varios consumidores.
 

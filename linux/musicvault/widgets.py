@@ -91,6 +91,9 @@ def icon(name, color="#F1EAD9", size=24):
         p.drawLine(12, 5, 12, 19); p.drawLine(5, 12, 19, 12)
     elif name == "close":
         p.drawLine(6, 6, 18, 18); p.drawLine(6, 18, 18, 6)
+    elif name == "trash":
+        p.drawRoundedRect(QRectF(7, 8, 10, 12), 1.5, 1.5)
+        p.drawLine(5, 7, 19, 7); p.drawLine(9, 4, 15, 4); p.drawLine(10, 11, 10, 17); p.drawLine(14, 11, 14, 17)
     elif name == "fullscreen":
         for x, y, dx, dy in ((4,4,5,5),(20,4,-5,5),(4,20,5,-5),(20,20,-5,-5)):
             p.drawLine(x,y,x+dx,y); p.drawLine(x,y,x,y+dy)
@@ -150,11 +153,14 @@ QPushButton#chip { background: #1E1B18; border: 1px solid #322C25; border-radius
 QPushButton#chip:checked { background: #3A2E1D; color: #E0A458; border-color: #E0A458; }
 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox { background: #211e1a; border: 1px solid #40382d; border-radius: 6px; padding: 9px; selection-background-color: #8c622e; }
 QLineEdit:focus { border-color: #e0a458; }
-QTableView, QListWidget, QTextBrowser { background: transparent; border: none; alternate-background-color: #121110; }
-QTableView::item, QListWidget::item { padding: 8px; border: none; }
-QTableView::item:selected, QListWidget::item:selected { background: #493520; color: #ffe2b9; }
+QTableView, QListWidget, QListView, QTextBrowser { background: transparent; border: none; alternate-background-color: #121110; }
+QTableView::item, QListWidget::item, QListView::item { padding: 8px; border: none; }
+QTableView::item:selected, QListWidget::item:selected, QListView::item:selected { background: #493520; color: #ffe2b9; }
 QHeaderView::section { background: transparent; color: #B3A992; border: none; border-right: 1px solid #2F2923; border-bottom: 1px solid #3A332B; padding: 8px 6px; font-size: 11px; font-weight: 500; }
 QFrame#filterBar { background: #1D1A17; border: 1px solid #382F26; border-radius: 8px; }
+QFrame#searchTabs { background: #1A1715; border: 1px solid #382F26; border-radius: 9px; }
+QFrame#searchTabs QPushButton { border: none; border-radius: 7px; background: transparent; color: #9B9284; padding: 8px 18px; }
+QFrame#searchTabs QPushButton:checked { background: #3A2E1D; color: #F1EAD9; }
 QTableView::item:hover { background: #2C2721; }
 QSlider::groove:horizontal { height: 5px; background: #4a3c2b; border-radius: 2px; }
 QSlider::sub-page:horizontal { background: #e0a458; border-radius: 2px; }
@@ -221,6 +227,54 @@ class TrackDelegate(QStyledItemDelegate):
             painter.setPen(QColor("#B3A992"))
             painter.drawText(QRectF(x, y+31, width, 19), Qt.AlignmentFlag.AlignVCenter,
                              painter.fontMetrics().elidedText(index.siblingAtColumn(2).data() or "", Qt.TextElideMode.ElideRight, width))
+        painter.restore()
+
+
+class StatusDelegate(QStyledItemDelegate):
+    """Text status plus the same thin download bar used across the app."""
+    def paint(self, painter, option, index):
+        painter.save()
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.fillRect(option.rect, QColor("#493520"))
+        elif option.state & QStyle.StateFlag.State_MouseOver:
+            painter.fillRect(option.rect, QColor("#2C2721"))
+        model = index.model()
+        downloading_role = getattr(model, "DOWNLOADING_ROLE", int(Qt.ItemDataRole.UserRole) + 21)
+        progress_role = getattr(model, "DOWNLOAD_PROGRESS_ROLE", int(Qt.ItemDataRole.UserRole) + 20)
+        downloading = bool(index.data(downloading_role))
+        progress = max(0, min(100, int(index.data(progress_role) or 0)))
+        text_rect = QRectF(option.rect.x() + 8, option.rect.y() + 7, max(0, option.rect.width() - 16), option.rect.height() - 16)
+        painter.setFont(QFont("Inter", 9))
+        painter.setPen(index.data(Qt.ItemDataRole.ForegroundRole) or QColor("#B3A992"))
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, index.data() or "")
+        if downloading:
+            x = option.rect.x() + 8
+            y = option.rect.bottom() - 6
+            width = max(0, option.rect.width() - 16)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#3A332B"))
+            painter.drawRoundedRect(QRectF(x, y, width, 3), 1.5, 1.5)
+            painter.setBrush(QColor("#E0A458"))
+            painter.drawRoundedRect(QRectF(x, y, width * (progress / 100.0), 3), 1.5, 1.5)
+        painter.restore()
+
+
+class DownloadItemDelegate(QStyledItemDelegate):
+    """Adds a thin determinate bar to active download rows."""
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        record = index.data(Qt.ItemDataRole.UserRole) or {}
+        if record.get("status") not in ("queued", "downloading"):
+            return
+        progress = max(0, min(100, int(record.get("progress", 0) or 0)))
+        painter.save()
+        x, y = option.rect.x() + 44, option.rect.bottom() - 5
+        width = max(0, option.rect.width() - 56)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#3A332B"))
+        painter.drawRoundedRect(QRectF(x, y, width, 3), 1.5, 1.5)
+        painter.setBrush(QColor("#E0A458"))
+        painter.drawRoundedRect(QRectF(x, y, width * progress / 100.0, 3), 1.5, 1.5)
         painter.restore()
 
 

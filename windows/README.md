@@ -1,6 +1,6 @@
 # MusicVault portable para Windows x64
 
-Adaptación de la versión Linux 0.7.1. Conserva sus pantallas, colores, fuentes y recursos Qt, biblioteca, favoritos, playlists, búsqueda, descargas, Spotify/SongMirror, letras, cola, ecualizador, crossfade, temporizador, mini reproductor y bandeja.
+Adaptación de la versión Linux 0.8.0, sincronizada con las mejoras de experiencia de Android. Conserva sus pantallas, colores, fuentes y recursos Qt, biblioteca, favoritos, playlists, búsqueda, descargas, Spotify/SongMirror, letras, cola, ecualizador, crossfade, temporizador, mini reproductor y bandeja.
 
 ## Abrir
 

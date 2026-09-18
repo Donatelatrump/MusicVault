@@ -13,11 +13,11 @@ BEGIN
   BEGIN
    VALUE "CompanyName", "MusicVault\0"
    VALUE "FileDescription", "MusicVault portable launcher\0"
-   VALUE "FileVersion", "0.7.1.0\0"
+   VALUE "FileVersion", "0.8.0.0\0"
    VALUE "InternalName", "MusicVault\0"
    VALUE "OriginalFilename", "MusicVault.exe\0"
    VALUE "ProductName", "MusicVault\0"
-   VALUE "ProductVersion", "0.7.1\0"
+   VALUE "ProductVersion", "0.8.0\0"
   END
  END
  BLOCK "VarFileInfo"

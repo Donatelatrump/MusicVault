@@ -9,12 +9,15 @@ from .models import clock_text
 
 
 class TrackModel(QAbstractTableModel):
+    DOWNLOAD_PROGRESS_ROLE = int(Qt.ItemDataRole.UserRole) + 20
+    DOWNLOADING_ROLE = int(Qt.ItemDataRole.UserRole) + 21
     headers = ("#", "Título", "Artista", "Álbum", "Duración", "Estado")
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.page_scroll = None
         self.tracks, self.rows, self.states = [], {}, {}
+        self.progress_values, self.downloading = {}, set()
         self.current_id = None
         self.covers = OrderedDict()
 
@@ -51,6 +54,10 @@ class TrackModel(QAbstractTableModel):
             return f"{track.title}\n{track.artist} · {track.album}"
         if role == Qt.ItemDataRole.TextAlignmentRole and column in (0, 4):
             return Qt.AlignmentFlag.AlignCenter
+        if column == 5 and role == self.DOWNLOAD_PROGRESS_ROLE:
+            return self.progress_values.get(track.id, 0)
+        if column == 5 and role == self.DOWNLOADING_ROLE:
+            return track.id in self.downloading
 
     def set_tracks(self, tracks, records, active_downloads, current_id, availability=None):
         same_order = [t.id for t in tracks] == [t.id for t in self.tracks]
@@ -60,9 +67,12 @@ class TrackModel(QAbstractTableModel):
         self.current_id = current_id
         self.rows = {track.id: row for row, track in enumerate(tracks)}
         self.states = {}
+        self.progress_values = {}
+        self.downloading = set(active_downloads)
         availability = availability or {}
         for track in tracks:
             record = records.get(track.id, {})
+            self.progress_values[track.id] = int(record.get("progress", 0) or 0)
             local = availability.get(track.id, False)
             failed = record.get("status") in ("error", "cancelled", "interrupted")
             state = ("En tu biblioteca" if local else
@@ -85,6 +95,8 @@ class TrackModel(QAbstractTableModel):
         row = self.rows.get(track_id)
         if row is not None:
             self.states[track_id] = (f"{value}% · descargando", "#E0A458", "")
+            self.progress_values[track_id] = int(value)
+            self.downloading.add(track_id)
             self.dataChanged.emit(self.index(row, 5), self.index(row, 5))
 
     def set_cover(self, source, path):
@@ -111,6 +123,7 @@ class TrackTable(QTableView):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.outer_scroll = None
         self.cover_timer = QTimer(self)
         self.cover_timer.setSingleShot(True)
         self.cover_timer.setInterval(60)
@@ -153,7 +166,15 @@ class TrackTable(QTableView):
                 bar.setValue(bar.value() - delta)
             event.accept()
             return
+        own = self.verticalScrollBar()
+        before = own.value()
         super().wheelEvent(event)
+        if own.value() != before or not self.outer_scroll:
+            return
+        delta = event.pixelDelta().y() or event.angleDelta().y()
+        if delta:
+            outer = self.outer_scroll.verticalScrollBar()
+            outer.setValue(outer.value() - delta)
 
     def scrollToBottom(self):
         if self.page_scroll:

@@ -1,4 +1,5 @@
 """Network providers and cancelable downloads; run through Jobs, off the UI thread."""
+from collections import OrderedDict
 from dataclasses import replace
 from pathlib import Path
 import json
@@ -21,7 +22,7 @@ from .downloader import downloader_command, youtube_arguments, explain_download_
 from .models import Track, data_dir, parse_lrc, stable_id
 from .songmirror import import_spotify_playlist, import_spotify_track
 
-USER_AGENT = "MusicVault/0.6.0 (Windows desktop music library)"
+USER_AGENT = "MusicVault/0.8.0 (Windows desktop music library)"
 MUSICBRAINZ_LOCK = threading.Lock()
 MUSICBRAINZ_LAST = 0.0
 
@@ -30,7 +31,7 @@ def get_bytes(url, maximum=12 * 1024 * 1024):
     if not url.startswith("https://"):
         raise ValueError("El proveedor requiere HTTPS.")
     request = Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json,image/*"})
-    with urlopen(request, timeout=15) as response:
+    with urlopen(request, timeout=8) as response:
         body = response.read(maximum + 1)
         if len(body) > maximum:
             raise ValueError("La respuesta del proveedor excede el tamaño permitido.")
@@ -119,52 +120,44 @@ def itunes_track(item):
 class Catalog:
     def __init__(self, db):
         self.db = db
+        self._album_memory = OrderedDict()
 
-    def search(self, query, source="catalog", cancel=None):
-        key = "search:" + ("youtube:" if source == "youtube" else "") + query.casefold().strip()
+    def search_tracks(self, query, source="catalog", cancel=None):
+        query = query.strip()
+        key = "search:tracks:" + ("youtube:" if source == "youtube" else "") + query.casefold()
         cached = self.db.cache_get(key)
         if cached is not None:
             return cached
         if source == "youtube":
             try:
-                result = {"tracks": [t.to_dict() for t in youtube_search(query, cancel)], "albums": []}
+                result = [t.to_dict() for t in youtube_search(query, cancel)]
                 self.db.cache_put(key, result)
                 return result
             except Exception:
                 stale = self.db.cache_get(key, ttl=None)
                 if stale is not None:
-                    return {**stale, "notice": "Sin conexión: resultados guardados."}
+                    return stale
                 raise
-        errors, tracks, albums = [], [], []
+        errors, tracks = [], []
         try:
             rows = get_json("https://api.deezer.com/search", q=query, limit=40)
             tracks = [t.to_dict() for t in map(deezer_track, rows.get("data", []))]
-            if cancel and cancel.is_set():
-                return {"tracks": [], "albums": []}
-            rows = get_json("https://api.deezer.com/search/album", q=query, limit=12)
-            albums = [{"id": str(a["id"]), "title": a["title"], "artist": a["artist"]["name"],
-                       "cover": a.get("cover_medium", ""), "source": "deezer"} for a in rows.get("data", [])]
         except Exception as exc:
             errors.append(f"Deezer: {exc}")
         if cancel and cancel.is_set():
-            return {"tracks": [], "albums": []}
+            return []
+        # A healthy Deezer page is published immediately. Slower providers are
+        # fallbacks only, mirroring the Android fast-search path.
         if not tracks:
             try:
                 rows = get_json("https://itunes.apple.com/search", term=query, entity="song", limit=40)
                 tracks = [itunes_track(t).to_dict() for t in rows.get("results", []) if "trackId" in t]
-                unique = {}
-                for t in rows.get("results", []):
-                    if "collectionId" in t:
-                        unique[t["collectionId"]] = {"id": str(t["collectionId"]), "title": t.get("collectionName", ""),
-                            "artist": t.get("artistName", ""), "cover": t.get("artworkUrl100", ""), "source": "itunes"}
-                albums = list(unique.values())[:12]
             except Exception as exc:
                 errors.append(f"iTunes: {exc}")
         if cancel and cancel.is_set():
-            return {"tracks": [], "albums": []}
+            return []
         if not tracks:
             try:
-                # MusicBrainz is a metadata fallback. One request per search; UI debounces submissions.
                 rows = get_json("https://musicbrainz.org/ws/2/recording/", query=query, fmt="json", limit=25)
                 for row in rows.get("recordings", []):
                     releases = row.get("releases", [])
@@ -178,17 +171,76 @@ class Catalog:
         if not tracks and errors:
             stale = self.db.cache_get(key, ttl=None)
             if stale is not None:
+                return stale
+            raise RuntimeError("No se pudo consultar canciones. " + " · ".join(errors))
+        self.db.cache_put(key, tracks)
+        return tracks
+
+    def search_albums(self, query, cancel=None):
+        query = query.strip()
+        key = "search:albums:" + query.casefold()
+        cached = self.db.cache_get(key)
+        if cached is not None:
+            return cached
+        errors, albums = [], []
+        try:
+            rows = get_json("https://api.deezer.com/search/album", q=query, limit=18)
+            albums = [{"id": str(a["id"]), "title": a["title"], "artist": a["artist"]["name"],
+                       "cover": a.get("cover_medium", ""), "source": "deezer"} for a in rows.get("data", [])]
+        except Exception as exc:
+            errors.append(f"Deezer: {exc}")
+        if cancel and cancel.is_set():
+            return []
+        if not albums:
+            try:
+                rows = get_json("https://itunes.apple.com/search", term=query, entity="album", limit=18)
+                albums = [{"id": str(a["collectionId"]), "title": a.get("collectionName", ""),
+                           "artist": a.get("artistName", ""),
+                           "cover": a.get("artworkUrl100", "").replace("100x100", "600x600"),
+                           "source": "itunes"}
+                          for a in rows.get("results", []) if "collectionId" in a]
+            except Exception as exc:
+                errors.append(f"iTunes: {exc}")
+        if not albums and errors:
+            stale = self.db.cache_get(key, ttl=None)
+            if stale is not None:
+                return stale
+        self.db.cache_put(key, albums)
+        return albums
+
+    def search(self, query, source="catalog", cancel=None):
+        """Compatibility wrapper; the UI uses independent track/album jobs."""
+        legacy_key = "search:" + ("youtube:" if source == "youtube" else "") + query.casefold().strip()
+        cached = self.db.cache_get(legacy_key)
+        if cached is not None:
+            return cached
+        try:
+            tracks = self.search_tracks(query, source, cancel)
+            if cancel and cancel.is_set():
+                return {"tracks": [], "albums": []}
+            albums = [] if source == "youtube" else self.search_albums(query, cancel)
+            result = {"tracks": tracks, "albums": albums}
+            self.db.cache_put(legacy_key, result)
+            return result
+        except Exception:
+            stale = self.db.cache_get(legacy_key, ttl=None)
+            if stale is not None:
                 return {**stale, "notice": "Sin conexión: resultados guardados."}
-            raise RuntimeError("No se pudo consultar el catálogo. " + " · ".join(errors))
-        result = {"tracks": tracks, "albums": albums}
-        self.db.cache_put(key, result)
-        return result
+            raise
 
     def album_tracks(self, album):
         key = f"album:{album['source']}:{album['id']}"
+        if key in self._album_memory:
+            tracks = self._album_memory.pop(key)
+            self._album_memory[key] = tracks
+            return list(tracks)
         cached = self.db.cache_get(key, 86400)
         if cached is not None:
-            return [Track.from_dict(t) for t in cached]
+            tracks = tuple(Track.from_dict(t) for t in cached)
+            self._album_memory[key] = tracks
+            while len(self._album_memory) > 12:
+                self._album_memory.popitem(last=False)
+            return list(tracks)
         if album["source"] == "deezer":
             detail = get_json("https://api.deezer.com/album/" + album["id"])
             tracks = [deezer_track(t, detail) for t in detail.get("tracks", {}).get("data", [])]
@@ -198,6 +250,9 @@ class Catalog:
         if not tracks:
             raise RuntimeError("El proveedor no devolvió canciones para este álbum.")
         self.db.cache_put(key, [t.to_dict() for t in tracks])
+        self._album_memory[key] = tuple(tracks)
+        while len(self._album_memory) > 12:
+            self._album_memory.popitem(last=False)
         return tracks
 
     def spotify_playlist(self, url, progress=None):

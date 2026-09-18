@@ -1,3 +1,11 @@
+# Verificación de la sincronización 0.8.0 — 2026-09-18
+
+- `python -m compileall` completó sin errores para `windows/musicvault`, empaquetado, pruebas y `launch.py`.
+- Smoke SQLite desde esquema antiguo: migración de columnas/FTS5, búsqueda, portada automática y lectura de biblioteca verificados usando el código Windows.
+- Smoke de catálogo con proveedores simulados: búsqueda de canciones/álbumes y detalle Deezer con `tracks.data` verificados.
+- El lanzador `MusicVault.exe` incluido sigue siendo el lanzador nativo x64 del proyecto y se actualizó su metadata textual de 0.7.1 a 0.8.0; para una reconstrucción reproducible completa se debe ejecutar `packaging/build_launcher.py` con MinGW-w64 en una máquina que lo tenga instalado.
+- No se pudo repetir aquí la suite Qt/Wine porque este contenedor no incluye PyQt6, Wine ni MinGW. Las comprobaciones Windows 0.7.x documentadas abajo se conservan como historial de la base portable.
+
 # Verificación de la adaptación Windows
 
 - Se conserva el código de pantallas y widgets de Linux 0.7.1, sus fuentes y recursos gráficos. Solo se adaptan textos de plataforma en window.py.

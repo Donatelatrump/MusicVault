@@ -1,3 +1,15 @@
+# MusicVault 0.8.0 — paridad Android en Linux y Windows
+
+- Onboarding Géneros → Artistas con catálogo local y lista virtualizada.
+- Recomendaciones por artistas elegidos, intercaladas round-robin y cacheadas.
+- Pantalla opaca de preparación hasta que Inicio tiene datos y primeras portadas.
+- Buscar separa Canciones/Álbumes y publica cada tipo de resultado independientemente.
+- Playlist picker con búsqueda local, selección persistente al filtrar, portada automática y eliminación mediante bote de basura.
+- Detalle de álbum acotado a un viewport nativo, caché LRU de 12 álbumes y descarte de respuestas viejas.
+- Descargas con barra lineal delgada unificada.
+- Linux adopta además el índice FTS5 y las firmas de escaneo que Windows ya utilizaba para bibliotecas grandes.
+- Las bases de datos existentes se migran in-place añadiendo columnas/índices auxiliares; no se eliminan pistas, playlists, favoritos, historial ni descargas.
+
 # MusicVault 0.7.1 — Errores de conexión
 
 Avisos DNS legibles, reintento desde el aviso y detalles técnicos expandibles. Se traducen también los errores de descarga guardados por versiones anteriores. Descarga y reproducción local verificadas con un clip público de prueba fuera del sandbox. Paquetes actualizados en `linux/dist/`.

@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QFrame, QLineEdi
                             QHeaderView, QSlider, QScrollArea, QDialog, QPushButton, QGridLayout, QProgressBar,
                             QSizePolicy)
 
-from .widgets import Cover, Record, TrackDelegate, icon
+from .widgets import Cover, Record, TrackDelegate, StatusDelegate, DownloadItemDelegate, icon
 from .track_model import TrackModel, TrackTable
 
 
@@ -135,6 +135,22 @@ def build_window(self):
     header.addWidget(self.library_badge)
     header.addWidget(icon_button("plus", "Importar música", self.import_dialog))
     layout.addLayout(header)
+    self.search_tabs = QFrame()
+    self.search_tabs.setObjectName("searchTabs")
+    tabs_layout = QHBoxLayout(self.search_tabs)
+    tabs_layout.setContentsMargins(3, 3, 3, 3)
+    tabs_layout.setSpacing(2)
+    self.search_tracks_tab = QPushButton("Canciones")
+    self.search_albums_tab = QPushButton("Álbumes")
+    for tab in (self.search_tracks_tab, self.search_albums_tab):
+        tab.setCheckable(True)
+        tabs_layout.addWidget(tab)
+    tabs_layout.addStretch()
+    self.search_tracks_tab.clicked.connect(lambda: self.set_search_mode("tracks"))
+    self.search_albums_tab.clicked.connect(lambda: self.set_search_mode("albums"))
+    self.search_tracks_tab.setChecked(True)
+    self.search_tabs.hide()
+    layout.addWidget(self.search_tabs, 0, Qt.AlignmentFlag.AlignLeft)
     self.debounce = QTimer(self)
     self.debounce.setSingleShot(True)
     self.debounce.setInterval(600)
@@ -192,14 +208,16 @@ def build_window(self):
     self.new_collection_button = button("Crear colección", self.create_collection)
     self.download_all_button = button("Descargar playlist", self.download_all)
     self.rescan_button = icon_button("refresh", "Actualizar carpetas", self.rescan)
-    self.collection_menu_button = button("Editar colección", self.collection_options)
+    self.collection_menu_button = button("Cambiar nombre", self.collection_options)
+    self.collection_delete_button = icon_button("trash", "Eliminar playlist", self.delete_current_collection, 36)
+    self.collection_delete_button.setIcon(icon("trash", "#F1EAD9", 20))
     self.retry_download_button = button("Reintentar selección", self.retry_selected_download)
     self.cancel_download_button = button("Cancelar selección", self.cancel_selected_download)
     self.favorites_filter = button("Favoritos", lambda: self.show_route("Favoritos"))
     self.favorites_filter.setObjectName("chip")
     self.favorites_filter.setIcon(icon("heart", "#C96A5E", 18))
     for item in (self.play_all_button, self.new_collection_button, self.download_all_button, self.rescan_button,
-                 self.collection_menu_button, self.retry_download_button, self.cancel_download_button, self.favorites_filter):
+                 self.collection_menu_button, self.collection_delete_button, self.retry_download_button, self.cancel_download_button, self.favorites_filter):
         actions.addWidget(item)
     actions.addStretch()
     self.count = label("", "mono")
@@ -270,6 +288,9 @@ def build_window(self):
     scroll.setWidget(self.home_cards)
     shelf.addWidget(scroll)
     track_layout.addWidget(self.home_shelf)
+    self.album_section_title = label("Álbumes", "section")
+    self.album_section_title.hide()
+    track_layout.addWidget(self.album_section_title)
     self.album_list = QListWidget()
     # The shelf lives inside the page scroll area, so it can keep a stable card
     # height. Compression made delayed icons inherit a short text-only row.
@@ -315,6 +336,7 @@ def build_window(self):
     self.table.setMouseTracking(True)
     self.table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
     self.table.setItemDelegateForColumn(1, TrackDelegate(self.table))
+    self.table.setItemDelegateForColumn(5, StatusDelegate(self.table))
     self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
     self.table.customContextMenuRequested.connect(self.track_menu)
     self.table.doubleClicked.connect(lambda index: self.play_row(index.row()) if index.column() != 0 else None)
@@ -346,8 +368,10 @@ def build_window(self):
         lambda section, old, new: self.column_save_timer.start() if section in (1, 2, 3) else None
     )
     self.table.visible_rows_changed.connect(self.load_visible_covers)
-    self.table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-    self.table.page_scroll = self.main_scroll
+    self.table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    self.table.setMinimumHeight(320)
+    self.table.page_scroll = None
+    self.table.outer_scroll = self.main_scroll
     self.main_scroll.verticalScrollBar().valueChanged.connect(self.table.schedule_covers)
     track_layout.addWidget(self.table)
     self.stack.addWidget(self.track_page)
@@ -363,6 +387,9 @@ def build_window(self):
     self.collections_list.customContextMenuRequested.connect(self.collection_list_menu)
     self.stack.addWidget(self.collections_list)
     self.downloads_list = QListWidget()
+    self.downloads_list.setItemDelegate(DownloadItemDelegate(self.downloads_list))
+    self.downloads_list.setUniformItemSizes(True)
+    self.downloads_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
     self.downloads_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
     self.downloads_list.customContextMenuRequested.connect(self.download_menu)
     self.stack.addWidget(self.downloads_list)

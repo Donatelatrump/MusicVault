@@ -16,7 +16,7 @@ with tempfile.TemporaryDirectory(prefix='musicvault-launcher-') as directory:
                                 capture_output=True, text=True, timeout=120)
         assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
         return result.stdout
-    assert '0.7.1' in run('--version')
+    assert '0.8.0' in run('--version')
     checks = json.loads(run('--doctor'))
     assert all(checks.values()), checks
     data = 'Z:' + directory.replace('/', '\\') + '\\Biblioteca con acentos á'

@@ -312,6 +312,8 @@ class Database:
             if track.id not in seen:
                 unique.append(track)
                 seen.add(track.id)
+        if not cover:
+            cover = next((track.cover for track in unique if getattr(track, "cover", "")), "")
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             db.execute("UPDATE collections SET title=?,source=?,source_id=?,url=?,cover=? WHERE id=?",
@@ -340,6 +342,15 @@ class Database:
         with self.connect() as db:
             db.execute("""INSERT OR IGNORE INTO members VALUES (?,?,
                 (SELECT COALESCE(MAX(position),-1)+1 FROM members WHERE collection_id=?))""", (key, track.id, key))
+            if track.cover:
+                db.execute("UPDATE collections SET cover=? WHERE id=? AND (cover='' OR cover IS NULL)",
+                           (track.cover, key))
+
+    def set_collection_cover(self, key, cover):
+        if not cover:
+            return
+        with self.connect() as db:
+            db.execute("UPDATE collections SET cover=? WHERE id=?", (cover, key))
 
     def remove_member(self, key, track_id):
         with self.connect() as db:

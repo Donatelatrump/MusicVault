@@ -24,6 +24,8 @@ from .spotify import playlist_url, spotify_url_from_text
 from .songmirror import load_playlists
 from .songmirror_spotify import clear_session, save_session, session_configured, validate_session
 from .downloader import explain_download_error
+from .experience import artist_matches, round_robin, taste_signature
+from .experience_ui import OnboardingDialog, StartupOverlay, TrackPickerDialog
 from .widgets import Cover, Record, STYLE, ElidedLabel, icon, load_fonts
 
 
@@ -53,6 +55,15 @@ class Window(QMainWindow):
         self.shown_tracks, self.remote_tracks, self.remote_albums = [], [], []
         self.search_generation = 0
         self.search_job = None
+        self.search_tracks_job = None
+        self.search_albums_job = None
+        self.album_job = None
+        self.search_mode = "tracks"
+        self.search_loading_tracks = False
+        self.search_loading_albums = False
+        self.home_recommendations, self.home_recommendation_albums = [], []
+        self.taste_generation = 0
+        self._startup_overlay = None
         self.download_jobs, self.download_callbacks = {}, {}
         self.download_items = {}
         self.download_progress_values = {}
@@ -61,6 +72,7 @@ class Window(QMainWindow):
         self.cover_jobs = Jobs(self)
         self.cover_jobs.pool.setMaxThreadCount(2)
         self.home_signature = None
+        self.album_render_signature = None
         self.sidebar_signature = None
         self.library_filters_signature = None
         self.lyric_track, self.lyric_lines = None, []
@@ -98,6 +110,7 @@ class Window(QMainWindow):
         self.track_changed(player.current)
         self.playback_changed()
         self.refresh_queue()
+        QTimer.singleShot(0, self.start_taste_experience)
         self.auto_scan = QTimer(self)
         self.auto_scan.setInterval(5 * 60 * 1000)
         self.auto_scan.timeout.connect(self.rescan)
@@ -211,16 +224,30 @@ class Window(QMainWindow):
         self.local_debounce.stop()
         if self.search_job:
             self.search_job.cancel.set()
+        if self.search_tracks_job:
+            self.search_tracks_job.cancel.set()
+        if self.search_albums_job:
+            self.search_albums_job.cancel.set()
+        if self.album_job:
+            self.album_job.cancel.set()
         if hasattr(self, "import_loading"):
             self.import_loading.hide()
         self.search_generation += 1
         self.remote_tracks, self.remote_albums = [], []
+        self.search_loading_tracks = self.search_loading_albums = False
+        self.search_mode = "tracks"
+        self.search_tabs.hide()
+        self.search_tracks_tab.setChecked(True)
+        self.search_albums_tab.setChecked(False)
         self.download_all_button.hide()
         self.collection_menu_button.hide()
+        self.collection_delete_button.hide()
+        self.album_section_title.hide()
         self.new_collection_button.setVisible(route == "Álbumes")
         self.rescan_button.setVisible(route == "Biblioteca")
         self.play_all_button.setVisible(route in ("Biblioteca","Favoritos","Buscar"))
         self.album_list.hide()
+        self.album_render_signature = None
         if route == "Álbumes":
             self.description.setText("Playlists, álbumes personalizados y álbumes de tus archivos.")
             self.stack.setCurrentWidget(self.collections_list)
@@ -239,6 +266,8 @@ class Window(QMainWindow):
             }
             self.description.setText(descriptions.get(route, ""))
             self.refresh_tracks()
+            if route == "Inicio":
+                self.render_album_results(self.home_recommendation_albums, title="Álbumes para ti")
             if route == "Buscar" and self.db.searches():
                 self.notify("Búsquedas recientes: " + " · ".join(self.db.searches()))
 
@@ -273,8 +302,11 @@ class Window(QMainWindow):
                 tracks.sort(key=lambda track: (sort_text(track.album), sort_text(track.artist), sort_text(track.title)))
         elif self.route == "Inicio":
             recent = self.db.library_tracks(query, recent=True, availability=availability)
-            seen = {t.id for t in recent}
-            tracks = recent + [t for t in self.db.library_tracks(query, availability=availability) if t.id not in seen]
+            recommended = [self.db.get_track(t.id) or t for t in self.home_recommendations]
+            seen = {t.id for t in recommended}
+            tracks = recommended + [t for t in recent if t.id not in seen]
+            seen.update(t.id for t in recent)
+            tracks += [t for t in self.db.library_tracks(query, availability=availability) if t.id not in seen]
         elif self.route == "Buscar":
             local = self.db.tracks(query)
             seen = {t.id for t in local}
@@ -318,10 +350,13 @@ class Window(QMainWindow):
                 availability[track.id] = bool(track.path and Path(track.path).is_file())
         self.track_model.set_tracks(tracks, records, self.download_jobs,
                                     current.id if current else None, availability)
-        # The table is part of the page, so it exposes all rows to the outer
-        # scroll surface rather than keeping an independent vertical scroll.
+        # Keep a bounded native viewport so Qt recycles/paints only visible rows.
+        # Older desktop builds expanded the table to every row, which made large
+        # albums and playlists stutter because the outer page owned all scrolling.
         header_height = self.table.horizontalHeader().height() or 34
-        table_height = header_height + max(1, len(tracks)) * self.table.verticalHeader().defaultSectionSize() + 2
+        content_height = header_height + max(1, len(tracks)) * self.table.verticalHeader().defaultSectionSize() + 2
+        viewport_cap = max(360, min(680, self.main_scroll.viewport().height() - 120))
+        table_height = min(content_height, viewport_cap)
         if self.table.height() != table_height:
             self.table.setFixedHeight(table_height)
             self.stack.updateGeometry()
@@ -344,6 +379,8 @@ class Window(QMainWindow):
         self.play_all_button.setEnabled(bool(tracks))
         if self.route == "Inicio":
             self.render_home(tracks)
+            self.render_album_results(self.home_recommendation_albums, title="Álbumes para ti")
+        self.apply_search_mode()
         self.table.schedule_covers()
 
     def load_visible_covers(self):
@@ -396,7 +433,7 @@ class Window(QMainWindow):
 
     def refresh_sidebar(self):
         collections = self.db.collections()
-        signature = tuple((c["id"], c["title"], c["count"]) for c in collections)
+        signature = tuple((c["id"], c["title"], c["count"], c.get("cover", "")) for c in collections)
         if signature == self.sidebar_signature:
             return
         self.sidebar_signature = signature
@@ -407,6 +444,8 @@ class Window(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, collection)
             item.setToolTip(f"{collection['title']} · {collection['count']} canciones")
             self.sidebar_collections.addItem(item)
+            if collection.get("cover"):
+                self.load_cover(collection["cover"], lambda path, item=item: item.setIcon(QIcon(path)) if path else None)
         self.sidebar_hint.setVisible(not collections)
 
     def open_sidebar_collection(self, item):
@@ -415,6 +454,9 @@ class Window(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if getattr(self, "_startup_overlay", None):
+            self._startup_overlay.setGeometry(self.rect())
+            self._startup_overlay.raise_()
         if hasattr(self, "table"):
             compact = self.width() < 1200
             header = self.table.horizontalHeader()
@@ -429,6 +471,158 @@ class Window(QMainWindow):
             if self.route == "Inicio":
                 self.render_home(self.shown_tracks)
 
+    def start_taste_experience(self):
+        """Run the two-step local onboarding once, then warm Home behind an opaque overlay."""
+        complete = bool(self.db.setting("taste_onboarding_complete", False))
+        if not complete:
+            dialog = OnboardingDialog(self)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            self.db.set_setting("taste_onboarding_complete", True)
+            if dialog.skipped:
+                return
+            self.db.set_setting("favorite_genres", sorted(dialog.selected_genres, key=str.casefold))
+            self.db.set_setting("favorite_artists", sorted(dialog.selected_artists, key=str.casefold))
+            self._startup_overlay = StartupOverlay(self)
+            self._startup_overlay.cover_parent()
+            QTimer.singleShot(18000, self._hide_startup_overlay)
+            self._start_taste_refresh(show_overlay=True)
+            return
+        self._load_taste_cache()
+        # The local artist catalog is static and immediate; network recommendations
+        # refresh at most once per week and never block a normal desktop launch.
+        last = float(self.db.setting("taste_refresh_epoch", 0) or 0)
+        if self.home_recommendations and time.time() - last < 7 * 86400:
+            return
+        self._start_taste_refresh(show_overlay=False)
+
+    def _taste_cache_key(self):
+        genres = self.db.setting("favorite_genres", []) or []
+        artists = self.db.setting("favorite_artists", []) or []
+        return "desktop:taste:" + taste_signature(genres, artists)
+
+    def _load_taste_cache(self):
+        cached = self.db.cache_get(self._taste_cache_key(), ttl=None)
+        if not isinstance(cached, dict):
+            return False
+        self.home_recommendations = [Track.from_dict(item) for item in cached.get("tracks", [])]
+        self.home_recommendation_albums = list(cached.get("albums", []))
+        if self.route == "Inicio":
+            self.refresh_tracks()
+        return bool(self.home_recommendations or self.home_recommendation_albums)
+
+    def _start_taste_refresh(self, show_overlay=False):
+        artists = list(dict.fromkeys(self.db.setting("favorite_artists", []) or []))[:8]
+        if not artists:
+            self._hide_startup_overlay()
+            return
+        self.taste_generation += 1
+        generation = self.taste_generation
+        self._taste_finalized_generation = -1
+        self._taste_pending = set(artists)
+        self._taste_buckets = {artist: {"tracks": [], "albums": []} for artist in artists}
+
+        def complete_artist(artist, payload=None):
+            if generation != self.taste_generation or artist not in self._taste_pending:
+                return
+            if payload:
+                tracks = [Track.from_dict(item) for item in payload.get("tracks", [])]
+                self._taste_buckets[artist]["tracks"] = [t for t in tracks if artist_matches(t.artist, artist)][:8]
+                self._taste_buckets[artist]["albums"] = [
+                    album for album in payload.get("albums", [])
+                    if artist_matches(album.get("artist", ""), artist)
+                ][:5]
+            self._taste_pending.discard(artist)
+            self._publish_taste_buckets(generation, persist=False)
+            if not self._taste_pending:
+                self._finish_taste_refresh(generation, show_overlay)
+
+        for artist in artists:
+            def work(cancel, progress, artist=artist):
+                tracks = self.catalog.search_tracks(artist, "catalog", cancel)
+                if cancel.is_set():
+                    return {"tracks": [], "albums": []}
+                albums = self.catalog.search_albums(artist, cancel)
+                return {"tracks": tracks, "albums": albums}
+
+            self.jobs.submit(
+                work,
+                lambda payload, artist=artist: complete_artist(artist, payload),
+                lambda error, artist=artist: complete_artist(artist, None),
+            )
+        QTimer.singleShot(15000, lambda: self._finish_taste_refresh(generation, show_overlay))
+
+    def _publish_taste_buckets(self, generation, persist=False):
+        """Merge successful artist buckets without letting a slow artist erase fast ones."""
+        if generation != self.taste_generation:
+            return
+        artists = list((self.db.setting("favorite_artists", []) or []))[:8]
+        track_buckets = [self._taste_buckets.get(artist, {}).get("tracks", []) for artist in artists]
+        album_buckets = [self._taste_buckets.get(artist, {}).get("albums", []) for artist in artists]
+        tracks = round_robin(track_buckets, 40)
+        albums = round_robin(album_buckets, 24)
+        changed = False
+        if tracks and [t.id for t in tracks] != [t.id for t in self.home_recommendations]:
+            self.home_recommendations = tracks
+            changed = True
+        album_signature = [(a.get("source"), a.get("id")) for a in albums]
+        old_album_signature = [(a.get("source"), a.get("id")) for a in self.home_recommendation_albums]
+        if albums and album_signature != old_album_signature:
+            self.home_recommendation_albums = albums
+            changed = True
+        if persist and (self.home_recommendations or self.home_recommendation_albums):
+            self.db.cache_put(self._taste_cache_key(), {
+                "tracks": [track.to_dict() for track in self.home_recommendations],
+                "albums": self.home_recommendation_albums,
+            })
+            self.db.set_setting("taste_refresh_epoch", time.time())
+        if changed and self.route == "Inicio":
+            self.refresh_tracks()
+
+    def _finish_taste_refresh(self, generation, show_overlay=False):
+        if generation != self.taste_generation:
+            return
+        first_finish = getattr(self, "_taste_finalized_generation", -1) != generation
+        if first_finish:
+            self._taste_finalized_generation = generation
+        self._publish_taste_buckets(generation, persist=True)
+        # The timeout may publish a partial result. Late artist jobs are still
+        # allowed to merge into Home/cache when they finish; only the visual
+        # handoff itself is one-shot.
+        if show_overlay and first_finish:
+            self._wait_home_visual_ready(generation)
+
+    def _wait_home_visual_ready(self, generation):
+        if generation != self.taste_generation:
+            return
+        sources = []
+        for track in self.home_recommendations[:8]:
+            if track.cover and track.cover not in sources:
+                sources.append(track.cover)
+        for album in self.home_recommendation_albums[:6]:
+            cover = album.get("cover", "")
+            if cover and cover not in sources:
+                sources.append(cover)
+        if not sources:
+            QTimer.singleShot(120, self._hide_startup_overlay)
+            return
+        pending = {source for source in sources}
+
+        def done(source):
+            pending.discard(source)
+            if not pending:
+                QTimer.singleShot(120, self._hide_startup_overlay)
+
+        for source in tuple(pending):
+            self.load_cover(source, lambda path, source=source: done(source))
+        QTimer.singleShot(6500, self._hide_startup_overlay)
+
+    def _hide_startup_overlay(self):
+        overlay = getattr(self, "_startup_overlay", None)
+        if overlay:
+            overlay.finish()
+            self._startup_overlay = None
+
     def search_changed(self):
         if self.route not in ("Buscar", "Biblioteca", "Favoritos"):
             query = self.search.text()
@@ -439,19 +633,117 @@ class Window(QMainWindow):
             self.search.setFocus()
         self.search_generation += 1
         self.debounce.stop()
-        if self.search_job:
-            self.search_job.cancel.set()
+        for job in (self.search_job, self.search_tracks_job, self.search_albums_job):
+            if job:
+                job.cancel.set()
         if self.remote_album:
             self.remote_album = None
             self.heading.setText("Buscar")
             self.download_all_button.hide()
         if self.route == "Buscar":
             self.remote_tracks, self.remote_albums = [], []
+            self.search_loading_tracks = self.search_loading_albums = False
             self.album_list.clear()
             self.album_list.hide()
-            if len(self.search.text().strip()) >= 2:
+            self.album_section_title.hide()
+            self.search_mode = "tracks"
+            self.search_tracks_tab.setChecked(True)
+            self.search_albums_tab.setChecked(False)
+            query = self.search.text().strip()
+            self.search_tabs.setVisible(len(query) >= 2)
+            if len(query) >= 2:
                 self.debounce.start()
         self.local_debounce.start()
+        self.apply_search_mode()
+
+    def set_search_mode(self, mode):
+        if mode not in ("tracks", "albums"):
+            return
+        if mode == "albums" and not self.search_albums_tab.isEnabled():
+            mode = "tracks"
+        self.search_mode = mode
+        self.search_tracks_tab.setChecked(mode == "tracks")
+        self.search_albums_tab.setChecked(mode == "albums")
+        self.apply_search_mode()
+
+    def apply_search_mode(self):
+        if not hasattr(self, "search_tabs") or self.route != "Buscar":
+            return
+        query = self.search.text().strip()
+        active = len(query) >= 2
+        if self.remote_album:
+            self.search_tabs.hide()
+            self.album_list.hide()
+            self.album_section_title.hide()
+            self.table.setVisible(bool(self.shown_tracks))
+            self.list_title.setVisible(bool(self.shown_tracks))
+            self.play_all_button.setVisible(bool(self.shown_tracks))
+            self.empty_panel.setVisible(not self.shown_tracks)
+            return
+        self.search_tabs.setVisible(active)
+        if self.search_mode == "albums":
+            self.table.hide()
+            self.list_title.hide()
+            self.play_all_button.hide()
+            self.album_section_title.setText("Álbumes")
+            self.album_section_title.setVisible(active)
+            self.album_list.setVisible(bool(self.remote_albums))
+            self.empty_panel.setVisible(active and not self.remote_albums)
+            if active and not self.remote_albums:
+                self.empty_title.setText("Buscando álbumes…" if self.search_loading_albums else "No encontramos álbumes")
+                self.empty.setText("Prueba con el nombre exacto del artista o del álbum." if not self.search_loading_albums else "Consultando el catálogo sin bloquear las canciones.")
+                self.empty_import.hide()
+        else:
+            self.album_list.hide()
+            self.album_section_title.hide()
+            self.table.setVisible(bool(self.shown_tracks))
+            self.list_title.setVisible(bool(self.shown_tracks))
+            self.play_all_button.setVisible(True)
+            self.play_all_button.setEnabled(bool(self.shown_tracks))
+            self.empty_panel.setVisible(active and not self.shown_tracks)
+            if active and not self.shown_tracks:
+                self.empty_title.setText("Buscando canciones…" if self.search_loading_tracks else "No encontramos canciones")
+                self.empty.setText("Prueba con otro artista, título o álbum." if not self.search_loading_tracks else "Deezer responde primero; otros proveedores solo se usan si hacen falta.")
+                self.empty_import.hide()
+
+    def render_album_results(self, albums, title="Álbumes"):
+        signature = (self.route, title, tuple((a.get("source", ""), a.get("id", ""), a.get("title", ""), a.get("artist", ""), a.get("cover", "")) for a in albums))
+        if signature == self.album_render_signature:
+            if self.route == "Inicio":
+                self.album_section_title.setText(title)
+                self.album_section_title.setVisible(bool(albums))
+                self.album_list.setVisible(bool(albums))
+            elif self.route == "Buscar":
+                self.apply_search_mode()
+            return
+        self.album_render_signature = signature
+        self.album_list.clear()
+        for album in albums:
+            item = QListWidgetItem(f"{album.get('title', '')}\n{album.get('artist', '')}")
+            item.setData(Qt.ItemDataRole.UserRole, album)
+            item.setSizeHint(self.album_list.gridSize())
+            item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+            item.setIcon(icon("album", "#B3A992", 96))
+            self.album_list.addItem(item)
+
+            def set_album_cover(path, item=item):
+                pixmap = QPixmap(path) if path else QPixmap()
+                if not pixmap.isNull():
+                    complete = pixmap.scaled(
+                        148, 148, Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                    item.setIcon(QIcon(complete))
+                self.album_list.viewport().update()
+
+            self.load_cover(album.get("cover", ""), set_album_cover)
+        if self.route == "Inicio":
+            self.album_section_title.setText(title)
+            self.album_section_title.setVisible(bool(albums))
+            self.album_list.setVisible(bool(albums))
+        elif self.route == "Buscar":
+            self.album_section_title.setText(title)
+            self.apply_search_mode()
 
     def submit_search(self):
         self.debounce.stop()
@@ -464,47 +756,65 @@ class Window(QMainWindow):
             return
         self.search_generation += 1
         generation = self.search_generation
-        if self.search_job:
-            self.search_job.cancel.set()
+        for job in (self.search_job, self.search_tracks_job, self.search_albums_job):
+            if job:
+                job.cancel.set()
         self.db.add_search(query)
         self.search_history.model().setStringList(self.db.searches())
-        self.notify("Consultando catálogo…")
+        self.search_tabs.show()
+        source = "youtube" if self.search_source.currentIndex() == 1 else "catalog"
+        self.search_albums_tab.setEnabled(source != "youtube")
+        if source == "youtube" and self.search_mode == "albums":
+            self.set_search_mode("tracks")
+        self.search_loading_tracks = True
+        self.search_loading_albums = source != "youtube"
+        self.remote_tracks, self.remote_albums = [], []
+        self.render_album_results([], title="Álbumes")
+        self.refresh_tracks()
+        self.notify("Buscando canciones y álbumes…")
 
-        def ready(result):
+        def tracks_ready(rows):
             if generation != self.search_generation or self.route != "Buscar":
                 return
-            self.remote_tracks = [Track.from_dict(t) for t in result["tracks"]]
-            self.remote_albums = result["albums"]
-            self.album_list.clear()
-            for album in self.remote_albums:
-                item = QListWidgetItem(f"{album['title']}\n{album['artist']}")
-                item.setData(Qt.ItemDataRole.UserRole, album)
-                item.setSizeHint(self.album_list.gridSize())
-                item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
-                # Set decoration geometry before the asynchronous cover arrives;
-                # uniform sizing otherwise caches a text-only row and clips it.
-                item.setIcon(icon("album", "#B3A992", 96))
-                self.album_list.addItem(item)
-
-                def set_album_cover(path, item=item):
-                    pixmap = QPixmap(path) if path else QPixmap()
-                    if not pixmap.isNull():
-                        complete = pixmap.scaled(
-                            148, 148, Qt.AspectRatioMode.KeepAspectRatio,
-                            Qt.TransformationMode.SmoothTransformation,
-                        )
-                        item.setIcon(QIcon(complete))
-                    self.album_list.doItemsLayout()
-                    self.album_list.viewport().update()
-
-                self.load_cover(album.get("cover", ""), set_album_cover)
-            self.album_list.setVisible(bool(self.remote_albums))
+            self.search_loading_tracks = False
+            self.remote_tracks = [Track.from_dict(t) for t in rows]
             self.refresh_tracks()
-            self.notify(result.get("notice", f"{len(self.remote_tracks)} canciones encontradas en el catálogo."))
+            self.notify(f"{len(self.remote_tracks)} canciones encontradas.")
 
-        source = "youtube" if self.search_source.currentIndex() == 1 else "catalog"
-        self.search_job = self.jobs.submit(lambda cancel, progress: self.catalog.search(query, source, cancel), ready,
-            lambda error: self.notify(error) if generation == self.search_generation else None)
+        def tracks_error(error):
+            if generation == self.search_generation and self.route == "Buscar":
+                self.search_loading_tracks = False
+                self.remote_tracks = []
+                self.refresh_tracks()
+                self.notify(error)
+
+        def albums_ready(albums):
+            if generation != self.search_generation or self.route != "Buscar":
+                return
+            self.search_loading_albums = False
+            self.remote_albums = list(albums)
+            self.render_album_results(self.remote_albums, title="Álbumes")
+
+        def albums_error(error):
+            if generation == self.search_generation and self.route == "Buscar":
+                self.search_loading_albums = False
+                self.remote_albums = []
+                self.render_album_results([], title="Álbumes")
+                self.notify(error)
+
+        self.search_tracks_job = self.jobs.submit(
+            lambda cancel, progress: self.catalog.search_tracks(query, source, cancel),
+            tracks_ready, tracks_error,
+        )
+        if source != "youtube":
+            self.search_albums_job = self.jobs.submit(
+                lambda cancel, progress: self.catalog.search_albums(query, cancel),
+                albums_ready, albums_error,
+            )
+        else:
+            self.search_loading_albums = False
+            self.remote_albums = []
+            self.render_album_results([], title="Álbumes")
 
     def import_spotify_playlist(self, url):
         self.search_generation += 1
@@ -675,43 +985,16 @@ class Window(QMainWindow):
         self.search_job = self.jobs.submit(lambda cancel, progress: load_playlists(path), ready, error)
 
     def choose_playlist_tracks(self, playlist, provider):
-        """Let the listener remove entries before a playlist is persisted."""
-        dialog = QDialog(self)
-        dialog.setWindowTitle(f"Revisar playlist de {provider}")
-        dialog.resize(620, 560)
-        outer = QVBoxLayout(dialog)
-        outer.setContentsMargins(22, 20, 22, 20)
-        outer.setSpacing(12)
-        title = label(playlist.title, "section")
-        title.setWordWrap(True)
-        outer.addWidget(title)
-        hint = label("Desmarca las canciones que no quieras guardar. La playlist se puede limpiar antes de importarla.", "muted")
-        hint.setWordWrap(True)
-        outer.addWidget(hint)
-        entries = QListWidget()
-        entries.setObjectName("playlistReview")
-        for track in playlist.tracks:
-            item = QListWidgetItem(f"{track.title}  ·  {track.artist}")
-            item.setData(Qt.ItemDataRole.UserRole, track)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked)
-            entries.addItem(item)
-        outer.addWidget(entries, 1)
-        tools = QHBoxLayout()
-        select_all = button("Seleccionar todo", lambda: [entries.item(i).setCheckState(Qt.CheckState.Checked) for i in range(entries.count())])
-        clear_all = button("Limpiar selección", lambda: [entries.item(i).setCheckState(Qt.CheckState.Unchecked) for i in range(entries.count())])
-        tools.addWidget(select_all)
-        tools.addWidget(clear_all)
-        tools.addStretch()
-        cancel = button("Cancelar", dialog.reject)
-        accept = button("Importar seleccionadas", dialog.accept, True)
-        tools.addWidget(cancel)
-        tools.addWidget(accept)
-        outer.addLayout(tools)
+        """Fast searchable review used by Spotify/SongMirror imports."""
+        dialog = TrackPickerDialog(
+            f"Revisar playlist de {provider}", playlist.tracks, self,
+            action_text="Importar seleccionadas",
+            subtitle="Busca por nombre o artista y desmarca lo que no quieras guardar.",
+            default_checked=True,
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
-        return tuple(entries.item(i).data(Qt.ItemDataRole.UserRole) for i in range(entries.count())
-                     if entries.item(i).checkState() == Qt.CheckState.Checked)
+        return dialog.selected_tracks()
 
     def play_row(self, row):
         if 0 <= row < len(self.shown_tracks):
@@ -769,13 +1052,29 @@ class Window(QMainWindow):
         self.notify("Se quitaron de la biblioteca. Los archivos originales se conservaron.")
 
     def create_collection(self):
-        title, ok = QInputDialog.getText(self, "Crear colección", "Nombre:")
-        if not ok or not title.strip():
+        kind, ok = QInputDialog.getItem(self, "Nueva colección", "Tipo:", ["Playlist", "Álbum personalizado"], 0, False)
+        if not ok:
             return
-        kind, ok = QInputDialog.getItem(self, "Tipo de colección", "Tipo:", ["Playlist", "Álbum personalizado"], 0, False)
-        if ok:
-            self.db.create_collection(title, "playlist" if kind == "Playlist" else "album")
-            self.refresh_collections()
+        available = self.db.library_tracks()
+        dialog = TrackPickerDialog(
+            "Crear playlist" if kind == "Playlist" else "Crear álbum personalizado",
+            available, self,
+            action_text="Crear",
+            subtitle="Ponle un nombre y elige canciones. Puedes buscar por título o artista.",
+            default_checked=False,
+            ask_name=True,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        title = dialog.playlist_name()
+        tracks = dialog.selected_tracks()
+        cover = next((track.cover for track in tracks if track.cover), "")
+        key = self.db.create_collection(title, "playlist" if kind == "Playlist" else "album", cover=cover)
+        if tracks:
+            self.db.replace_collection(key, title, tracks, cover=cover)
+        self.refresh_sidebar()
+        self.refresh_collections()
+        self.notify(f"{title}: {len(tracks)} canciones.")
 
     def refresh_collections(self):
         self.refresh_sidebar()
@@ -792,6 +1091,8 @@ class Window(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, collection)
             item.setIcon(icon("album","#E0A458",120))
             self.collections_list.addItem(item)
+            if collection.get("cover"):
+                self.load_cover(collection["cover"], lambda path, item=item: item.setIcon(QIcon(path)) if path else None)
         albums = {}
         for track in self.db.tracks():
             if track.path and track.album != "Sin álbum":
@@ -821,7 +1122,9 @@ class Window(QMainWindow):
         self.collection = data.get("id")
         self.local_album = [t["id"] for t in data["local"]] if "local" in data else None
         self.collection_menu_button.setVisible(bool(self.collection))
+        self.collection_delete_button.setVisible(bool(self.collection))
         collection_kind = data.get("kind") if self.collection else ""
+        self.collection_delete_button.setToolTip("Eliminar playlist" if collection_kind == "playlist" else "Eliminar colección")
         self.download_all_button.setText("Descargar álbum" if collection_kind == "album" else "Descargar playlist")
         self.download_all_button.setVisible(bool(collection_kind))
         self.description.setText("Doble clic para escuchar. Organiza las canciones desde el menú contextual.")
@@ -836,19 +1139,24 @@ class Window(QMainWindow):
     def collection_options(self):
         if not self.collection:
             return
-        action, ok = QInputDialog.getItem(self, "Editar colección", "Acción:", ["Cambiar nombre", "Eliminar colección"], 0, False)
-        if not ok:
-            return
-        if action == "Cambiar nombre":
-            name, ok = QInputDialog.getText(self, "Cambiar nombre", "Nombre:", text=self.heading.text())
-            if ok and name.strip():
-                self.db.rename_collection(self.collection, name)
-                self.heading.setText(name)
-                self.refresh_sidebar()
-        elif QMessageBox.question(self, "Eliminar colección", "¿Eliminar esta colección? Las canciones se conservarán.") == QMessageBox.StandardButton.Yes:
-            self.db.delete_collection(self.collection)
+        name, ok = QInputDialog.getText(self, "Cambiar nombre", "Nombre:", text=self.heading.text())
+        if ok and name.strip():
+            self.db.rename_collection(self.collection, name)
+            self.heading.setText(name)
             self.refresh_sidebar()
-            self.show_route("Álbumes")
+            self.refresh_collections()
+
+    def delete_current_collection(self):
+        if not self.collection:
+            return
+        if QMessageBox.question(
+            self, "Eliminar playlist", "¿Eliminar esta playlist? Las canciones descargadas se conservarán."
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self.db.delete_collection(self.collection)
+        self.collection = None
+        self.refresh_sidebar()
+        self.show_route("Álbumes")
 
     def add_to_collection(self, tracks):
         collections = self.db.collections()
@@ -884,6 +1192,8 @@ class Window(QMainWindow):
 
     def open_album_item(self, item):
         album = item.data(Qt.ItemDataRole.UserRole)
+        if self.album_job:
+            self.album_job.cancel.set()
         self.search_generation += 1
         generation = self.search_generation
         self.notify("Cargando álbum…")
@@ -893,6 +1203,9 @@ class Window(QMainWindow):
                 return
             self.remote_album, self.collection = album, None
             self.remote_tracks = tracks
+            self.search_mode = "tracks"
+            self.search_tabs.hide()
+            self.album_section_title.hide()
             self.heading.setText(album["title"])
             self.description.setText(album["artist"])
             self.album_list.hide()
@@ -900,7 +1213,7 @@ class Window(QMainWindow):
             self.download_all_button.show()
             self.render_tracks(tracks)
 
-        self.jobs.submit(lambda cancel, progress: self.catalog.album_tracks(album), ready, self.notify)
+        self.album_job = self.jobs.submit(lambda cancel, progress: self.catalog.album_tracks(album), ready, self.notify)
 
     def download_all(self):
         if self.remote_album:

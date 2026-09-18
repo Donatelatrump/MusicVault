@@ -9,7 +9,7 @@ import tarfile
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.7.1"
+VERSION = "0.8.0"
 
 
 def copy_app(destination):

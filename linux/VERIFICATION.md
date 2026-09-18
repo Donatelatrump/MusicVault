@@ -1,3 +1,13 @@
+# Verificación local — 2026-09-18 (0.8.0)
+
+- `python -m compileall` completó sin errores para `linux/musicvault`, `linux/packaging` y pruebas.
+- Smoke de recomendaciones puras: catálogo local, normalización de acentos (`Tiësto`/`Tiesto`, `ROSALÍA`/`Rosalia`) y round-robin entre artistas verificados.
+- Smoke SQLite desde un esquema antiguo: migración de columnas/FTS5, búsqueda sin acentos, conservación de pistas, portada automática de playlist, filtros de biblioteca y disponibilidad local verificados.
+- Smoke de catálogo con proveedores simulados: canciones y álbumes independientes, Deezer `tracks.data` y caché LRU de detalle de álbum verificados.
+- `linux/packaging/build.py` generó correctamente `dist/MusicVault-0.8.0-linux-x86_64.tar.gz` y `dist/musicvault_0.8.0_amd64.deb`; `dpkg-deb` reporta versión 0.8.0/amd64.
+- La suite GUI Qt completa no se ejecutó en este contenedor porque PyQt6 no está instalado y el entorno no permite descargarlo. Las verificaciones 0.7.x que siguen abajo se conservan como historial de la base Qt.
+- La compilación Android tampoco pudo ejecutarse aquí porque el wrapper necesita descargar Gradle 8.11.1 y el entorno no resuelve `services.gradle.org`; el árbol Android no fue alterado en esta pasada de escritorio.
+
 # Verificación local — 2026-09-08
 
 ## Corrección de avisos 0.7.1

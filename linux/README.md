@@ -13,7 +13,10 @@ Todos los comandos siguientes se ejecutan desde la carpeta `linux/` (`cd linux` 
 
 El lanzador usa `/usr/bin/python3` para encontrar los paquetes instalados por la distribución, independientemente de pyenv o de un entorno virtual activo. Puedes elegir otro intérprete con `MUSICVAULT_PYTHON=/ruta/python`.
 
-La versión 0.7.1 adopta una distribución inspirada en Spotify de escritorio: barra lateral permanente con playlists, búsqueda superior, accesos rápidos, estantes de portadas y controles inferiores con una barra de progreso amplia. Conserva la paleta carbón, ámbar y marfil, las fuentes originales y la tornamesa HV-01. Se adapta desde 920 × 680 hasta ventanas amplias. La biblioteca muestra únicamente archivos locales disponibles; las descargas fallidas permanecen en Descargas y requieren pulsar Reintentar. Un archivo descargado se reutiliza aunque se reproduzca desde resultados antiguos del catálogo.
+
+La versión 0.8.0 sincroniza la experiencia con Android: onboarding local por géneros/artistas, recomendaciones balanceadas y precargadas, búsqueda separada Canciones/Álbumes con respuestas independientes, creación/importación de playlists con buscador, carátula automática, eliminación directa, caché de álbumes y listas nativas acotadas para evitar tirones.
+
+La versión 0.8.0 conserva la distribución inspirada en Spotify de escritorio: barra lateral permanente con playlists, búsqueda superior, accesos rápidos, estantes de portadas y controles inferiores con una barra de progreso amplia. Conserva la paleta carbón, ámbar y marfil, las fuentes originales y la tornamesa HV-01. Se adapta desde 920 × 680 hasta ventanas amplias. La biblioteca muestra únicamente archivos locales disponibles; las descargas fallidas permanecen en Descargas y requieren pulsar Reintentar. Un archivo descargado se reutiliza aunque se reproduzca desde resultados antiguos del catálogo.
 
 En Debian 12/13 o Ubuntu 24.04/26.04, instala las dependencias si el diagnóstico indica que faltan:
 
@@ -47,21 +50,21 @@ python3 packaging/build.py
 
 Produce:
 
-- `dist/musicvault_0.7.1_amd64.deb`: instala el lanzador, icono y entrada del menú de aplicaciones. Declara las dependencias para que APT pueda resolverlas.
-- `dist/MusicVault-0.7.1-linux-x86_64.tar.gz`: distribución reubicable del código y recursos, con un lanzador `MusicVault`. **Requiere las dependencias del sistema; no es un binario autocontenido ni un AppImage.**
+- `dist/musicvault_0.8.0_amd64.deb`: instala el lanzador, icono y entrada del menú de aplicaciones. Declara las dependencias para que APT pueda resolverlas.
+- `dist/MusicVault-0.8.0-linux-x86_64.tar.gz`: distribución reubicable del código y recursos, con un lanzador `MusicVault`. **Requiere las dependencias del sistema; no es un binario autocontenido ni un AppImage.**
 
 Instalar el paquete Debian/Ubuntu:
 
 ```bash
-sudo apt install ./dist/musicvault_0.7.1_amd64.deb
+sudo apt install ./dist/musicvault_0.8.0_amd64.deb
 musicvault
 ```
 
 Extraer y ejecutar la distribución reubicable:
 
 ```bash
-tar -xzf dist/MusicVault-0.7.1-linux-x86_64.tar.gz
-./MusicVault-0.7.1-linux-x86_64/MusicVault
+tar -xzf dist/MusicVault-0.8.0-linux-x86_64.tar.gz
+./MusicVault-0.8.0-linux-x86_64/MusicVault
 ```
 
 El paquete no incluye ejecutables de audio compilados en este equipo: utiliza las bibliotecas de la distribución de destino. No hay dependencia de una versión de glibc impuesta por un ejecutable compilado aquí.
