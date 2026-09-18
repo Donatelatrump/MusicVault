@@ -10,8 +10,6 @@ import android.graphics.drawable.StateListDrawable
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
-import android.view.animation.LinearInterpolator
-import android.animation.ValueAnimator
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -185,8 +183,12 @@ class RemoteResultsAdapter(
         textSize = 16f
         setTypeface(typeface, android.graphics.Typeface.BOLD)
         gravity = Gravity.CENTER_VERTICAL
-        setPadding(dp(context, 4), dp(context, 8), dp(context, 4), dp(context, 4))
-        layoutParams = RecyclerView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(context, 42))
+        setPadding(dp(context, 4), dp(context, 10), dp(context, 4), dp(context, 10))
+        minHeight = dp(context, 48)
+        layoutParams = RecyclerView.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        )
     }) {
         fun bind(value: String) { (itemView as TextView).text = value }
     }
@@ -223,7 +225,6 @@ class RemoteResultsAdapter(
         private val subtitle = itemView.findViewWithTag<TextView>("subtitle")
         private val description = itemView.findViewWithTag<TextView>("description")
         private val progressBar = itemView.findViewWithTag<ProgressBar>("progress")
-        private val downloadSpinner = itemView.findViewWithTag<DownloadSpinnerView>("downloadSpinner")
         private val play = itemView.findViewWithTag<StyledPlayButton>("play")
         private val more = itemView.findViewWithTag<MoreButton>("more")
         private var track: CatalogTrack? = null
@@ -272,7 +273,8 @@ class RemoteResultsAdapter(
                 description.visibility = if (description.text.isNullOrBlank()) View.GONE else View.VISIBLE
                 loadCover(itemView.context, image, value.coverUri, 56)
             }
-            progressBar.visibility = View.GONE
+            progressBar.visibility = if (downloading) View.VISIBLE else View.GONE
+            if (downloading) progressBar.progress = (p ?: 0).coerceIn(0, 100)
 
             // Search results start with only Play visible. During a download the
             // spinner is the only action. Once the repository reports the exact
@@ -283,11 +285,7 @@ class RemoteResultsAdapter(
                 // available until the file has actually been persisted.
                 play.visibility = View.GONE
                 more.visibility = View.GONE
-                downloadSpinner.visibility = View.VISIBLE
-                downloadSpinner.start()
             } else {
-                downloadSpinner.stop()
-                downloadSpinner.visibility = View.GONE
                 play.visibility = if (downloaded) View.GONE else View.VISIBLE
                 // Once persisted, the row is opened by tapping the song itself;
                 // keep only the overflow menu to avoid duplicating playback UI.
@@ -446,19 +444,6 @@ class RemoteResultsAdapter(
         }
     }
 
-    private class DownloadSpinnerView(context: Context) : View(context) {
-        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        private var phase = 0
-        private var animator: ValueAnimator? = null
-        init { isClickable = false }
-        fun start() { if (animator?.isRunning == true) return; animator = ValueAnimator.ofInt(0, 7).apply { duration = 900; repeatCount = ValueAnimator.INFINITE; interpolator = LinearInterpolator(); addUpdateListener { phase = it.animatedValue as Int; invalidate() }; start() } }
-        fun stop() { animator?.cancel(); animator = null; phase = 0; invalidate() }
-        override fun onDraw(canvas: Canvas) {
-            super.onDraw(canvas); val cx=width/2f; val cy=height/2f; val radius=minOf(width,height)*.30f; val dot=minOf(width,height)*.065f
-            for (i in 0 until 8) { val a=Math.toRadians((i*45.0)-90.0); val x=cx+Math.cos(a)*radius; val y=cy+Math.sin(a)*radius; val distance=(i-phase+8)%8; val alpha=70+(185*(8-distance)/8); paint.color=Color.argb(alpha,224,164,88); canvas.drawCircle(x.toFloat(),y.toFloat(),dot,paint) }
-        }
-        override fun onDetachedFromWindow() { stop(); super.onDetachedFromWindow() }
-    }
 
     companion object {
         private const val TYPE_HEADER = 1
@@ -477,6 +462,10 @@ class RemoteResultsAdapter(
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(context, 4), dp(context, 4), dp(context, 4), dp(context, 4))
                 minimumHeight = dp(context, heightDp)
+                layoutParams = RecyclerView.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
                 setBackgroundColor(Color.TRANSPARENT)
             }
             val image = ImageView(context).apply {
@@ -501,19 +490,40 @@ class RemoteResultsAdapter(
 
         private fun makeTrackRow(context: Context): LinearLayout {
             val row = makeRow(context, 84)
+            // Search rows used to be WRAP_CONTENT. A two-line description could
+            // make one row taller than the next, so the centered 48dp play box
+            // appeared to wander vertically down the right edge. Give every song
+            // row one deterministic height and width so all play buttons share the
+            // exact same right-hand column and vertical center.
+            row.layoutParams = RecyclerView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(context, 84)
+            )
+            row.minimumHeight = dp(context, 84)
+            row.gravity = Gravity.CENTER_VERTICAL
             row.removeViewAt(2)
             val text = row.getChildAt(1) as LinearLayout
+            text.layoutParams = (text.layoutParams as LinearLayout.LayoutParams).apply {
+                height = ViewGroup.LayoutParams.MATCH_PARENT
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            text.gravity = Gravity.CENTER_VERTICAL
             val progress = ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal).apply {
                 tag = "progress"
                 visibility = View.GONE
-                layoutParams = LinearLayout.LayoutParams(0, 0)
+                max = 100
+                progressTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#E0A458"))
+                progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#292420"))
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(context, 2)).apply {
+                    topMargin = dp(context, 3)
+                }
             }
             text.addView(progress)
             text.addView(TextView(context).apply {
                 tag = "description"
                 setTextColor(Color.parseColor("#9C927F"))
                 textSize = 11f
-                maxLines = 2
+                maxLines = 1
                 ellipsize = android.text.TextUtils.TruncateAt.END
                 visibility = View.GONE
             })
@@ -523,7 +533,7 @@ class RemoteResultsAdapter(
             // same place.
             val actions = android.widget.FrameLayout(context).apply {
                 tag = "actionsBox"
-                layoutParams = LinearLayout.LayoutParams(dp(context, 48), dp(context, 48))
+                layoutParams = LinearLayout.LayoutParams(dp(context, 48), dp(context, 48)).apply { gravity = Gravity.CENTER_VERTICAL }
             }
             val play = StyledPlayButton(context).apply {
                 tag = "play"
@@ -534,13 +544,6 @@ class RemoteResultsAdapter(
                 stateListAnimator = null
             }
             actions.addView(play)
-            actions.addView(DownloadSpinnerView(context).apply {
-                tag = "downloadSpinner"
-                visibility = View.GONE
-                layoutParams = android.widget.FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
-                )
-            })
             actions.addView(MoreButton(context).apply {
                 tag = "more"
                 visibility = View.GONE

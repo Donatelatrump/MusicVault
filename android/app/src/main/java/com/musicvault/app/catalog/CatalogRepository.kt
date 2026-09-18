@@ -39,6 +39,23 @@ class CatalogRepository(
         }
     }
 
+    /** Category-specific fast paths let the UI publish songs and albums independently. */
+    suspend fun searchTracksFast(query: String, limit: Int = 40): List<CatalogTrack> =
+        if (provider is MetadataCatalogProvider) provider.searchTracksFast(query, limit)
+        else provider.searchTracks(query, limit)
+
+    suspend fun searchAlbumsFast(query: String, limit: Int = 20): List<CatalogAlbum> =
+        if (provider is MetadataCatalogProvider) provider.searchAlbumsFast(query, limit)
+        else provider.searchAlbums(query, limit)
+
+    suspend fun searchTracksMerged(query: String, limit: Int = 40): List<CatalogTrack> =
+        if (provider is MetadataCatalogProvider) provider.searchTracksMerged(query, limit)
+        else provider.searchTracks(query, limit)
+
+    suspend fun searchAlbumsMerged(query: String, limit: Int = 20): List<CatalogAlbum> =
+        if (provider is MetadataCatalogProvider) provider.searchAlbumsMerged(query, limit)
+        else provider.searchAlbums(query, limit)
+
     /**
      * Slower full-merge search that ranks every provider together. Used to
      * refine the fast-path result once all providers have answered.

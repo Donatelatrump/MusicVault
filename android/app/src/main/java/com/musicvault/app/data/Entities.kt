@@ -120,3 +120,12 @@ data class CatalogSearchCacheEntity(
     val albumsJson: String,
     val savedAt: Long
 )
+
+@Entity(tableName = "user_preferences")
+data class UserPreferences(
+    @PrimaryKey val userId: String = "current_user",
+    val generosFavoritos: String = "",  // separado por comas
+    val artistasFavoritos: String = "",
+    val primeraVezCompleto: Boolean = true,
+    val fechaUltimaActualizacion: Long = java.lang.System.currentTimeMillis()
+)

@@ -52,6 +52,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.first
 import kotlin.coroutines.resume
+import java.text.Normalizer
 
 enum class AppSection(val label: String) { HOME("Inicio"), SEARCH("Buscar"), LIBRARY("Biblioteca"), PLAYLISTS("Álbumes") }
 
@@ -153,6 +154,30 @@ class MusicVaultViewModel(
     private val _loadingRemoteAlbum = MutableStateFlow(false)
     private val _remoteTracks = MutableStateFlow<List<CatalogTrack>>(emptyList())
     private val _remoteAlbums = MutableStateFlow<List<CatalogAlbum>>(emptyList())
+
+    // Estado primera vez / actualización
+    private val _esPrimeraVez = MutableStateFlow(true)
+    val esPrimeraVez: StateFlow<Boolean> = _esPrimeraVez.asStateFlow()
+    private val _estadoInicialCargado = MutableStateFlow(false)
+    val estadoInicialCargado: StateFlow<Boolean> = _estadoInicialCargado.asStateFlow()
+
+    // Preferencias del usuario
+    private val _preferencias = MutableStateFlow(PrefModel())
+    val preferencias: StateFlow<PrefModel> = _preferencias.asStateFlow()
+
+    // First-run handoff gate. The onboarding animation stays on top while the
+    // selected artists/genres are fetched and the Home feed is populated.
+    // Existing users start in the ready state and are never gated by this.
+    private val _recommendationWarmupReady = MutableStateFlow(true)
+    val recommendationWarmupReady: StateFlow<Boolean> = _recommendationWarmupReady.asStateFlow()
+    private var recommendationWarmupJob: Job? = null
+
+    // Modelo simple de preferencias
+    data class PrefModel(
+        val generosFavoritos: Set<String> = emptySet(),
+        val artistasFavoritos: Set<String> = emptySet(),
+        val primeraVezCompleto: Boolean = true
+    )
     private val _searching = MutableStateFlow(false)
     private val _scanning = MutableStateFlow(false)
     private val _providerMessage = MutableStateFlow<String?>(null)
@@ -208,7 +233,70 @@ class MusicVaultViewModel(
          * immediately; this only gates how long a stale list is allowed to be
          * refreshed. Short enough that the user never feels a stall.
          */
-        const val SEARCH_MERGE_TIMEOUT_MS = 1_200L
+        const val SEARCH_FAST_TIMEOUT_MS = 4_500L
+        const val SEARCH_REFINE_TIMEOUT_MS = 2_500L
+    }
+
+    fun detectarEstadoInicial() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val prefs = database.userPreferencesDao().obtenerPreferencias("current_user")
+                val totalTracks = database.trackDao().count()
+
+                val generosFav = decodePreferenceSet(prefs?.generosFavoritos)
+                val artistasFav = decodePreferenceSet(prefs?.artistasFavoritos)
+
+                // `primeraVezCompleto == false` is the persisted "onboarding done"
+                // value used by the existing schema. Existing users with library
+                // content are also allowed through so an update never forces the
+                // new onboarding on them.
+                val onboardingCompletado = prefs?.primeraVezCompleto == false
+                val usuarioExistente = totalTracks > 0
+
+                _preferencias.value = PrefModel(
+                    generosFavoritos = generosFav,
+                    artistasFavoritos = artistasFav,
+                    primeraVezCompleto = !onboardingCompletado
+                )
+                _esPrimeraVez.value = !onboardingCompletado && !usuarioExistente
+            } catch (_: Exception) {
+                // A first-run UI is safer than leaving the app permanently on
+                // the startup gate if Room cannot be read for any reason.
+                _preferencias.value = PrefModel()
+                _esPrimeraVez.value = true
+            } finally {
+                _estadoInicialCargado.value = true
+            }
+        }
+    }
+
+    fun guardarPreferencias(generos: Set<String>, artistas: Set<String>) {
+        val generosLimpios = generos.map(String::trim).filter(String::isNotBlank).toSet()
+        val artistasLimpios = artistas.map(String::trim).filter(String::isNotBlank).toSet()
+
+        // Dismiss immediately; persistence can finish off the main thread.
+        _preferencias.value = PrefModel(
+            generosFavoritos = generosLimpios,
+            artistasFavoritos = artistasLimpios,
+            primeraVezCompleto = false
+        )
+        _esPrimeraVez.value = false
+        _estadoInicialCargado.value = true
+
+        val prefs = UserPreferences(
+            userId = "current_user",
+            generosFavoritos = encodePreferenceSet(generosLimpios),
+            artistasFavoritos = encodePreferenceSet(artistasLimpios),
+            primeraVezCompleto = false,
+            fechaUltimaActualizacion = System.currentTimeMillis()
+        )
+        viewModelScope.launch(Dispatchers.IO) {
+            database.userPreferencesDao().insertarPreferencias(prefs)
+        }
+    }
+
+    fun saltarOnboarding() {
+        guardarPreferencias(emptySet(), emptySet())
     }
     private var playlistJob: Job? = null
     private var activePlaylistId: String? = null
@@ -225,6 +313,14 @@ class MusicVaultViewModel(
             pendingQueueEntries.clear()
         }
     private var albumJob: Job? = null
+    private var remoteAlbumJob: Job? = null
+    // Small in-memory LRU for album track lists. Home recommendations often point
+    // to the same releases the user opens more than once; reusing the resolved
+    // list makes revisits instant and avoids decoding/rebinding a second network
+    // response while the detail RecyclerView is already on screen.
+    private val remoteAlbumTrackCache = object : LinkedHashMap<String, List<CatalogTrack>>(12, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<CatalogTrack>>?): Boolean = size > 12
+    }
     private var historyJob: Job? = null
     private var lastHistoryUpdateAt = 0L
     // Cached resolution of the currently playing track for the history writer.
@@ -359,7 +455,288 @@ class MusicVaultViewModel(
     // Related catalog tracks fetched for the artists the user has downloaded.
     // Refreshed once per downloaded-artist profile signature, not per screen visit.
     private val relatedCatalog = MutableStateFlow<List<CatalogTrack>>(emptyList())
+    // Albums gathered explicitly during onboarding. Keeping them in-memory makes
+    // the first Home frame independent of Room propagation timing.
+    private val onboardingCatalogAlbums = MutableStateFlow<List<Album>>(emptyList())
     private var fetchedArtistProfile: String? = null
+
+    private fun normalizedArtist(value: String): String {
+        val noAccents = Normalizer.normalize(value, Normalizer.Form.NFD)
+            .replace(Regex("\\p{M}+"), "")
+        return noAccents
+            .lowercase()
+            .replace("&", " and ")
+            .replace(Regex("[^a-z0-9]+"), " ")
+            .trim()
+            .replace(whitespaceRegex, " ")
+    }
+
+    /**
+     * Preference strings used to be comma-separated. That silently broke
+     * artists such as "Tyler, The Creator" and "Earth, Wind & Fire" after a
+     * process restart. The v2 format uses an ASCII unit separator, while the
+     * legacy comma format remains readable for existing installs.
+     */
+    private fun encodePreferenceSet(values: Set<String>): String =
+        "mv2:" + values.asSequence()
+            .map(String::trim)
+            .filter(String::isNotBlank)
+            .joinToString("\u001F")
+
+    private fun decodePreferenceSet(raw: String?): Set<String> {
+        if (raw.isNullOrBlank()) return emptySet()
+        val values = if (raw.startsWith("mv2:")) {
+            raw.removePrefix("mv2:").split('\u001F')
+        } else {
+            // Backward compatibility with MusicVault <= v4.
+            raw.split(',')
+        }
+        return values.asSequence()
+            .map(String::trim)
+            .filter(String::isNotBlank)
+            .toCollection(linkedSetOf())
+    }
+
+    private fun profileSignature(terms: Iterable<String>): String =
+        terms.asSequence()
+            .map(::normalizedArtist)
+            .filter(String::isNotBlank)
+            .distinct()
+            .sorted()
+            .take(12)
+            .joinToString("|")
+
+    private fun artistMatches(candidate: String, requested: String): Boolean {
+        val a = normalizedArtist(candidate)
+        val r = normalizedArtist(requested)
+        if (a.isBlank() || r.isBlank()) return false
+        return a == r || a.contains(r) || r.contains(a)
+    }
+
+    /**
+     * Round-robin results by requested artist instead of concatenating every
+     * result from artist #1, then artist #2, etc. This is important because the
+     * Home feed is capped: concatenation made five selected artists look like
+     * recommendations for only the first one or two.
+     */
+    private fun balanceTrackGroups(
+        groups: List<Pair<String, List<CatalogTrack>>>,
+        limit: Int,
+        requireArtistMatch: Boolean = false
+    ): List<CatalogTrack> {
+        val prepared = groups.map { (artist, items) ->
+            val matching = items.filter { artistMatches(it.artistName, artist) }
+            // During onboarding an artist choice is an explicit signal. Never
+            // substitute unrelated tracks just because a provider returned an
+            // off-topic first page. Genre/discovery callers may still use the
+            // small fallback because their term is not necessarily an artist.
+            (if (matching.isNotEmpty()) matching else if (requireArtistMatch) emptyList() else items.take(4))
+                .distinctBy { "${it.provider}:${it.id}" }
+        }
+        val out = ArrayList<CatalogTrack>(limit)
+        val seen = HashSet<String>()
+        var round = 0
+        while (out.size < limit && prepared.any { round < it.size }) {
+            for (bucket in prepared) {
+                if (round >= bucket.size) continue
+                val item = bucket[round]
+                if (seen.add("${item.provider}:${item.id}")) out += item
+                if (out.size >= limit) break
+            }
+            round++
+        }
+        return out
+    }
+
+    private fun balanceAlbumGroups(
+        groups: List<Pair<String, List<CatalogAlbum>>>,
+        limit: Int,
+        requireArtistMatch: Boolean = false
+    ): List<CatalogAlbum> {
+        val prepared = groups.map { (artist, items) ->
+            val matching = items.filter { artistMatches(it.artistName, artist) }
+            (if (matching.isNotEmpty()) matching else if (requireArtistMatch) emptyList() else items.take(3))
+                .distinctBy { "${it.provider}:${it.id}" }
+        }
+        val out = ArrayList<CatalogAlbum>(limit)
+        val seen = HashSet<String>()
+        var round = 0
+        while (out.size < limit && prepared.any { round < it.size }) {
+            for (bucket in prepared) {
+                if (round >= bucket.size) continue
+                val item = bucket[round]
+                if (seen.add("${item.provider}:${item.id}")) out += item
+                if (out.size >= limit) break
+            }
+            round++
+        }
+        return out
+    }
+
+    private fun catalogAlbumToAlbum(album: CatalogAlbum): Album = Album(
+        id = "${album.provider}:release-group:${album.id}",
+        title = album.title,
+        artistId = album.artistId,
+        artistName = album.artistName,
+        year = album.year ?: 0,
+        coverUri = album.coverUri
+    )
+
+    private suspend fun fetchRecommendationSeed(term: String): MetadataCatalogProvider.SearchResult =
+        kotlinx.coroutines.coroutineScope {
+            // Each selected artist owns its own timeout. The v4 implementation
+            // wrapped the entire 5-artist batch in one timeout, so one slow API
+            // request discarded the results of every artist that had already
+            // completed. This helper makes failures isolated instead.
+            val tracksDeferred = async {
+                withTimeoutOrNull(4_200L) { catalog.searchTracksFast(term, 14) }.orEmpty()
+            }
+            val albumsDeferred = async {
+                withTimeoutOrNull(4_200L) { catalog.searchAlbumsFast(term, 6) }.orEmpty()
+            }
+            var tracks = tracksDeferred.await()
+            var albums = albumsDeferred.await()
+
+            // A short precision fallback is worth paying only for the category
+            // that actually failed. It remains per-artist, so it cannot erase
+            // successful buckets from the rest of the onboarding selection.
+            if (tracks.isEmpty()) {
+                tracks = withTimeoutOrNull(2_200L) { catalog.searchTracksMerged(term, 14) }.orEmpty()
+            }
+            if (albums.isEmpty()) {
+                albums = withTimeoutOrNull(2_200L) { catalog.searchAlbumsMerged(term, 6) }.orEmpty()
+            }
+            MetadataCatalogProvider.SearchResult(tracks = tracks, albums = albums)
+        }
+
+    /**
+     * Starts immediately after the artist step, while the fancy onboarding
+     * animation is still covering the app. Artist and genre requests run in
+     * parallel; selected artists are interleaved so every chosen artist gets a
+     * chance to appear before the feed cap is reached.
+     */
+    fun preloadRecommendations(generos: Set<String>, artistas: Set<String>) {
+        recommendationWarmupJob?.cancel()
+        val artistTerms = artistas.asSequence()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinctBy { it.lowercase() }
+            .take(8)
+            .toList()
+        val genreTerms = generos.asSequence()
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinctBy { it.lowercase() }
+            .take(4)
+            .toList()
+
+        _recommendationWarmupReady.value = false
+        if (artistTerms.isEmpty() && genreTerms.isEmpty()) {
+            _recommendationWarmupReady.value = true
+            return
+        }
+
+        // Temporarily reserve the profile so the regular background collector
+        // does not duplicate the exact same requests while onboarding is active.
+        // If the whole artist batch fails we clear it below so the collector can
+        // retry on the normal Home lifecycle instead of leaving generic results.
+        val warmupSignature = profileSignature(artistTerms + genreTerms)
+        fetchedArtistProfile = warmupSignature
+
+        recommendationWarmupJob = viewModelScope.launch(Dispatchers.IO) {
+            try {
+                // Artist choices are the strongest signal and therefore form the
+                // blocking first paint. IMPORTANT: timeouts are per term. One slow
+                // artist must never cancel and erase the other selected artists.
+                val primaryTerms = if (artistTerms.isNotEmpty()) artistTerms else genreTerms
+                val primaryResults = primaryTerms.map { term ->
+                    async {
+                        term to runCatching { fetchRecommendationSeed(term) }
+                            .getOrElse { MetadataCatalogProvider.SearchResult(emptyList(), emptyList()) }
+                    }
+                }.awaitAll()
+
+                val primaryTracks = balanceTrackGroups(
+                    primaryResults.map { (term, result) -> term to result.tracks },
+                    40,
+                    requireArtistMatch = artistTerms.isNotEmpty()
+                )
+                val primaryAlbums = balanceAlbumGroups(
+                    primaryResults.map { (term, result) -> term to result.albums },
+                    18,
+                    requireArtistMatch = artistTerms.isNotEmpty()
+                )
+
+                relatedCatalog.value = primaryTracks
+                    .distinctBy { "${it.provider}:${it.id}" }
+                    .take(40)
+                onboardingCatalogAlbums.value = primaryAlbums
+                    .distinctBy { "${it.provider}:${it.id}" }
+                    .take(18)
+                    .map(::catalogAlbumToAlbum)
+
+                if ((artistTerms.isNotEmpty() && primaryTracks.isEmpty()) ||
+                    (artistTerms.isEmpty() && primaryTracks.isEmpty() && primaryAlbums.isEmpty())
+                ) {
+                    // Do not permanently mark a failed artist fetch as fetched.
+                    // Albums alone are not enough: Home must still retry the
+                    // selected artists so its song rail cannot become generic.
+                    if (fetchedArtistProfile == warmupSignature) fetchedArtistProfile = null
+                }
+
+                // Wait until the recommendation combiner has consumed the whole
+                // primary artist batch, then warm the EXACT covers Home is going
+                // to render. That avoids declaring the onboarding ready based on
+                // seed results that may be reordered/replaced by the final feed.
+                val firstPaintRecommendations = withTimeoutOrNull(2_500L) {
+                    recommendations.first { (tracks, albums) ->
+                        tracks.isNotEmpty() && (albums.isNotEmpty() || primaryAlbums.isEmpty())
+                    }
+                } ?: recommendations.value
+
+                // Download the exact artwork sizes/cache keys used by Home. The
+                // wait is bounded; a broken artwork host can never trap onboarding.
+                CoverImageCache.prefetchHomeAndAwait(
+                    appContext,
+                    trackUrls = firstPaintRecommendations.first.map { it.coverUri },
+                    albumUrls = firstPaintRecommendations.second.map { it.coverUri },
+                    timeoutMs = 6_500L
+                )
+                _recommendationWarmupReady.value = true
+
+                // Genres add variety, but must not delay the handoff after the
+                // selected artists are already represented on Home.
+                if (artistTerms.isNotEmpty() && genreTerms.isNotEmpty()) {
+                    val genreResults = genreTerms.map { genre ->
+                        async {
+                            genre to runCatching {
+                                withTimeoutOrNull(3_800L) { catalog.searchFast(genre, 6, 3) }
+                                    ?: MetadataCatalogProvider.SearchResult(emptyList(), emptyList())
+                            }.getOrElse { MetadataCatalogProvider.SearchResult(emptyList(), emptyList()) }
+                        }
+                    }.awaitAll()
+
+                    if (genreResults.isNotEmpty()) {
+                        val genreTracks = genreResults.flatMap { (_, result) -> result.tracks.take(3) }
+                        val genreAlbums = genreResults.flatMap { (_, result) -> result.albums.take(2) }
+                        relatedCatalog.value = (primaryTracks + genreTracks)
+                            .distinctBy { "${it.provider}:${it.id}" }
+                            .take(48)
+                        onboardingCatalogAlbums.value = (primaryAlbums + genreAlbums)
+                            .distinctBy { "${it.provider}:${it.id}" }
+                            .take(20)
+                            .map(::catalogAlbumToAlbum)
+                        CoverImageCache.prefetch(
+                            appContext,
+                            genreTracks.map { it.coverUri } + genreAlbums.map { it.coverUri }
+                        )
+                    }
+                }
+            } finally {
+                _recommendationWarmupReady.value = true
+            }
+        }
+    }
 
     private fun catalogToTrack(ct: CatalogTrack): Track = Track(
         id = "${ct.provider}:recording:${ct.id}", title = ct.title,
@@ -374,7 +751,8 @@ class MusicVaultViewModel(
     // This prevents Home from rescoring/sorting the catalog during playback or
     // download progress updates. The expensive work runs off the main thread.
     private val recommendations: StateFlow<Pair<List<Track>, List<Album>>> = combine(
-        localTracks, allCatalogAlbums, favoriteIds, recentSearches, cachedCatalogTracks, relatedCatalog
+        localTracks, allCatalogAlbums, favoriteIds, recentSearches, cachedCatalogTracks,
+        relatedCatalog, onboardingCatalogAlbums, _preferencias
     ) { v ->
         val tracks = (v[0] as? List<*>)?.filterIsInstance<Track>() ?: emptyList()
         val catalogAlbums = (v[1] as? List<*>)?.filterIsInstance<Album>() ?: emptyList()
@@ -382,8 +760,12 @@ class MusicVaultViewModel(
         val searches = (v[3] as? List<*>)?.filterIsInstance<String>() ?: emptyList()
         val cachedTracks = (v[4] as? List<*>)?.filterIsInstance<CatalogTrack>() ?: emptyList()
         val related = (v[5] as? List<*>)?.filterIsInstance<CatalogTrack>() ?: emptyList()
+        val warmAlbums = (v[6] as? List<*>)?.filterIsInstance<Album>() ?: emptyList()
+        val prefs = v[7] as? PrefModel ?: PrefModel()
 
-        // User profile: artists and albums already in the vault.
+        // User profile: artists/albums already in the vault plus explicit
+        // first-run preferences. This makes onboarding affect Home immediately
+        // instead of just storing choices that are never used.
         val downloaded = tracks.filter { it.isDownloaded }
         val downloadedIds = downloaded.mapTo(HashSet()) { it.id }
         val topArtists = downloaded.asSequence()
@@ -395,11 +777,17 @@ class MusicVaultViewModel(
             .map { it.key }
             .take(8)
             .toHashSet()
+        topArtists += prefs.artistasFavoritos
+            .asSequence()
+            .map { it.trim().lowercase() }
+            .filter { it.isNotBlank() }
+            .toSet()
         val downloadedAlbumTitles = downloaded.mapTo(HashSet()) { it.albumTitle.trim().lowercase() }
 
-        val tokens = searches.asSequence()
+        val tokens = (searches.asSequence() + prefs.generosFavoritos.asSequence())
             .flatMap { it.lowercase().split(whitespaceRegex).asSequence() }
             .filter { it.length >= 2 }
+            .distinct()
             .take(24)
             .toList()
 
@@ -438,57 +826,107 @@ class MusicVaultViewModel(
             tracks.asSequence().filter {
                 !it.isDownloaded && it.audioUri == null && it.id.contains(":recording:") && it.title.isNotBlank()
             }
-        val tracksList = tracksResult
+        val scoredTracks = tracksResult
             .distinctBy { it.id }
             .filter { it.id !in downloadedIds }
             .map { it to scoreTrack(it) }
             .sortedByDescending { it.second }
-            .take(24)
-            .map { it.first }
             .toList()
 
-        val albumsResult = catalogAlbums.asSequence()
+        // First paint must represent the whole taste profile, not just whichever
+        // artist happened to be queried first. Pull one item per selected artist
+        // per round, then fill remaining slots by score.
+        val selectedArtists = prefs.artistasFavoritos
+            .map(::normalizedArtist)
+            .filter(String::isNotBlank)
+            .distinct()
+        val balancedTracks = ArrayList<Pair<Track, Int>>(24)
+        val usedTrackIds = HashSet<String>()
+        if (selectedArtists.isNotEmpty()) {
+            val buckets = selectedArtists.map { artist ->
+                scoredTracks.filter { (track, _) -> artistMatches(track.artistName, artist) }
+            }
+            var round = 0
+            while (balancedTracks.size < 24 && buckets.any { round < it.size }) {
+                for (bucket in buckets) {
+                    if (round >= bucket.size) continue
+                    val candidate = bucket[round]
+                    if (usedTrackIds.add(candidate.first.id)) balancedTracks += candidate
+                    if (balancedTracks.size >= 24) break
+                }
+                round++
+            }
+        }
+        scoredTracks.forEach { candidate ->
+            if (balancedTracks.size < 24 && usedTrackIds.add(candidate.first.id)) balancedTracks += candidate
+        }
+        val tracksList = balancedTracks.take(24).map { it.first }
+
+        val scoredAlbums = (warmAlbums.asSequence() + catalogAlbums.asSequence())
             .filter { !it.id.startsWith("album:custom:") }
             .distinctBy { it.id }
             .map { it to scoreAlbum(it) }
             .sortedWith(compareByDescending<Pair<Album, Int>> { it.second }.thenBy { it.first.title.lowercase() })
-            .take(12).toList()
-            .map { it.first }
-        tracksList to albumsResult
+            .toList()
+
+        val balancedAlbums = ArrayList<Pair<Album, Int>>(12)
+        val usedAlbumIds = HashSet<String>()
+        if (selectedArtists.isNotEmpty()) {
+            val buckets = selectedArtists.map { artist ->
+                scoredAlbums.filter { (album, _) -> artistMatches(album.artistName, artist) }
+            }
+            var round = 0
+            while (balancedAlbums.size < 12 && buckets.any { round < it.size }) {
+                for (bucket in buckets) {
+                    if (round >= bucket.size) continue
+                    val candidate = bucket[round]
+                    if (usedAlbumIds.add(candidate.first.id)) balancedAlbums += candidate
+                    if (balancedAlbums.size >= 12) break
+                }
+                round++
+            }
+        }
+        scoredAlbums.forEach { candidate ->
+            if (balancedAlbums.size < 12 && usedAlbumIds.add(candidate.first.id)) balancedAlbums += candidate
+        }
+        tracksList to balancedAlbums.take(12).map { it.first }
     }.flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList<Track>() to emptyList())
 
     // Keep rapidly changing download/player state out of recommendation calculation.
+    // _search is intentionally excluded from the combined state to avoid recomposing
+    // the entire UI on every keystroke. Search text is kept locally in the composable
+    // and only pushed to the ViewModel when submitting.
     val state: StateFlow<MusicUiState> = combine(
-        _section, _search, localTracks, downloaded, albums, playlists,
+        _section, localTracks, downloaded, albums, playlists,
         _remoteTracks, _remoteAlbums, _selectedTrack, _selectedPlaylist,
         _selectedPlaylistTracks, _selectedRemoteAlbum, _remoteAlbumTracks, _loadingRemoteAlbum,
         _selectedLocalAlbum, _selectedLocalAlbumTracks, _fullPlayer, _shuffle, _crossfadeSeconds,
         _searching, _scanning, _providerMessage, _errorMessage, favoriteIds, recentSearches, recommendations,
         _playerStyle, _appDesign, _spotifyConnected, _spotifyOffer, _spotifyImporting, _spotifyPlaylistReview
     ) { v ->
-        val rec = v[25] as? Pair<*, *> ?: (emptyList<Track>() to emptyList<Album>())
+        val rec = v[24] as? Pair<*, *> ?: (emptyList<Track>() to emptyList<Album>())
         MusicUiState(
-            section = v[0] as? AppSection ?: AppSection.HOME, search = v[1] as? String ?: "",
-            tracks = v[2].stateList(),
-            downloaded = v[3].stateList(), albums = v[4].stateList(),
-            playlists = v[5].stateList(),
-            remoteTracks = v[6].stateList(), remoteAlbums = v[7].stateList(),
-            selectedTrack = v[8] as? Track, selectedPlaylist = v[9] as? Playlist,
-            selectedPlaylistTracks = v[10].stateList(), selectedRemoteAlbum = v[11] as? CatalogAlbum,
-            remoteAlbumTracks = v[12].stateList(), isLoadingRemoteAlbum = v[13] as? Boolean ?: false,
-            selectedLocalAlbum = v[14] as? Album, selectedLocalAlbumTracks = v[15].stateList(),
-            fullPlayer = v[16] as? Boolean ?: false, shuffle = v[17] as? Boolean ?: false, crossfadeSeconds = v[18] as? Int ?: 5,
-            isSearching = v[19] as? Boolean ?: false, isScanning = v[20] as? Boolean ?: false,
-            providerMessage = v[21] as? String?, errorMessage = v[22] as? String?,
-            favoriteIds = v[23].stateSet(), recentSearches = v[24].stateList(),
+            section = v[0] as? AppSection ?: AppSection.HOME, search = "",
+            tracks = v[1].stateList(),
+            downloaded = v[2].stateList(), albums = v[3].stateList(),
+            playlists = v[4].stateList(),
+            remoteTracks = v[5].stateList(), remoteAlbums = v[6].stateList(),
+            selectedTrack = v[7] as? Track, selectedPlaylist = v[8] as? Playlist,
+            selectedPlaylistTracks = v[9].stateList(), selectedRemoteAlbum = v[10] as? CatalogAlbum,
+            remoteAlbumTracks = v[11].stateList(), isLoadingRemoteAlbum = v[12] as? Boolean ?: false,
+            selectedLocalAlbum = v[13] as? Album, selectedLocalAlbumTracks = v[14].stateList(),
+            fullPlayer = v[15] as? Boolean ?: false, shuffle = v[16] as? Boolean ?: false, crossfadeSeconds = v[17] as? Int ?: 5,
+            isSearching = v[18] as? Boolean ?: false, isScanning = v[19] as? Boolean ?: false,
+            providerMessage = v[20] as? String?, errorMessage = v[21] as? String?,
+            favoriteIds = v[22].stateSet(), recentSearches = v[23].stateList(),
             recommendedTracks = rec.first.stateList(), recommendedAlbums = rec.second.stateList(),
-            playerStyle = v[26] as? String ?: "vinyl",
-            appDesign = v[27] as? String ?: APP_DESIGN_HYBRID,
-            spotifyConnected = v[28] as? Boolean ?: false,
-            spotifyOffer = v[29] as? SpotifyLink,
-            spotifyImporting = v[30] as? Boolean ?: false,
-            spotifyPlaylistReview = v[31] as? SpotifyPlaylist
+            playerStyle = v[25] as? String ?: "vinyl",
+            appDesign = v[26] as? String ?: APP_DESIGN_HYBRID,
+            spotifyConnected = v[27] as? Boolean ?: false,
+            spotifyOffer = v[28] as? SpotifyLink,
+            spotifyImporting = v[29] as? Boolean ?: false,
+            spotifyPlaylistReview = v[30] as? SpotifyPlaylist
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MusicUiState())
 
@@ -526,36 +964,62 @@ class MusicVaultViewModel(
         player.onPlaybackUiChanged = {
             com.musicvault.app.widget.MusicWidgetProvider.push(appContext)
         }
-        // Home discovery: fetch more catalog tracks for the top downloaded
-        // artists. Runs once per profile signature (artist list), with a small
-        // delay so it never competes with the first paint; failures are silent.
+        // Home discovery: fetch catalog tracks from both the existing library
+        // and the tastes chosen during onboarding. The small delay keeps this
+        // network work away from the first frame.
         viewModelScope.launch(Dispatchers.IO) {
-            localTracks
-                .map { list ->
-                    list.filter { it.isDownloaded }
-                        .asSequence()
-                        .map { it.artistName.trim().lowercase() }
-                        .filter { it.isNotBlank() }
-                        .groupingBy { it }.eachCount()
-                        .entries.asSequence()
-                        .sortedByDescending { it.value }
-                        .take(4)
-                        .map { it.key }
-                        .joinToString("|")
-                }
+            combine(localTracks, _preferencias) { list, prefs ->
+                val downloadedArtists = list.filter { it.isDownloaded }
+                    .asSequence()
+                    .map { it.artistName.trim() }
+                    .filter { it.isNotBlank() }
+                    .groupingBy { it.lowercase() }.eachCount()
+                    .entries.asSequence()
+                    .sortedByDescending { it.value }
+                    .take(4)
+                    .map { it.key }
+                    .toList()
+
+                val preferenceTerms = (prefs.artistasFavoritos.asSequence() + prefs.generosFavoritos.asSequence())
+                    .map { it.trim() }
+                    .filter { it.isNotBlank() }
+                    .toList()
+
+                (downloadedArtists + preferenceTerms)
+                    .distinctBy { it.lowercase() }
+                    .take(12)
+            }
                 .distinctUntilChanged()
-                .collect { signature ->
+                .collect { terms ->
+                    val signature = profileSignature(terms)
                     if (signature.isBlank() || signature == fetchedArtistProfile) return@collect
                     fetchedArtistProfile = signature
-                    delay(1500)
+                    delay(350)
                     runCatching {
-                        val results = signature.split('|').flatMap { artist ->
-                            runCatching { catalog.searchTracks(artist, 12) }.getOrDefault(emptyList())
+                        val groups = terms.map { term ->
+                            async {
+                                val fast = runCatching {
+                                    withTimeoutOrNull(4_200L) { catalog.searchTracksFast(term, 12) }.orEmpty()
+                                }.getOrDefault(emptyList())
+                                val tracks = if (fast.isNotEmpty()) fast else runCatching {
+                                    withTimeoutOrNull(2_200L) { catalog.searchTracksMerged(term, 12) }.orEmpty()
+                                }.getOrDefault(emptyList())
+                                term to tracks
+                            }
+                        }.awaitAll()
+                        val refreshed = balanceTrackGroups(groups, 48)
+                        if (refreshed.isNotEmpty()) {
+                            relatedCatalog.value = refreshed
+                        } else if (fetchedArtistProfile == signature) {
+                            // Allow another profile emission/relaunch to retry a
+                            // transient all-provider failure.
+                            fetchedArtistProfile = null
                         }
-                        relatedCatalog.value = results.distinctBy { "${it.provider}:${it.id}" }
                     }
                 }
         }
+        // Run initial state detection (first run vs update)
+        detectarEstadoInicial()
         historyJob = viewModelScope.launch {
             launch {
                 player.audioSessionId.collect { sessionId ->
@@ -787,9 +1251,6 @@ class MusicVaultViewModel(
         if (query.isBlank()) return
         _search.value = query
 
-        // The single search field accepts both catalog text and Spotify links.
-        // A valid URL is an import action; every other value remains a normal
-        // song, artist or album query.
         SpotifyLinks.findInText(query)?.let { link ->
             importSpotifyLink(link)
             return
@@ -807,59 +1268,75 @@ class MusicVaultViewModel(
         _errorMessage.value = null
 
         searchJob = viewModelScope.launch {
-            // Publish the fast-path result the moment it lands so the UI does
-            // not wait for the slower full merge before showing anything.
             try {
-                val fast = catalog.searchFast(query, 40, 20)
-                publishRemoteResults(generation, query, fast.tracks, fast.albums)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                if (generation == searchGeneration) _searching.value = false
-                return@launch
-            }
+                var fastTracks: List<CatalogTrack> = emptyList()
+                var fastAlbums: List<CatalogAlbum> = emptyList()
 
-            // While the user is already looking at results, fetch the merged
-            // view across every provider and replace the fast-path list when it
-            // arrives. Generation guard prevents stale merges from clobbering
-            // a newer query's first paint.
-            try {
-                val merged = withTimeoutOrNull(SEARCH_MERGE_TIMEOUT_MS) {
-                    catalog.searchMerged(query, 40, 20)
+                // Songs and albums no longer wait on one another. Deezer's first
+                // useful result for either category is published immediately.
+                val tracksFastJob = launch {
+                    fastTracks = withTimeoutOrNull(SEARCH_FAST_TIMEOUT_MS) {
+                        catalog.searchTracksFast(query, 40)
+                    }.orEmpty()
+                    if (fastTracks.isNotEmpty()) {
+                        publishRemoteTracks(generation, fastTracks)
+                    }
                 }
-                if (merged != null && generation == searchGeneration) {
-                    publishRemoteResults(generation, query, merged.tracks, merged.albums)
+                val albumsFastJob = launch {
+                    fastAlbums = withTimeoutOrNull(SEARCH_FAST_TIMEOUT_MS) {
+                        catalog.searchAlbumsFast(query, 20)
+                    }.orEmpty()
+                    if (fastAlbums.isNotEmpty()) {
+                        publishRemoteAlbums(generation, fastAlbums)
+                    }
+                }
+                tracksFastJob.join()
+                albumsFastJob.join()
+
+                // Normal music searches are already complete after the fast
+                // Deezer path. Only pay for the slower multi-provider merge when
+                // a category came back empty or suspiciously small.
+                val refineTracksJob = if (fastTracks.size < 5) launch {
+                    val refined = withTimeoutOrNull(SEARCH_REFINE_TIMEOUT_MS) {
+                        catalog.searchTracksMerged(query, 40)
+                    }.orEmpty()
+                    if (refined.isNotEmpty()) publishRemoteTracks(generation, refined)
+                } else null
+
+                val refineAlbumsJob = if (fastAlbums.isEmpty()) launch {
+                    val refined = withTimeoutOrNull(SEARCH_REFINE_TIMEOUT_MS) {
+                        catalog.searchAlbumsMerged(query, 20)
+                    }.orEmpty()
+                    if (refined.isNotEmpty()) publishRemoteAlbums(generation, refined)
+                } else null
+
+                refineTracksJob?.join()
+                refineAlbumsJob?.join()
+
+                if (generation == searchGeneration && _remoteTracks.value.isEmpty() && _remoteAlbums.value.isEmpty()) {
+                    _errorMessage.value = "No se encontró metadata para \"$query\"."
                 }
             } catch (e: CancellationException) {
                 throw e
-            } catch (_: Exception) {
-                // The fast-path result is already shown; ignore merge errors.
             } finally {
                 if (generation == searchGeneration) {
                     _searching.value = false
+                    viewModelScope.launch(Dispatchers.IO) { repository.recordSearch(query) }
                 }
             }
         }
     }
 
-    private fun publishRemoteResults(
-        generation: Long,
-        query: String,
-        tracks: List<CatalogTrack>,
-        albums: List<CatalogAlbum>
-    ) {
+    private fun publishRemoteTracks(generation: Long, tracks: List<CatalogTrack>) {
         if (generation != searchGeneration) return
-        CoverImageCache.prefetch(
-            appContext,
-            tracks.map { it.coverUri } + albums.map { it.coverUri }
-        )
+        CoverImageCache.prefetch(appContext, tracks.map { it.coverUri })
+        if (generation == searchGeneration) _remoteTracks.value = tracks
+    }
+
+    private fun publishRemoteAlbums(generation: Long, albums: List<CatalogAlbum>) {
         if (generation != searchGeneration) return
-        _remoteTracks.value = tracks
-        _remoteAlbums.value = albums
-        if (tracks.isEmpty() && albums.isEmpty()) {
-            _errorMessage.value = "No se encontró metadata para \"${query}\"."
-        }
-        viewModelScope.launch(Dispatchers.IO) { repository.recordSearch(query) }
+        CoverImageCache.prefetch(appContext, albums.map { it.coverUri })
+        if (generation == searchGeneration) _remoteAlbums.value = albums
     }
 
     fun selectTrack(track: Track) {
@@ -1382,7 +1859,12 @@ class MusicVaultViewModel(
         if (title.isBlank()) return
         viewModelScope.launch(Dispatchers.IO) {
             val id = "playlist:custom:${java.util.UUID.randomUUID()}"
-            repository.createPlaylist(id, title.trim(), "Creada por ti")
+            repository.createPlaylist(
+                id = id,
+                title = title.trim(),
+                description = "Creada por ti",
+                coverUri = tracks.firstOrNull { !it.coverUri.isNullOrBlank() }?.coverUri
+            )
             if (tracks.isNotEmpty()) repository.addTracksToPlaylist(id, tracks)
         }
     }
@@ -1406,14 +1888,31 @@ class MusicVaultViewModel(
         // Only one detail overlay may be visible at a time.
         closeLocalAlbum()
         closePlaylist()
+        remoteAlbumJob?.cancel()
+
+        val cacheKey = "${album.provider}:${album.id}"
         _selectedRemoteAlbum.value = album
+
+        // Re-open immediately from memory when possible. This also prevents a
+        // second network response from landing while the user is already
+        // scrolling the album.
+        remoteAlbumTrackCache[cacheKey]?.let { cached ->
+            _remoteAlbumTracks.value = cached
+            _loadingRemoteAlbum.value = false
+            return
+        }
+
         _remoteAlbumTracks.value = emptyList()
         _loadingRemoteAlbum.value = true
         playlistJob?.cancel()
         searchJob?.cancel()
-        viewModelScope.launch {
+        remoteAlbumJob = viewModelScope.launch {
             try {
                 val tracks = withContext(Dispatchers.IO) { catalog.tracksForAlbum(album, 50) }
+                // Ignore a late response if the user already opened another album.
+                val current = _selectedRemoteAlbum.value
+                if (current?.id != album.id || current.provider != album.provider) return@launch
+                if (tracks.isNotEmpty()) remoteAlbumTrackCache[cacheKey] = tracks
                 _remoteAlbumTracks.value = tracks
                 if (tracks.isEmpty()) {
                     _errorMessage.value = "No se pudieron obtener las canciones de este álbum."
@@ -1421,14 +1920,22 @@ class MusicVaultViewModel(
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
-                _errorMessage.value = "No se pudo abrir el álbum: ${e.message ?: "error de red"}"
+                val current = _selectedRemoteAlbum.value
+                if (current?.id == album.id && current.provider == album.provider) {
+                    _errorMessage.value = "No se pudo abrir el álbum: ${e.message ?: "error de red"}"
+                }
             } finally {
-                _loadingRemoteAlbum.value = false
+                val current = _selectedRemoteAlbum.value
+                if (current?.id == album.id && current.provider == album.provider) {
+                    _loadingRemoteAlbum.value = false
+                }
             }
         }
     }
 
     fun closeRemoteAlbum() {
+        remoteAlbumJob?.cancel()
+        remoteAlbumJob = null
         _selectedRemoteAlbum.value = null
         _remoteAlbumTracks.value = emptyList()
         _loadingRemoteAlbum.value = false
@@ -1881,7 +2388,7 @@ class MusicVaultViewModel(
             downloadJobs.clear()
             downloadWaiters.clear()
         }
-        searchJob?.cancel(); playlistJob?.cancel(); albumJob?.cancel(); historyJob?.cancel()
+        searchJob?.cancel(); playlistJob?.cancel(); albumJob?.cancel(); remoteAlbumJob?.cancel(); historyJob?.cancel()
         equalizer.release()
         player.release()
         super.onCleared()

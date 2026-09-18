@@ -7,25 +7,26 @@ plugins {
 
 android {
     namespace = "com.musicvault.app"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.musicvault.app"
         minSdk = 26
-        targetSdk = 35
-        versionCode = 11
-        versionName = "0.5.0"
+        targetSdk = 36
+        versionCode = 16
+        versionName = "0.5.5"
 
     }
 
-    // Each device receives only its native FFmpeg/Python payload. Play bundles
-    // split automatically; direct APK builds emit one file per supported ABI.
+    // Keep one practical universal phone APK without bundling desktop/emulator
+    // x86 payloads from ffmpeg/youtube-dl. Gradle also emits the two smaller
+    // per-ABI APKs, while app-universal-* works on ARM32 and ARM64 phones.
     splits {
         abi {
             isEnable = true
             reset()
             include("arm64-v8a", "armeabi-v7a")
-            isUniversalApk = false
+            isUniversalApk = true
         }
     }
     
@@ -68,6 +69,7 @@ android {
         jniLibs {
             useLegacyPackaging = true
         }
+        // Asegurar que las libs nativas no sean eliminadas por shrinking
         resources {
             excludes += setOf(
                 "/META-INF/{AL2.0,LGPL2.1}",

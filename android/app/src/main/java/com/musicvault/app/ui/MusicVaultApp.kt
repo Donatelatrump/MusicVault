@@ -3,6 +3,7 @@ package com.musicvault.app.ui
 import kotlin.math.roundToInt
 
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import android.Manifest
 import android.content.ClipboardManager
 import android.content.Context
@@ -13,6 +14,7 @@ import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import androidx.activity.compose.BackHandler
@@ -38,11 +40,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.layout
 import androidx.media3.common.Player
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.togetherWith
@@ -123,6 +122,7 @@ import com.musicvault.app.catalog.CoverImageCache
 import com.musicvault.app.data.Album
 import com.musicvault.app.data.Playlist
 import com.musicvault.app.data.Track
+import com.musicvault.app.data.UserPreferences
 import com.musicvault.app.catalog.CatalogAlbum
 import com.musicvault.app.catalog.CatalogTrack
 import com.musicvault.app.ui.search.RemoteResultItem
@@ -138,6 +138,7 @@ import com.musicvault.app.spotify.SpotifyPlaylist
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.floor
@@ -145,6 +146,8 @@ import kotlin.math.pow
 import kotlin.math.sin
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.ui.graphics.vector.ImageVector
+import com.musicvault.app.ui.onboarding.OnboardingScreen
+import com.musicvault.app.ui.onboarding.RecommendationLoadingScreen
 
 /** Deterministic spine accent for a key. Tone-on-tone pair for subtle placeholder fills. */
 private fun gradientFor(key: String): Pair<Color, Color> {
@@ -253,17 +256,14 @@ private fun SpotifyClipboardNotice(
 }
 
 @Composable
-fun MusicVaultApp(vm: MusicVaultViewModel) {
+fun MusicVaultApp(
+    vm: MusicVaultViewModel,
+    onAppReadyForPermissions: () -> Unit = {}
+) {
     val state by vm.state.collectAsStateWithLifecycle()
     val isPlaying by vm.isPlaying.collectAsStateWithLifecycle()
     val albumDownloads by vm.albumDownloads.collectAsStateWithLifecycle()
     val favoriteIds = state.favoriteIds
-    val equalizerBands by vm.equalizerBands.collectAsStateWithLifecycle()
-    val eqEnabled by vm.eqEnabled.collectAsStateWithLifecycle()
-    val eqPreset by vm.eqPreset.collectAsStateWithLifecycle()
-    val loudnessGainMb by vm.loudnessGainMb.collectAsStateWithLifecycle()
-    val bassBoostAvailable by vm.bassBoostAvailable.collectAsStateWithLifecycle()
-    val virtualizerAvailable by vm.virtualizerAvailable.collectAsStateWithLifecycle()
     val downloadDirLabel by vm.downloadDirLabel.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val rootView = LocalView.current
@@ -275,11 +275,11 @@ fun MusicVaultApp(vm: MusicVaultViewModel) {
     var showSettings by rememberSaveable { mutableStateOf(false) }
     var showSpotifyLogin by rememberSaveable { mutableStateOf(false) }
     val searchState = remember(
-        state.search, state.downloaded, state.remoteTracks, state.remoteAlbums,
+        state.downloaded, state.remoteTracks, state.remoteAlbums,
         state.isSearching, state.selectedTrack?.id, state.playlists, state.section
     ) {
         SearchScreenState(
-            state.search, state.downloaded, state.remoteTracks, state.remoteAlbums,
+            state.downloaded, state.remoteTracks, state.remoteAlbums,
             state.isSearching, state.selectedTrack?.id, state.playlists, state.section == AppSection.SEARCH
         )
     }
@@ -290,6 +290,87 @@ fun MusicVaultApp(vm: MusicVaultViewModel) {
             state.downloaded, state.playlists, state.albums,
             state.selectedTrack?.id, state.section == AppSection.LIBRARY
         )
+    }
+
+    val estadoInicialCargado by vm.estadoInicialCargado.collectAsStateWithLifecycle()
+    val esPrimeraVez by vm.esPrimeraVez.collectAsStateWithLifecycle()
+    val recommendationWarmupReady by vm.recommendationWarmupReady.collectAsStateWithLifecycle()
+    var onboardingFinishing by rememberSaveable { mutableStateOf(false) }
+    var onboardingGenres by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var onboardingArtists by remember { mutableStateOf<Set<String>>(emptySet()) }
+    // Set only after Home has accepted the final recommendation list and the
+    // RecyclerView has reached a real pre-draw with the artwork already warmed.
+    // This prevents the loading animation from disappearing into a half-empty Home.
+    var homeVisualReady by remember { mutableStateOf(false) }
+
+    // After the artist step we persist preferences immediately. That lets the
+    // real Home screen mount behind the loading surface and lets the ViewModel
+    // start catalog/recommendation work before the user sees the feed.
+    LaunchedEffect(onboardingFinishing) {
+        if (onboardingFinishing) {
+            // Keep the transition visible long enough to feel intentional, while
+            // all four persistent main screens are already mounted underneath.
+            delay(2_400)
+            // Do not dismiss on the first network result. Keep the animation on
+            // top until: (1) the recommendation batch is complete, (2) Home has
+            // both rails populated, and (3) the RecyclerView has committed and
+            // reached a pre-draw with those rows. Artwork is pre-warmed by the
+            // ViewModel before recommendationWarmupReady becomes true.
+            // A generous timeout is only an offline/error escape hatch.
+            withTimeoutOrNull(18_000) {
+                snapshotFlow {
+                    recommendationWarmupReady &&
+                        homeVisualReady &&
+                        state.recommendedTracks.isNotEmpty() &&
+                        state.recommendedAlbums.isNotEmpty()
+                }.first { it }
+            }
+            // One extra frame lets Compose/RecyclerView present the cached images
+            // before the overlay starts its fade-out.
+            delay(120)
+            onboardingFinishing = false
+        }
+    }
+
+    // Permission dialogs should never cover onboarding or its recommendation
+    // handoff. Ask only after the final loading surface has disappeared.
+    LaunchedEffect(estadoInicialCargado, esPrimeraVez, onboardingFinishing) {
+        if (estadoInicialCargado && !esPrimeraVez && !onboardingFinishing) {
+            onAppReadyForPermissions()
+        }
+    }
+
+    // Avoid flashing onboarding to existing users while Room resolves the
+    // first-run state after process start.
+    if (!estadoInicialCargado) {
+        Box(Modifier.fillMaxSize().background(VaultColors.Background))
+        return
+    }
+
+    // The two choice steps are true full-screen onboarding. On the last tap we
+    // flip to `onboardingFinishing`, persist the tastes, and allow the real app
+    // to compose underneath the recommendation animation.
+    if (esPrimeraVez && !onboardingFinishing) {
+        OnboardingScreen(
+            onCompleto = { generos, artistas ->
+                onboardingGenres = generos
+                onboardingArtists = artistas
+                homeVisualReady = false
+                onboardingFinishing = true
+                // Mark the recommendation batch first so the regular profile
+                // collector cannot race this first-run preload with a duplicate request.
+                vm.preloadRecommendations(generos, artistas)
+                vm.guardarPreferencias(generos, artistas)
+                vm.selectSection(AppSection.HOME)
+            },
+            onSkip = {
+                onboardingGenres = emptySet()
+                onboardingArtists = emptySet()
+                vm.saltarOnboarding()
+                vm.selectSection(AppSection.HOME)
+            }
+        )
+        return
     }
 
     // Android only exposes clipboard contents while an app is in the foreground.
@@ -396,12 +477,6 @@ fun MusicVaultApp(vm: MusicVaultViewModel) {
             if (showSettings && !state.fullPlayer) {
                 SettingsScreen(
                     crossfadeSeconds = state.crossfadeSeconds,
-                    equalizerBands = equalizerBands,
-                    eqEnabled = eqEnabled,
-                    eqPreset = eqPreset,
-                    loudnessGainMb = loudnessGainMb,
-                    bassBoostAvailable = bassBoostAvailable,
-                    virtualizerAvailable = virtualizerAvailable,
                     playerStyle = state.playerStyle,
                     appDesign = state.appDesign,
                     downloadDirLabel = downloadDirLabel,
@@ -410,12 +485,6 @@ fun MusicVaultApp(vm: MusicVaultViewModel) {
                     onCrossfadeChange = vm::setCrossfadeSeconds,
                     onPlayerStyleChange = vm::setPlayerStyle,
                     onAppDesignChange = vm::setAppDesign,
-                    onEqualizerEnabled = vm::setEqualizerEnabled,
-                    onEqualizerBand = vm::setEqualizerBand,
-                    onEqualizerPreset = vm::applyEqualizerPreset,
-                    onLoudnessChange = vm::setLoudnessGain,
-                    onBassBoostStrength = vm::setBassBoostStrength,
-                    onVirtualizerStrength = vm::setVirtualizerStrength,
                     onPickDownloadFolder = { folderPicker.launch(null) },
                     onUseInternalFolder = vm::useInternalDownloads,
                     onConnectSpotify = { showSpotifyLogin = true },
@@ -465,25 +534,35 @@ fun MusicVaultApp(vm: MusicVaultViewModel) {
                             active = state.section == AppSection.HOME,
                             label = "Inicio"
                         ) {
-                            HomeScreen(state, albumDownloads, isPlaying, vm)
+                            HomeScreen(
+                                state = state,
+                                albumDownloads = albumDownloads,
+                                isPlaying = isPlaying,
+                                vm = vm,
+                                onInitialVisualReady = {
+                                    if (onboardingFinishing && recommendationWarmupReady && !homeVisualReady) {
+                                        homeVisualReady = true
+                                    }
+                                }
+                            )
                         }
                         PersistentSection(
                             active = state.section == AppSection.SEARCH,
                             label = "Buscar"
                         ) {
-                            SearchScreen(searchState, isPlaying, vm)
+                            SearchScreen(searchState, isPlaying, vm, prewarm = onboardingFinishing)
                         }
                         PersistentSection(
                             active = state.section == AppSection.LIBRARY,
                             label = "Biblioteca"
                         ) {
-                            LibraryScreen(libraryState, isPlaying, vm)
+                            LibraryScreen(libraryState, isPlaying, vm, prewarm = onboardingFinishing)
                         }
                         PersistentSection(
                             active = state.section == AppSection.PLAYLISTS,
                             label = "Álbumes"
                         ) {
-                            PlaylistScreen(state, vm)
+                            PlaylistScreen(state, vm, prewarm = onboardingFinishing)
                         }
 
                     }
@@ -588,6 +667,17 @@ fun MusicVaultApp(vm: MusicVaultViewModel) {
             onDismissError = vm::clearError,
             onDismissMessage = vm::clearProviderMessage
         )
+        // Keep first-run loading fully opaque. Fading the whole overlay made the
+        // already-mounted Home screen visible while its rows were still settling.
+        // We remove the surface atomically only after the visual-ready gate passes.
+        if (onboardingFinishing) {
+            Box(Modifier.fillMaxSize().zIndex(2_000f)) {
+                RecommendationLoadingScreen(
+                    genres = onboardingGenres,
+                    artists = onboardingArtists
+                )
+            }
+        }
     }
     }
 }
@@ -827,6 +917,108 @@ private const val SPOTIFY_LOGIN_URL =
     "https://accounts.spotify.com/login?continue=https%3A%2F%2Fopen.spotify.com%2F"
 
 @Composable
+private fun VaultModalDialog(
+    title: String,
+    subtitle: String? = null,
+    icon: ImageVector,
+    onDismiss: () -> Unit,
+    content: @Composable ColumnScope.() -> Unit,
+    actions: @Composable RowScope.() -> Unit
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 18.dp)
+                .widthIn(max = 560.dp),
+            shape = RoundedCornerShape(28.dp),
+            color = VaultColors.Surface1,
+            contentColor = VaultColors.TextPrimary,
+            tonalElevation = 0.dp,
+            shadowElevation = 24.dp,
+            border = BorderStroke(1.dp, VaultColors.Divider)
+        ) {
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(start = 20.dp, top = 18.dp, end = 10.dp, bottom = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(46.dp)
+                            .clip(RoundedCornerShape(15.dp))
+                            .background(VaultColors.AccentSoft),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(icon, contentDescription = null, tint = VaultColors.Accent, modifier = Modifier.size(24.dp))
+                    }
+                    Spacer(Modifier.width(13.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            title,
+                            color = VaultColors.TextPrimary,
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        if (!subtitle.isNullOrBlank()) {
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                subtitle,
+                                color = VaultColors.TextSecondary,
+                                fontSize = 12.sp,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = "Cerrar", tint = VaultColors.TextSecondary)
+                    }
+                }
+                HorizontalDivider(color = VaultColors.Divider.copy(alpha = 0.8f))
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
+                    content = content
+                )
+                HorizontalDivider(color = VaultColors.Divider.copy(alpha = 0.8f))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(VaultColors.SurfaceBase)
+                        .padding(horizontal = 18.dp, vertical = 14.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
+                    verticalAlignment = Alignment.CenterVertically,
+                    content = actions
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun VaultSelectionBadge(text: String) {
+    Surface(
+        shape = RoundedCornerShape(50),
+        color = VaultColors.AccentSoft,
+        border = BorderStroke(1.dp, VaultColors.Accent.copy(alpha = 0.28f))
+    ) {
+        Text(
+            text,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+            color = VaultColors.Accent,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            fontFamily = VaultFonts.Mono
+        )
+    }
+}
+
+@Composable
 private fun SpotifyPlaylistReviewDialog(
     playlist: SpotifyPlaylist,
     onImport: (Set<String>) -> Unit,
@@ -835,47 +1027,115 @@ private fun SpotifyPlaylistReviewDialog(
     var selected by remember(playlist.id) {
         mutableStateOf<Set<String>>(playlist.tracks.mapTo(linkedSetOf()) { it.id })
     }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(playlist.title) },
-        text = {
-            Column {
-                LazyColumn(Modifier.heightIn(max = 420.dp)) {
-                    items(playlist.tracks, key = { it.id }) { track ->
-                        val checked = track.id in selected
-                        Row(
-                            Modifier.fillMaxWidth().clickable {
-                                selected = if (checked) selected - track.id else selected + track.id
-                            }.padding(vertical = 5.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Checkbox(
-                                checked = checked,
-                                onCheckedChange = {
-                                    selected = if (checked) selected - track.id else selected + track.id
-                                }
-                            )
-                            Column(Modifier.weight(1f)) {
-                                Text(track.title, color = VaultColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(track.artist, color = VaultColors.TextSecondary, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-                        }
-                    }
-                }
-                Text(
-                    "${selected.size} de ${playlist.tracks.size} seleccionadas",
-                    color = VaultColors.TextTertiary,
-                    fontSize = 11.sp,
-                    fontFamily = VaultFonts.Mono
+    val allSelected = selected.size == playlist.tracks.size && playlist.tracks.isNotEmpty()
+    val spotifyPickerAdapter = remember(playlist.id) {
+        SpotifyImportTrackPickerAdapter(selected) { selected = it }
+    }
+
+    VaultModalDialog(
+        title = playlist.title,
+        subtitle = "Importar playlist de Spotify",
+        icon = VaultIcons.QueueMusic,
+        onDismiss = onDismiss,
+        content = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CachedCover(
+                    url = playlist.coverUrl,
+                    contentDescription = "Portada de ${playlist.title}",
+                    modifier = Modifier
+                        .size(74.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(VaultColors.Surface2),
+                    targetSizePx = 180,
+                    contentScale = ContentScale.Crop
                 )
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "Elige qué canciones quieres traer a Music Vault",
+                        color = VaultColors.TextPrimary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    VaultSelectionBadge("${selected.size} / ${playlist.tracks.size} seleccionadas")
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("CANCIONES", color = VaultColors.TextTertiary, fontSize = 11.sp, fontFamily = VaultFonts.Mono)
+                TextButton(
+                    onClick = {
+                        if (allSelected) spotifyPickerAdapter.clearSelection()
+                        else spotifyPickerAdapter.selectAll(playlist.tracks)
+                    }
+                ) {
+                    Text(if (allSelected) "Quitar todas" else "Seleccionar todas", color = VaultColors.Accent)
+                }
+            }
+
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = VaultColors.SurfaceBase,
+                border = BorderStroke(1.dp, VaultColors.Divider)
+            ) {
+                if (playlist.tracks.isEmpty()) {
+                    Box(Modifier.fillMaxWidth().height(130.dp), contentAlignment = Alignment.Center) {
+                        Text("Spotify no devolvió canciones para esta playlist.", color = VaultColors.TextSecondary)
+                    }
+                } else {
+                    AndroidView(
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp, max = 360.dp),
+                        factory = { context ->
+                            RecyclerView(context).apply {
+                                layoutManager = LinearLayoutManager(context).apply {
+                                    isItemPrefetchEnabled = true
+                                    initialPrefetchItemCount = 10
+                                }
+                                adapter = spotifyPickerAdapter
+                                itemAnimator = null
+                                setHasFixedSize(true)
+                                setItemViewCacheSize(14)
+                                recycledViewPool.setMaxRecycledViews(0, 18)
+                                overScrollMode = RecyclerView.OVER_SCROLL_IF_CONTENT_SCROLLS
+                                setPadding(0, 6, 0, 6)
+                                clipToPadding = false
+                            }
+                        },
+                        update = { spotifyPickerAdapter.update(playlist.tracks) }
+                    )
+                }
             }
         },
-        confirmButton = {
-            TextButton(onClick = { onImport(selected) }, enabled = selected.isNotEmpty()) {
-                Text("Importar seleccionadas")
+        actions = {
+            OutlinedButton(
+                onClick = onDismiss,
+                shape = RoundedCornerShape(14.dp),
+                border = BorderStroke(1.dp, VaultColors.Divider)
+            ) {
+                Text("Cancelar", color = VaultColors.TextSecondary)
             }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } }
+            Button(
+                onClick = { onImport(selected) },
+                enabled = selected.isNotEmpty(),
+                shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = VaultColors.Accent,
+                    contentColor = VaultColors.OnAccent,
+                    disabledContainerColor = VaultColors.Surface3,
+                    disabledContentColor = VaultColors.TextTertiary
+                )
+            ) {
+                Icon(VaultIcons.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(7.dp))
+                Text("Importar ${selected.size}", fontWeight = FontWeight.Bold)
+            }
+        }
     )
 }
 
@@ -901,7 +1161,13 @@ private fun PersistentSection(
 }
 
 @Composable
-private fun HomeScreen(state: MusicUiState, albumDownloads: Set<String>, isPlaying: Boolean, vm: MusicVaultViewModel) {
+private fun HomeScreen(
+    state: MusicUiState,
+    albumDownloads: Set<String>,
+    isPlaying: Boolean,
+    vm: MusicVaultViewModel,
+    onInitialVisualReady: () -> Unit = {}
+) {
     val context = LocalContext.current
     val adapter = remember { HomeFeedAdapter(vm) }
     // Filtered once per albums emission instead of once per recomposition.
@@ -925,10 +1191,11 @@ private fun HomeScreen(state: MusicUiState, albumDownloads: Set<String>, isPlayi
                 setPadding(20, 20, 20, 20)
                 clipToPadding = true
                 overScrollMode = RecyclerView.OVER_SCROLL_IF_CONTENT_SCROLLS
+                setFitsSystemWindows(true)
                 this.adapter = adapter
             }
         },
-        update = {
+        update = { rv ->
             // Skip adapter pushes while the tab is hidden (alpha 0): this
             // screen recomposes on every root state emission, but pushing
             // into a hidden RecyclerView is wasted work. Reactivating the
@@ -944,7 +1211,36 @@ private fun HomeScreen(state: MusicUiState, albumDownloads: Set<String>, isPlayi
                     albumDownloads = albumDownloads,
                     selectedTrackId = state.selectedTrack?.id,
                     isPlaying = isPlaying,
-                    hybridDesign = state.appDesign == APP_DESIGN_HYBRID
+                    hybridDesign = state.appDesign == APP_DESIGN_HYBRID,
+                    onContentCommitted = if (state.recommendedTracks.isNotEmpty() && state.recommendedAlbums.isNotEmpty()) {
+                        {
+                            // The adapter list is committed. Wait for an actual
+                            // pre-draw so the loading overlay is not removed while
+                            // RecyclerView/Compose are still laying out the cards.
+                            rv.post {
+                                if (!rv.isAttachedToWindow) {
+                                    onInitialVisualReady()
+                                } else {
+                                    val observer = rv.viewTreeObserver
+                                    if (!observer.isAlive) {
+                                        onInitialVisualReady()
+                                    } else {
+                                        val listener = object : ViewTreeObserver.OnPreDrawListener {
+                                            override fun onPreDraw(): Boolean {
+                                                if (rv.viewTreeObserver.isAlive) {
+                                                    rv.viewTreeObserver.removeOnPreDrawListener(this)
+                                                }
+                                                rv.post { onInitialVisualReady() }
+                                                return true
+                                            }
+                                        }
+                                        observer.addOnPreDrawListener(listener)
+                                        rv.invalidate()
+                                    }
+                                }
+                            }
+                        }
+                    } else null
                 )
             }
         }
@@ -994,7 +1290,7 @@ internal fun RecommendationTrackCard(
                 )
             }
             when {
-                downloading -> DownloadDotsSpinner(modifier = Modifier.size(34.dp))
+                downloading -> ThinDownloadProgress(progress = ((progress ?: 0) / 100f).coerceIn(0f, 1f), modifier = Modifier.width(34.dp))
                 track.isDownloaded -> actions()
                 else -> {
                     IconButton(onClick = onPlay, modifier = Modifier.size(38.dp)) {
@@ -1007,27 +1303,24 @@ internal fun RecommendationTrackCard(
 }
 
 @Composable
-private fun DownloadDotsSpinner(modifier: Modifier = Modifier, dotColor: Color = VaultColors.Accent) {
-    val transition = rememberInfiniteTransition(label = "download-dots")
-    val phase by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 8f,
-        animationSpec = infiniteRepeatable(tween(900, easing = androidx.compose.animation.core.LinearEasing)),
-        label = "download-dots-phase"
-    )
-    Canvas(modifier) {
-        val cx = size.width / 2f
-        val cy = size.height / 2f
-        val radius = size.minDimension * 0.30f
-        val dotRadius = size.minDimension * 0.065f
-        for (i in 0 until 8) {
-            val angle = Math.toRadians(i * 45.0 - 90.0)
-            val x = cx + kotlin.math.cos(angle).toFloat() * radius
-            val y = cy + kotlin.math.sin(angle).toFloat() * radius
-            val distance = ((i - phase.toInt()) + 8) % 8
-            val alpha = 0.28f + 0.72f * ((8 - distance) / 8f)
-            drawCircle(dotColor.copy(alpha = alpha), dotRadius, androidx.compose.ui.geometry.Offset(x, y))
-        }
+private fun ThinDownloadProgress(
+    progress: Float? = null,
+    modifier: Modifier = Modifier,
+    color: Color = VaultColors.Accent
+) {
+    if (progress == null) {
+        LinearProgressIndicator(
+            modifier = modifier.height(2.dp),
+            color = color,
+            trackColor = VaultColors.Surface2
+        )
+    } else {
+        LinearProgressIndicator(
+            progress = { progress.coerceIn(0f, 1f) },
+            modifier = modifier.height(2.dp),
+            color = color,
+            trackColor = VaultColors.Surface2
+        )
     }
 }
 
@@ -1043,7 +1336,6 @@ internal fun greetingForNow(): String {
 
 @Immutable
 private data class SearchScreenState(
-    val search: String,
     val downloaded: List<Track>,
     val remoteTracks: List<CatalogTrack>,
     val remoteAlbums: List<CatalogAlbum>,
@@ -1053,11 +1345,14 @@ private data class SearchScreenState(
     val active: Boolean
 )
 
+private enum class SearchTab { TRACKS, ALBUMS }
+
 @Composable
 private fun SearchScreen(
     state: SearchScreenState,
     isPlaying: Boolean,
-    vm: MusicVaultViewModel
+    vm: MusicVaultViewModel,
+    prewarm: Boolean = false
 ) {
     val hybrid = LocalHybridDesign.current
     val downloadProgress by vm.downloadProgress.collectAsStateWithLifecycle()
@@ -1066,6 +1361,8 @@ private fun SearchScreen(
     var showCreateAlbum by remember { mutableStateOf(false) }
     var newAlbumName by remember { mutableStateOf("") }
     var deleteSearchTrack by remember { mutableStateOf<CatalogTrack?>(null) }
+    var searchTab by rememberSaveable { mutableStateOf(SearchTab.TRACKS) }
+    var submittedQuery by rememberSaveable { mutableStateOf("") }
     val latestIsPlaying by rememberUpdatedState(isPlaying)
     val latestSelectedTrackId by rememberUpdatedState(state.selectedTrackId)
 
@@ -1092,6 +1389,16 @@ private fun SearchScreen(
     }
     // The downloaded-id set only changes when the library changes; rebuilding it
     // on every unrelated recomposition was pure churn for the search list.
+    var searchText by rememberSaveable { mutableStateOf("") }
+    fun submitCurrentSearch() {
+        val query = searchText.trim()
+        if (query.isBlank()) return
+        submittedQuery = query
+        // Every fresh search opens on songs; the album results are fetched in
+        // the same request and are one tap away in the segmented switch below.
+        searchTab = SearchTab.TRACKS
+        vm.submitSearch(query)
+    }
     val downloadedIds = remember(state.downloaded) {
         state.downloaded
             .asSequence()
@@ -1100,20 +1407,24 @@ private fun SearchScreen(
             .toSet()
     }
 
-    val resultItems = remember(state.remoteAlbums, state.remoteTracks) {
+    val resultItems = remember(submittedQuery, searchTab, state.remoteAlbums, state.remoteTracks, state.isSearching) {
         buildList<RemoteResultItem> {
-            if (state.remoteAlbums.isNotEmpty()) {
-                add(RemoteResultItem.HeaderItem("Álbumes"))
-                state.remoteAlbums.forEach { add(RemoteResultItem.AlbumItem(it)) }
-            }
-            if (state.remoteTracks.isNotEmpty()) {
-                add(RemoteResultItem.HeaderItem("Canciones"))
-                state.remoteTracks.forEach { add(RemoteResultItem.TrackItem(it)) }
-            }
-            if (state.remoteAlbums.isEmpty() && state.remoteTracks.isEmpty() &&
-                !state.isSearching && state.search.isNotBlank()
-            ) {
-                add(RemoteResultItem.HeaderItem("No se encontraron resultados."))
+            if (submittedQuery.isBlank()) return@buildList
+            when (searchTab) {
+                SearchTab.TRACKS -> {
+                    if (state.remoteTracks.isNotEmpty()) {
+                        state.remoteTracks.forEach { add(RemoteResultItem.TrackItem(it)) }
+                    } else if (!state.isSearching) {
+                        add(RemoteResultItem.HeaderItem("No encontramos canciones para “$submittedQuery”."))
+                    }
+                }
+                SearchTab.ALBUMS -> {
+                    if (state.remoteAlbums.isNotEmpty()) {
+                        state.remoteAlbums.forEach { add(RemoteResultItem.AlbumItem(it)) }
+                    } else if (!state.isSearching) {
+                        add(RemoteResultItem.HeaderItem("No encontramos álbumes para “$submittedQuery”."))
+                    }
+                }
             }
         }
     }
@@ -1124,24 +1435,18 @@ private fun SearchScreen(
             .padding(horizontal = 20.dp, vertical = if (hybrid) 10.dp else 20.dp)
     ) {
         OutlinedTextField(
-            value = state.search,
-            onValueChange = vm::updateSearchInput,
+            value = searchText,
+            onValueChange = { searchText = it },
             Modifier.fillMaxWidth(),
-            placeholder = {
-                Text(
-                    if (hybrid) "Canción, artista, álbum o enlace" else "Canción, artista o álbum",
-                    color = VaultColors.TextTertiary
-                )
-            },
             leadingIcon = { Icon(Icons.Default.Search, null, tint = VaultColors.TextSecondary) },
             trailingIcon = {
-                IconButton(onClick = { vm.submitSearch() }, enabled = state.search.isNotBlank()) {
+                IconButton(onClick = ::submitCurrentSearch, enabled = searchText.isNotBlank()) {
                     Icon(Icons.AutoMirrored.Filled.Send, "Buscar", tint = VaultColors.Accent)
                 }
             },
             singleLine = true,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-            keyboardActions = KeyboardActions(onSearch = { vm.submitSearch() }),
+            keyboardActions = KeyboardActions(onSearch = { submitCurrentSearch() }),
             shape = RoundedCornerShape(if (hybrid) 16.dp else 10.dp),
             colors = OutlinedTextFieldDefaults.colors(
                 focusedBorderColor = VaultColors.Accent,
@@ -1154,24 +1459,46 @@ private fun SearchScreen(
             )
         )
 
+        // The mode switch belongs to a result set, not to the empty search
+        // screen. It appears immediately after the first submitted query and
+        // sits directly below the field as a single full-width segmented control.
         AnimatedVisibility(
-            visible = state.isSearching,
+            visible = submittedQuery.isNotBlank(),
+            enter = fadeIn(tween(160)) + expandVertically(tween(190)),
+            exit = fadeOut(tween(100)) + shrinkVertically(tween(120))
+        ) {
+            Column {
+                Spacer(Modifier.height(10.dp))
+                SearchSegmentedControl(
+                    selected = searchTab,
+                    trackCount = state.remoteTracks.size,
+                    albumCount = state.remoteAlbums.size,
+                    onSelected = { searchTab = it }
+                )
+            }
+        }
+
+        AnimatedVisibility(
+            visible = state.isSearching && submittedQuery.isNotBlank(),
             enter = fadeIn(tween(150)) + expandVertically(spring(stiffness = Spring.StiffnessMedium)),
             exit = fadeOut(tween(120)) + shrinkVertically(spring(stiffness = Spring.StiffnessMedium))
         ) {
             LinearProgressIndicator(
-                Modifier.fillMaxWidth().padding(top = 12.dp),
+                Modifier.fillMaxWidth().padding(top = 8.dp),
                 color = VaultColors.Accent,
                 trackColor = VaultColors.Surface2
             )
         }
 
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(8.dp))
 
         Box(Modifier.fillMaxWidth().weight(1f)) {
             // Skeleton placeholders while the search is in flight and no rows
             // exist yet: the shape of the final content instead of a blank gap.
-            if (state.isSearching && state.remoteTracks.isEmpty() && state.remoteAlbums.isEmpty()) {
+            if (state.isSearching && submittedQuery.isNotBlank() &&
+                ((searchTab == SearchTab.TRACKS && state.remoteTracks.isEmpty()) ||
+                    (searchTab == SearchTab.ALBUMS && state.remoteAlbums.isEmpty()))
+            ) {
                 Column(Modifier.fillMaxSize().padding(horizontal = 4.dp)) {
                     repeat(7) { SkeletonRow() }
                 }
@@ -1197,7 +1524,7 @@ private fun SearchScreen(
                 update = { recyclerView ->
                     // Hidden-tab guard: don't rebuild items while the tab is
                     // hidden; results only change while the tab is visible.
-                    if (state.active) {
+                    if (state.active || prewarm) {
                         adapter.updateItems(resultItems)
 
                         // Skip state pushes while the tab is hidden (alpha 0): the
@@ -1377,8 +1704,11 @@ private fun RemoteTrackRow(
         }
         when {
             downloading -> {
-                IconButton(onClick = onCancelDownload) {
-                    DownloadDotsSpinner(modifier = Modifier.size(28.dp))
+                Box(
+                    Modifier.size(48.dp).clickable(onClick = onCancelDownload),
+                    contentAlignment = Alignment.Center
+                ) {
+                    ThinDownloadProgress(progress = progressFraction, modifier = Modifier.width(30.dp))
                 }
             }
             downloaded -> {
@@ -1405,7 +1735,12 @@ private data class LibraryScreenState(
 )
 
 @Composable
-private fun LibraryScreen(state: LibraryScreenState, isPlaying: Boolean, vm: MusicVaultViewModel) {
+private fun LibraryScreen(
+    state: LibraryScreenState,
+    isPlaying: Boolean,
+    vm: MusicVaultViewModel,
+    prewarm: Boolean = false
+) {
     val context = LocalContext.current
     val permission = if (Build.VERSION.SDK_INT >= 33) {
         Manifest.permission.READ_MEDIA_AUDIO
@@ -1453,7 +1788,7 @@ private fun LibraryScreen(state: LibraryScreenState, isPlaying: Boolean, vm: Mus
         },
         update = {
             // Hidden-tab guard: same rationale as HomeScreen.
-            if (state.active) {
+            if (state.active || prewarm) {
                 adapter.update(
                     tracks = state.downloaded,
                     playlists = state.playlists,
@@ -1467,8 +1802,13 @@ private fun LibraryScreen(state: LibraryScreenState, isPlaying: Boolean, vm: Mus
 }
 
 @Composable
-private fun PlaylistScreen(state: MusicUiState, vm: MusicVaultViewModel) {
+private fun PlaylistScreen(
+    state: MusicUiState,
+    vm: MusicVaultViewModel,
+    prewarm: Boolean = false
+) {
     var showAlbumDialog by remember { mutableStateOf(false) }
+    var pendingDelete by remember { mutableStateOf<Playlist?>(null) }
     val context = LocalContext.current
     val hybrid = LocalHybridDesign.current
     val adapter = remember(hybrid) { AlbumFeedAdapter(vm, hybrid) }
@@ -1494,20 +1834,33 @@ private fun PlaylistScreen(state: MusicUiState, vm: MusicVaultViewModel) {
         },
         update = {
             // Hidden-tab guard: same rationale as HomeScreen.
-            if (state.section == AppSection.PLAYLISTS) {
+            if (state.section == AppSection.PLAYLISTS || prewarm) {
                 adapter.update(state.playlists)
             }
         }
     )
 
     if (showAlbumDialog) {
-        CreateCollectionDialog("Nuevo álbum", "Nombre del álbum", state.downloaded, vm::createPlaylist) {
+        CreateCollectionDialog("Nueva playlist", "Nombre de la playlist", state.downloaded, vm::createPlaylist) {
             showAlbumDialog = false
         }
     }
 
-    // The add button lives in the header holder; keep the dialog callback in sync.
+    pendingDelete?.let { playlist ->
+        DeletePlaylistDialog(
+            playlist = playlist,
+            onDismiss = { pendingDelete = null },
+            onConfirm = {
+                vm.deletePlaylist(playlist.id)
+                pendingDelete = null
+            }
+        )
+    }
+
+    // The native header/card holders only emit callbacks. Compose owns dialogs
+    // so creation/deletion use the same polished Vault modal language.
     adapter.onAddAlbum = { showAlbumDialog = true }
+    adapter.onDeleteAlbum = { pendingDelete = it }
 }
 
 private fun dp(context: Context, value: Int): Int =
@@ -1522,32 +1875,249 @@ private fun CreateCollectionDialog(
     onDismiss: () -> Unit
 ) {
     var name by remember { mutableStateOf("") }
-    val selected = remember { mutableStateListOf<String>() }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(title) },
-        text = {
-            Column(Modifier.heightIn(max = 420.dp)) {
-                OutlinedTextField(name, { name = it }, placeholder = { Text(placeholder) }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                Spacer(Modifier.height(12.dp))
-                Text("Canciones", fontWeight = FontWeight.Bold)
-                LazyColumn {
-                    items(tracks, key = { it.id }) { track ->
-                        Row(Modifier.fillMaxWidth().clickable { if (selected.contains(track.id)) selected.remove(track.id) else selected.add(track.id) }.padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Checkbox(selected.contains(track.id), { checked -> if (checked) selected.add(track.id) else selected.remove(track.id) })
-                            Column(Modifier.weight(1f)) {
-                                Text(track.title, maxLines = 1)
-                                Text(track.artistName, fontSize = 12.sp, color = VaultColors.TextSecondary, maxLines = 1)
+    var songQuery by remember { mutableStateOf("") }
+    var selectedCount by remember { mutableIntStateOf(0) }
+
+    // Build the lowercase search keys once per library snapshot instead of doing
+    // title/artist normalization again for every visible row while the user types.
+    val searchIndex = remember(tracks) {
+        tracks.map { track ->
+            track to (track.title + "\u0000" + track.artistName).lowercase()
+        }
+    }
+    val visibleTracks = remember(songQuery, searchIndex) {
+        val query = songQuery.trim().lowercase()
+        if (query.isBlank()) tracks
+        else {
+            val terms = query.split(Regex("\\s+")).filter { it.isNotBlank() }
+            searchIndex.asSequence()
+                .filter { (_, key) -> terms.all(key::contains) }
+                .map { it.first }
+                .toList()
+        }
+    }
+
+    val pickerAdapter = remember {
+        PlaylistTrackPickerAdapter { count -> selectedCount = count }
+    }
+    val allSelected = tracks.isNotEmpty() && selectedCount == tracks.size
+
+    VaultModalDialog(
+        title = title,
+        subtitle = "Ponle un nombre y elige las canciones que quieras incluir",
+        icon = VaultIcons.QueueMusic,
+        onDismiss = onDismiss,
+        content = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it.take(80) },
+                label = { Text("Nombre") },
+                placeholder = { Text(placeholder) },
+                leadingIcon = { Icon(VaultIcons.QueueMusic, contentDescription = null, tint = VaultColors.Accent) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = VaultColors.Accent,
+                    unfocusedBorderColor = VaultColors.Divider,
+                    focusedTextColor = VaultColors.TextPrimary,
+                    unfocusedTextColor = VaultColors.TextPrimary,
+                    focusedLabelColor = VaultColors.Accent,
+                    unfocusedLabelColor = VaultColors.TextSecondary,
+                    cursorColor = VaultColors.Accent
+                )
+            )
+
+            Spacer(Modifier.height(14.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("CANCIONES", color = VaultColors.TextTertiary, fontSize = 11.sp, fontFamily = VaultFonts.Mono)
+                    Text(
+                        if (tracks.isEmpty()) "Puedes crearla vacía y agregar canciones después"
+                        else "${tracks.size} disponibles en tu biblioteca",
+                        color = VaultColors.TextSecondary,
+                        fontSize = 12.sp
+                    )
+                }
+                if (tracks.isNotEmpty()) {
+                    VaultSelectionBadge("$selectedCount elegidas")
+                    Spacer(Modifier.width(4.dp))
+                    TextButton(
+                        onClick = {
+                            if (allSelected) pickerAdapter.clearSelection()
+                            else pickerAdapter.selectAll(tracks)
+                        }
+                    ) {
+                        Text(if (allSelected) "Ninguna" else "Todas", color = VaultColors.Accent)
+                    }
+                }
+            }
+
+            if (tracks.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = songQuery,
+                    onValueChange = { songQuery = it.take(80) },
+                    placeholder = { Text("Buscar por canción o artista") },
+                    leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null, tint = VaultColors.TextSecondary) },
+                    trailingIcon = {
+                        if (songQuery.isNotBlank()) {
+                            IconButton(onClick = { songQuery = "" }) {
+                                Icon(Icons.Default.Close, contentDescription = "Limpiar búsqueda", tint = VaultColors.TextSecondary)
                             }
                         }
+                    },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = VaultColors.Accent,
+                        unfocusedBorderColor = VaultColors.Divider,
+                        focusedTextColor = VaultColors.TextPrimary,
+                        unfocusedTextColor = VaultColors.TextPrimary,
+                        cursorColor = VaultColors.Accent
+                    )
+                )
+            }
+
+            Spacer(Modifier.height(8.dp))
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = VaultColors.SurfaceBase,
+                border = BorderStroke(1.dp, VaultColors.Divider)
+            ) {
+                when {
+                    tracks.isEmpty() -> {
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 28.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(VaultIcons.LibraryMusic, contentDescription = null, tint = VaultColors.TextTertiary, modifier = Modifier.size(30.dp))
+                            Spacer(Modifier.height(10.dp))
+                            Text("Tu biblioteca todavía está vacía", color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold)
+                            Text("Crea la playlist ahora y agrega canciones cuando quieras.", color = VaultColors.TextSecondary, fontSize = 12.sp)
+                        }
+                    }
+                    visibleTracks.isEmpty() -> {
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 26.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(Icons.Outlined.Search, contentDescription = null, tint = VaultColors.TextTertiary, modifier = Modifier.size(28.dp))
+                            Spacer(Modifier.height(8.dp))
+                            Text("No encontramos esa canción", color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold)
+                            Text("Prueba con el título o el nombre del artista.", color = VaultColors.TextSecondary, fontSize = 12.sp)
+                        }
+                    }
+                    else -> {
+                        AndroidView(
+                            modifier = Modifier.fillMaxWidth().height(304.dp),
+                            factory = { context ->
+                                RecyclerView(context).apply {
+                                    layoutManager = LinearLayoutManager(context).also { lm ->
+                                        lm.isItemPrefetchEnabled = true
+                                        lm.initialPrefetchItemCount = 12
+                                    }
+                                    setHasFixedSize(true)
+                                    setItemViewCacheSize(14)
+                                    recycledViewPool.setMaxRecycledViews(0, 18)
+                                    itemAnimator = null
+                                    overScrollMode = RecyclerView.OVER_SCROLL_IF_CONTENT_SCROLLS
+                                    adapter = pickerAdapter
+                                }
+                            },
+                            update = { pickerAdapter.update(visibleTracks) }
+                        )
                     }
                 }
             }
         },
-        confirmButton = {
-            TextButton(onClick = { onCreate(name, tracks.filter { selected.contains(it.id) }); onDismiss() }, enabled = name.isNotBlank()) { Text("Crear") }
+        actions = {
+            OutlinedButton(
+                onClick = onDismiss,
+                shape = RoundedCornerShape(14.dp),
+                border = BorderStroke(1.dp, VaultColors.Divider)
+            ) {
+                Text("Cancelar", color = VaultColors.TextSecondary)
+            }
+            Button(
+                onClick = {
+                    val cleanName = name.trim()
+                    val ids = pickerAdapter.selectedIds()
+                    // Preserve library order as playlist order. The first chosen
+                    // song therefore also becomes the stable playlist cover.
+                    onCreate(cleanName, tracks.filter { it.id in ids })
+                    onDismiss()
+                },
+                enabled = name.isNotBlank(),
+                shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = VaultColors.Accent,
+                    contentColor = VaultColors.OnAccent
+                )
+            ) {
+                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Crear playlist", fontWeight = FontWeight.Bold)
+            }
+        }
+    )
+}
+
+@Composable
+private fun DeletePlaylistDialog(
+    playlist: Playlist,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit
+) {
+    VaultModalDialog(
+        title = "Eliminar playlist",
+        subtitle = playlist.title,
+        icon = VaultIcons.DeleteOutline,
+        onDismiss = onDismiss,
+        content = {
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = VaultColors.SurfaceBase,
+                border = BorderStroke(1.dp, VaultColors.Divider)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(VaultIcons.DeleteOutline, contentDescription = null, tint = VaultColors.Error, modifier = Modifier.size(28.dp))
+                    Spacer(Modifier.width(13.dp))
+                    Column {
+                        Text("¿Eliminar \"${playlist.title}\"?", color = VaultColors.TextPrimary, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(3.dp))
+                        Text(
+                            "La playlist desaparecerá, pero las canciones descargadas seguirán en tu biblioteca.",
+                            color = VaultColors.TextSecondary,
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+            }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } }
+        actions = {
+            OutlinedButton(
+                onClick = onDismiss,
+                shape = RoundedCornerShape(14.dp),
+                border = BorderStroke(1.dp, VaultColors.Divider)
+            ) { Text("Cancelar", color = VaultColors.TextSecondary) }
+            Button(
+                onClick = onConfirm,
+                shape = RoundedCornerShape(14.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = VaultColors.Error, contentColor = Color.White)
+            ) {
+                Icon(VaultIcons.DeleteOutline, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Eliminar", fontWeight = FontWeight.Bold)
+            }
+        }
     )
 }
 
@@ -1610,118 +2180,264 @@ private fun RemoteAlbumDetail(
     vm: MusicVaultViewModel
 ) {
     val hybrid = LocalHybridDesign.current
+    val downloadProgress by vm.downloadProgress.collectAsStateWithLifecycle()
     val downloadedIds = remember(localTracks) {
-        localTracks.filter { it.isDownloaded }.mapTo(HashSet()) { it.id }
+        localTracks.asSequence()
+            .filter { it.isDownloaded }
+            .mapTo(HashSet()) { it.id }
     }
+    val latestIsPlaying by rememberUpdatedState(isPlaying)
+    val latestSelectedTrackId by rememberUpdatedState(selectedTrackId)
+
     var actionTrack by remember { mutableStateOf<CatalogTrack?>(null) }
     var actionAction by remember { mutableStateOf<MoreAction?>(null) }
-    var actionMenuExpanded by remember { mutableStateOf(false) }
+    var showCreateAlbum by remember { mutableStateOf(false) }
+    var newAlbumName by remember { mutableStateOf("") }
+    var deleteTrack by remember { mutableStateOf<CatalogTrack?>(null) }
 
-    Box(Modifier.fillMaxSize()) {
-    LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(if (hybrid) 16.dp else 20.dp),
-        verticalArrangement = Arrangement.spacedBy(if (hybrid) 8.dp else 4.dp)
+    // Reuse the same native, recycled rows as Search. The previous album detail
+    // was a Compose scrolling list where every visible row collected its own progress
+    // Flow and hosted multiple Material controls. On albums with many tracks that
+    // made fast flings noticeably janky. This adapter keeps only the visible
+    // Android Views alive, uses stable IDs + payload updates and never recomposes
+    // the whole album when playback/download state changes.
+    val adapter = remember {
+        RemoteResultsAdapter(
+            onAlbumClick = {},
+            onTrackClick = vm::playRemote,
+            onCancelDownload = vm::cancelDownload,
+            onMoreAction = { track, action ->
+                actionTrack = track
+                actionAction = action
+            },
+            onPlayToggle = { track ->
+                val localId = "${track.provider}:recording:${track.id}"
+                if (latestIsPlaying && latestSelectedTrackId == localId) vm.togglePlayback()
+                else vm.playRemote(track)
+            }
+        )
+    }
+    val trackItems = remember(tracks) { tracks.map { RemoteResultItem.TrackItem(it) } }
+    val albumKey = remember(album.provider, album.id) { "${album.provider}:${album.id}" }
+    val albumDownloading = albumKey in albumDownloads
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .padding(horizontal = if (hybrid) 16.dp else 20.dp, vertical = if (hybrid) 8.dp else 12.dp)
     ) {
-        item {
-            IconButton(onClick = vm::closeRemoteAlbum) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Atrás", tint = VaultColors.TextPrimary)
-            }
-            val (top, bottom) = remember(album.id) { gradientFor(album.id) }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    Modifier
-                        .size(128.dp)
-                        .shadow(10.dp, RoundedCornerShape(if (hybrid) 18.dp else 12.dp), ambientColor = top.copy(alpha = 0.5f))
-                        .clip(RoundedCornerShape(if (hybrid) 18.dp else 12.dp))
-                        .background(Brush.linearGradient(listOf(top, bottom))),
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (album.coverUri != null) {
-                        CachedCover(
-                            url = album.coverUri,
-                            contentDescription = album.title,
-                            modifier = Modifier.fillMaxSize(),
-                            targetSizePx = 360
-                        )
-                    } else {
-                        Icon(VaultIcons.Album, null, tint = VaultColors.TextPrimary.copy(alpha = 0.85f), modifier = Modifier.size(48.dp))
-                    }
-                }
-                Spacer(Modifier.width(16.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(album.title, color = VaultColors.TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
-                    Text(album.artistName, color = VaultColors.TextSecondary, fontSize = 14.sp)
-                    album.year?.let { Text(it.toString(), color = VaultColors.TextTertiary, fontSize = 12.sp) }
-                }
-            }
-            Spacer(Modifier.height(14.dp))
-            if (tracks.isNotEmpty()) {
-                val albumKey = "${album.provider}:${album.id}"
-                val albumDownloading = albumKey in albumDownloads
-                Button(
-                    onClick = { if (!albumDownloading) vm.downloadRemoteAlbum(album, tracks) },
-                    enabled = !albumDownloading,
-                    shape = RoundedCornerShape(50),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = VaultColors.Surface2,
-                        contentColor = VaultColors.TextPrimary,
-                        disabledContainerColor = VaultColors.Surface2,
-                        disabledContentColor = VaultColors.TextPrimary
+        IconButton(onClick = vm::closeRemoteAlbum) {
+            Icon(Icons.AutoMirrored.Filled.ArrowBack, "Atrás", tint = VaultColors.TextPrimary)
+        }
+
+        val (top, bottom) = remember(album.id) { gradientFor(album.id) }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .size(if (hybrid) 112.dp else 120.dp)
+                    .shadow(8.dp, RoundedCornerShape(if (hybrid) 18.dp else 12.dp), ambientColor = top.copy(alpha = 0.42f))
+                    .clip(RoundedCornerShape(if (hybrid) 18.dp else 12.dp))
+                    .background(Brush.linearGradient(listOf(top, bottom))),
+                contentAlignment = Alignment.Center
+            ) {
+                if (album.coverUri != null) {
+                    // 256 px is enough for the on-screen card and avoids the old
+                    // 360 px decode while the list is being opened/scrolled.
+                    CachedCover(
+                        url = album.coverUri,
+                        contentDescription = album.title,
+                        modifier = Modifier.fillMaxSize(),
+                        targetSizePx = 256,
+                        contentScale = ContentScale.Crop
                     )
-                ) {
-                    if (albumDownloading) {
-                        DownloadDotsSpinner(modifier = Modifier.size(24.dp))
-                    } else {
-                        Icon(VaultIcons.Download, contentDescription = null)
-                    }
-                    Spacer(Modifier.width(6.dp))
-                    Text(if (albumDownloading) "Descargando álbum" else "Descargar álbum", fontWeight = FontWeight.Bold)
+                } else {
+                    Icon(
+                        VaultIcons.Album,
+                        null,
+                        tint = VaultColors.TextPrimary.copy(alpha = 0.85f),
+                        modifier = Modifier.size(44.dp)
+                    )
                 }
             }
-            Spacer(Modifier.height(18.dp))
-            when {
-                loading -> Column(Modifier.fillMaxWidth()) {
-                    repeat(4) { SkeletonRow() }
-                }
-                tracks.isEmpty() -> Text(
-                    "No se encontraron canciones para este álbum.",
+            Spacer(Modifier.width(16.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    album.title,
+                    color = VaultColors.TextPrimary,
+                    fontSize = if (hybrid) 20.sp else 22.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    album.artistName,
                     color = VaultColors.TextSecondary,
                     fontSize = 14.sp,
-                    modifier = Modifier.padding(vertical = 8.dp)
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
+                album.year?.let {
+                    Text(it.toString(), color = VaultColors.TextTertiary, fontSize = 12.sp)
+                }
+                if (tracks.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "${tracks.size} canciones",
+                        color = VaultColors.TextTertiary,
+                        fontSize = 12.sp,
+                        fontFamily = VaultFonts.Mono
+                    )
+                }
             }
-            Spacer(Modifier.height(10.dp))
         }
-        items(tracks, key = { "${it.provider}:${it.id}" }, contentType = { "remote-track" }) { track ->
-            val localId = "${track.provider}:recording:${track.id}"
-            val downloaded = localId in downloadedIds
-            RemoteTrackRow(
-                track = track,
-                progressFlow = remember(localId) { vm.downloadProgressFor(localId) },
-                downloaded = downloaded,
-                onClick = { vm.playRemote(track) },
-                onCancelDownload = { vm.cancelDownload(localId) },
-                onMore = { actionTrack = track; actionMenuExpanded = true },
-                isPlaying = isPlaying && selectedTrackId == localId,
-                onPlayToggle = {
-                    if (isPlaying && selectedTrackId == localId) vm.togglePlayback()
-                    else vm.playRemote(track)
+
+        if (tracks.isNotEmpty()) {
+            Spacer(Modifier.height(10.dp))
+            Button(
+                onClick = { if (!albumDownloading) vm.downloadRemoteAlbum(album, tracks) },
+                enabled = !albumDownloading,
+                shape = RoundedCornerShape(50),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = VaultColors.Surface2,
+                    contentColor = VaultColors.TextPrimary,
+                    disabledContainerColor = VaultColors.Surface2,
+                    disabledContentColor = VaultColors.TextPrimary
+                ),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                if (albumDownloading) ThinDownloadProgress(modifier = Modifier.width(24.dp))
+                else Icon(VaultIcons.Download, contentDescription = null, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(if (albumDownloading) "Descargando álbum" else "Descargar álbum", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+
+        Box(Modifier.fillMaxWidth().weight(1f)) {
+            when {
+                loading && tracks.isEmpty() -> {
+                    Column(Modifier.fillMaxSize()) { repeat(6) { SkeletonRow() } }
+                }
+                !loading && tracks.isEmpty() -> {
+                    Text(
+                        "No se encontraron canciones para este álbum.",
+                        color = VaultColors.TextSecondary,
+                        fontSize = 14.sp,
+                        modifier = Modifier.padding(vertical = 12.dp)
+                    )
+                }
+            }
+
+            AndroidView(
+                modifier = Modifier.fillMaxSize().clipToBounds(),
+                factory = { context ->
+                    RecyclerView(context).apply {
+                        layoutManager = LinearLayoutManager(context).apply {
+                            isItemPrefetchEnabled = true
+                            initialPrefetchItemCount = 10
+                        }
+                        this.adapter = adapter
+                        setHasFixedSize(true)
+                        setItemViewCacheSize(16)
+                        // RemoteResultsAdapter TYPE_TRACK = 3. Keep a generous
+                        // recycled pool so a fast fling almost never inflates a row.
+                        recycledViewPool.setMaxRecycledViews(3, 24)
+                        // Row state changes are frequent while playing/downloading;
+                        // animations only add layout work here.
+                        itemAnimator = null
+                        overScrollMode = RecyclerView.OVER_SCROLL_IF_CONTENT_SCROLLS
+                    }
                 },
-                modifier = Modifier
+                update = { recyclerView ->
+                    adapter.updateItems(trackItems)
+                    adapter.updateState(
+                        downloadedIds = downloadedIds,
+                        progress = downloadProgress,
+                        selectedTrackId = selectedTrackId,
+                        isPlaying = isPlaying
+                    )
+                    if (recyclerView.adapter !== adapter) recyclerView.adapter = adapter
+                }
             )
         }
     }
-    actionTrack?.let { track ->
-        RemoteAlbumDetailActionsMenu(
-            track = track,
-            playlists = playlists,
-            albums = albums,
-            vm = vm,
-            expanded = actionMenuExpanded,
-            onDismiss = { actionMenuExpanded = false; actionTrack = null }
+
+    val selectedTrack = actionTrack
+    when (actionAction) {
+        MoreAction.QUEUE -> if (selectedTrack != null) {
+            vm.addRemoteTrackToQueue(selectedTrack)
+            actionTrack = null
+            actionAction = null
+        }
+        MoreAction.ALBUM -> Unit // handled by the chooser below
+        MoreAction.DELETE -> if (selectedTrack != null) {
+            deleteTrack = selectedTrack
+            actionTrack = null
+            actionAction = null
+        }
+        null -> Unit
+    }
+
+    if (actionAction == MoreAction.ALBUM && selectedTrack != null) {
+        AlbumChoiceDialog(
+            albums = playlists.map { Album(it.id, it.title, "custom", it.description, 0, it.coverUri) },
+            onDismiss = { actionTrack = null; actionAction = null },
+            onSelect = { id ->
+                vm.addRemoteTrackToPlaylist(selectedTrack, id)
+                actionTrack = null
+                actionAction = null
+            },
+            onCreate = {
+                showCreateAlbum = true
+                actionAction = null
+            },
+            onDelete = vm::deletePlaylist
         )
     }
+
+    if (showCreateAlbum && selectedTrack != null) {
+        AlertDialog(
+            onDismissRequest = { showCreateAlbum = false; actionTrack = null },
+            title = { Text("Crear nuevo álbum") },
+            text = {
+                OutlinedTextField(
+                    value = newAlbumName,
+                    onValueChange = { newAlbumName = it },
+                    label = { Text("Nombre") },
+                    singleLine = true
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = newAlbumName.isNotBlank(),
+                    onClick = {
+                        vm.createAlbumFromRemote(newAlbumName, selectedTrack)
+                        showCreateAlbum = false
+                        actionTrack = null
+                        newAlbumName = ""
+                    }
+                ) { Text("Crear") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCreateAlbum = false; actionTrack = null }) { Text("Cancelar") }
+            }
+        )
+    }
+
+    deleteTrack?.let { remote ->
+        AlertDialog(
+            onDismissRequest = { deleteTrack = null },
+            title = { Text("Eliminar canción") },
+            text = { Text("¿Quieres eliminar \"${remote.title}\" de las descargas de MusicVault?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.deleteDownloadedTrack("${remote.provider}:recording:${remote.id}")
+                    deleteTrack = null
+                }) { Text("Eliminar", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { deleteTrack = null }) { Text("Cancelar") } }
+        )
     }
 }
 
@@ -1867,7 +2583,7 @@ private fun PlaylistDetailHeader(
             modifier = Modifier.fillMaxWidth()
         ) {
             if (isDownloading) {
-                DownloadDotsSpinner(modifier = Modifier.size(24.dp), dotColor = VaultColors.TextPrimary)
+                ThinDownloadProgress(modifier = Modifier.width(26.dp), color = VaultColors.TextPrimary)
             } else {
                 Icon(VaultIcons.Download, null, tint = if (pendingDownloads > 0) VaultColors.TextPrimary else VaultColors.TextTertiary)
             }
@@ -3138,55 +3854,55 @@ private fun LyricStanza(
 
 @Composable
 private fun SyncedLyricsList(lines: List<LyricLine>, positionState: State<Long>, modifier: Modifier = Modifier) {
-    val listState = rememberLazyListState()
-    // The lookup runs every frame against the live position, but derived state
-    // only invalidates the UI when the highlighted line actually changes.
     val currentLine by remember(lines) {
         derivedStateOf { lines.indexOfLast { it.timeMs <= positionState.value }.takeIf { it >= 0 } }
     }
-    // Manual scrolling holds the auto-scroll for a few seconds so the user can
-    // browse freely before the highlight resumes steering.
-    var holdAutoScroll by remember { mutableStateOf(false) }
-    LaunchedEffect(currentLine) {
-        val target = currentLine
-        if (target != null && !holdAutoScroll) {
-            listState.animateScrollToItem(index = (target - 3).coerceAtLeast(0))
-        }
-    }
-    LaunchedEffect(holdAutoScroll) {
-        if (holdAutoScroll) {
-            delay(4_000L)
-            holdAutoScroll = false
-        }
-    }
+    val adapter = remember { SyncedLyricsAdapter() }
+    val lastUserTouchMs = remember { longArrayOf(0L) }
+    val lastAutoScrolledIndex = remember { intArrayOf(-1) }
+
     Box(modifier.fillMaxSize()) {
-        LazyColumn(
-            state = listState,
-            modifier = Modifier
-                .fillMaxSize()
-                .pointerInput(Unit) {
-                    awaitEachGesture {
-                        awaitFirstDown(requireUnconsumed = false)
-                        holdAutoScroll = true
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { context ->
+                RecyclerView(context).apply {
+                    layoutManager = LinearLayoutManager(context).apply {
+                        isItemPrefetchEnabled = true
+                        initialPrefetchItemCount = 10
                     }
-                },
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-            contentPadding = PaddingValues(vertical = 48.dp)
-        ) {
-            // Keyed by line identity: animation state travels with the stanza,
-            // and lines scrolled back into view start at their real values
-            // instead of inheriting a recycled slot's stale animation.
-            itemsIndexed(lines, key = { _, line -> "${line.timeMs}:${line.text}" }) { index, line ->
-                val activeIndex = currentLine
-                val active = index == activeIndex
-                val distance = activeIndex?.let { index - it } ?: 1
-                LyricStanza(line.text, active = active, distance = distance)
+                    this.adapter = adapter
+                    itemAnimator = null
+                    setItemViewCacheSize(16)
+                    recycledViewPool.setMaxRecycledViews(0, 20)
+                    setPadding(0, 48, 0, 72)
+                    clipToPadding = false
+                    overScrollMode = RecyclerView.OVER_SCROLL_IF_CONTENT_SCROLLS
+                    setOnTouchListener { _, event ->
+                        if (event.actionMasked == android.view.MotionEvent.ACTION_DOWN ||
+                            event.actionMasked == android.view.MotionEvent.ACTION_MOVE
+                        ) {
+                            lastUserTouchMs[0] = android.os.SystemClock.uptimeMillis()
+                        }
+                        false
+                    }
+                }
+            },
+            update = { rv ->
+                adapter.update(lines, currentLine)
+                val active = currentLine
+                if (active != null && active != lastAutoScrolledIndex[0] &&
+                    android.os.SystemClock.uptimeMillis() - lastUserTouchMs[0] >= 4_000L
+                ) {
+                    lastAutoScrolledIndex[0] = active
+                    rv.post {
+                        (rv.layoutManager as? LinearLayoutManager)?.scrollToPositionWithOffset(
+                            (active - 3).coerceAtLeast(0),
+                            (rv.height * 0.18f).roundToInt()
+                        )
+                    }
+                }
             }
-        }
-        // Vertical fade at both edges: stanzas enter and leave softly and the
-        // center band keeps the visual focus. Plain scrims never intercept the
-        // list's touch gestures.
+        )
         Box(
             Modifier
                 .fillMaxWidth()
@@ -3207,331 +3923,172 @@ private fun SyncedLyricsList(lines: List<LyricLine>, positionState: State<Long>,
 @Composable
 private fun SettingsScreen(
     crossfadeSeconds: Int,
-    equalizerBands: List<com.musicvault.app.player.AudioEffects.Band>,
-    eqEnabled: Boolean,
-    eqPreset: com.musicvault.app.player.EqualizerPreset,
-    loudnessGainMb: Int,
-    bassBoostAvailable: Boolean,
-    virtualizerAvailable: Boolean,
     playerStyle: String,
     appDesign: String,
     downloadDirLabel: String,
     spotifyConnected: Boolean,
     spotifyBusy: Boolean,
     onCrossfadeChange: (Int) -> Unit,
-    onEqualizerEnabled: (Boolean) -> Unit,
-    onEqualizerBand: (Int, Short) -> Unit,
-    onEqualizerPreset: (com.musicvault.app.player.EqualizerPreset) -> Unit,
-    onLoudnessChange: (Int) -> Unit,
-    onBassBoostStrength: (Int) -> Unit,
-    onVirtualizerStrength: (Int) -> Unit,
+    onPlayerStyleChange: (String) -> Unit,
+    onAppDesignChange: (String) -> Unit,
     onPickDownloadFolder: () -> Unit,
     onUseInternalFolder: () -> Unit,
     onConnectSpotify: () -> Unit,
     onDisconnectSpotify: () -> Unit,
-    onPlayerStyleChange: (String) -> Unit,
-    onAppDesignChange: (String) -> Unit,
     onClose: () -> Unit
 ) {
     val hybrid = LocalHybridDesign.current
-    LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(if (hybrid) 16.dp else 20.dp),
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(if (hybrid) 16.dp else 20.dp),
         verticalArrangement = Arrangement.spacedBy(if (hybrid) 12.dp else 14.dp)
     ) {
-        item {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onClose) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Atrás", tint = VaultColors.TextPrimary) }
+            Text("Ajustes", color = VaultColors.TextPrimary, fontSize = if (hybrid) 24.sp else 26.sp, fontWeight = FontWeight.Bold, fontFamily = VaultFonts.Display, letterSpacing = (-0.75).sp)
+        }
+        SettingsSection("APARIENCIA") {
+            Text("Diseño de la aplicación", color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Puedes volver al diseño anterior en cualquier momento. Tus canciones y ajustes no cambian.",
+                color = VaultColors.TextTertiary,
+                fontSize = 12.sp
+            )
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                StyleOption(
+                    title = "Híbrido",
+                    description = "Más claro, compacto y fácil de recorrer.",
+                    icon = Icons.Default.Home,
+                    selected = appDesign == APP_DESIGN_HYBRID,
+                    onClick = { onAppDesignChange(APP_DESIGN_HYBRID) },
+                    modifier = Modifier.weight(1f)
+                )
+                StyleOption(
+                    title = "Clásico",
+                    description = "Restaura la apariencia anterior de MusicVault.",
+                    icon = VaultIcons.LibraryMusic,
+                    selected = appDesign == APP_DESIGN_CLASSIC,
+                    onClick = { onAppDesignChange(APP_DESIGN_CLASSIC) },
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            Spacer(Modifier.height(18.dp))
+            HorizontalDivider(color = VaultColors.Divider)
+            Spacer(Modifier.height(18.dp))
+            Text("Estilo del reproductor", color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                StyleOption(
+                    title = "Tornamesa / Vinilo",
+                    description = "Disco giratorio con brazo, control de RPM y hardware del deck.",
+                    icon = VaultIcons.Album,
+                    selected = playerStyle == "vinyl",
+                    onClick = { onPlayerStyleChange("vinyl") },
+                    modifier = Modifier.weight(1f)
+                )
+                StyleOption(
+                    title = "Visualizador circular",
+                    description = "Portada central rodeada por anillos de graves, medios y agudos.",
+                    icon = VaultIcons.GraphicEq,
+                    selected = playerStyle == "circular",
+                    onClick = { onPlayerStyleChange("circular") },
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+        SettingsSection("REPRODUCCIÓN") {
+            Text("Crossfade", color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+            Spacer(Modifier.height(4.dp))
+            // Keep the drag value local so a 60 Hz gesture never recomposes the whole
+            // app (crossfadeSeconds feeds the root state combine) nor hits prefs.
+            var dragValue by remember { mutableStateOf<Float?>(null) }
+            val shownSeconds = dragValue?.toInt() ?: crossfadeSeconds
+            Spacer(Modifier.height(6.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onClose) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Atrás", tint = VaultColors.TextPrimary) }
-                Text("Ajustes", color = VaultColors.TextPrimary, fontSize = if (hybrid) 24.sp else 26.sp, fontWeight = FontWeight.Bold, fontFamily = VaultFonts.Display, letterSpacing = (-0.75).sp)
-            }
-        }
-        item {
-            SettingsSection("APARIENCIA") {
-                Text("Diseño de la aplicación", color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    "Puedes volver al diseño anterior en cualquier momento. Tus canciones y ajustes no cambian.",
-                    color = VaultColors.TextTertiary,
-                    fontSize = 12.sp
-                )
-                Spacer(Modifier.height(10.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    StyleOption(
-                        title = "Híbrido",
-                        description = "Más claro, compacto y fácil de recorrer.",
-                        icon = Icons.Default.Home,
-                        selected = appDesign == APP_DESIGN_HYBRID,
-                        onClick = { onAppDesignChange(APP_DESIGN_HYBRID) },
-                        modifier = Modifier.weight(1f)
-                    )
-                    StyleOption(
-                        title = "Clásico",
-                        description = "Restaura la apariencia anterior de MusicVault.",
-                        icon = VaultIcons.LibraryMusic,
-                        selected = appDesign == APP_DESIGN_CLASSIC,
-                        onClick = { onAppDesignChange(APP_DESIGN_CLASSIC) },
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-                Spacer(Modifier.height(18.dp))
-                HorizontalDivider(color = VaultColors.Divider)
-                Spacer(Modifier.height(18.dp))
-                Text("Estilo del reproductor", color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    "Elige la interfaz del reproductor. La reproducción no cambia.",
-                    color = VaultColors.TextTertiary, fontSize = 12.sp
-                )
-                Spacer(Modifier.height(10.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    StyleOption(
-                        title = "Tornamesa / Vinilo",
-                        description = "Disco giratorio con brazo, control de RPM y hardware del deck.",
-                        icon = VaultIcons.Album,
-                        selected = playerStyle == "vinyl",
-                        onClick = { onPlayerStyleChange("vinyl") },
-                        modifier = Modifier.weight(1f)
-                    )
-                    StyleOption(
-                        title = "Visualizador circular",
-                        description = "Portada central rodeada por anillos de graves, medios y agudos.",
-                        icon = VaultIcons.GraphicEq,
-                        selected = playerStyle == "circular",
-                        onClick = { onPlayerStyleChange("circular") },
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-            }
-        }
-        item {
-            SettingsSection("REPRODUCCIÓN") {
-                Text("Crossfade", color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
-                Spacer(Modifier.height(4.dp))
-                // Keep the drag value local so a 60 Hz gesture never recomposes the whole
-                // app (crossfadeSeconds feeds the root state combine) nor hits prefs.
-                var dragValue by remember { mutableStateOf<Float?>(null) }
-                val shownSeconds = dragValue?.toInt() ?: crossfadeSeconds
-                Text(
-                    if (shownSeconds == 0) "Desactivado" else "Mezcla los últimos ${shownSeconds}s con el inicio de la siguiente canción.",
-                    color = VaultColors.TextTertiary,
-                    fontSize = 12.sp
-                )
-                Spacer(Modifier.height(6.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Slider(
-                        value = dragValue ?: crossfadeSeconds.toFloat(),
-                        onValueChange = { dragValue = it },
-                        onValueChangeFinished = {
-                            dragValue?.toInt()?.let(onCrossfadeChange)
-                            dragValue = null
-                        },
-                        valueRange = 0f..12f,
-                        steps = 11,
-                        colors = SliderDefaults.colors(thumbColor = VaultColors.Accent, activeTrackColor = VaultColors.Accent, inactiveTrackColor = VaultColors.Surface3),
-                        modifier = Modifier.weight(1f)
-                    )
-                    Text(
-                        if (shownSeconds == 0) "OFF" else "${shownSeconds}s",
-                        color = VaultColors.Accent,
-                        fontSize = 12.sp,
-                        fontFamily = VaultFonts.Mono,
-                        modifier = Modifier.width(48.dp),
-                        textAlign = androidx.compose.ui.text.style.TextAlign.End
-                    )
-                }
-            }
-        }
-        item {
-            SettingsSection("ALMACENAMIENTO") {
-                Text("Ruta de descargas", color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
-                Spacer(Modifier.height(6.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(VaultIcons.FolderOpen, null, tint = VaultColors.Accent, modifier = Modifier.size(20.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text(downloadDirLabel, color = VaultColors.Accent, fontSize = 12.sp, fontFamily = VaultFonts.Mono)
-                }
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    "Las nuevas descargas se guardan en esta carpeta. Si eliges una fuera del almacenamiento de la app (Descargas, tarjeta SD…), los archivos sobrevivirán aunque desinstales MusicVault.",
-                    color = VaultColors.TextTertiary, fontSize = 11.sp
-                )
-                Spacer(Modifier.height(12.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(
-                        onClick = onPickDownloadFolder,
-                        shape = RoundedCornerShape(50),
-                        colors = ButtonDefaults.buttonColors(containerColor = VaultColors.Accent, contentColor = VaultColors.OnAccent),
-                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
-                    ) {
-                        Icon(VaultIcons.FolderOpen, null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("Elegir carpeta", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-                    }
-                    OutlinedButton(
-                        onClick = onUseInternalFolder,
-                        shape = RoundedCornerShape(50),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = VaultColors.TextPrimary)
-                    ) {
-                        Text("Usar carpeta interna", fontSize = 13.sp)
-                    }
-                }
-            }
-        }
-        item {
-            SettingsSection("SPOTIFY") {
-                Text(
-                    if (spotifyConnected) "Cuenta conectada en este dispositivo" else "Spotify no está conectado",
-                    color = VaultColors.TextPrimary,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 15.sp
-                )
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    "La cuenta permite importar canciones y playlists directamente desde Spotify.",
-                    color = VaultColors.TextTertiary,
-                    fontSize = 12.sp
-                )
-                Spacer(Modifier.height(12.dp))
-                if (spotifyConnected) {
-                    OutlinedButton(
-                        onClick = onDisconnectSpotify,
-                        enabled = !spotifyBusy,
-                        shape = RoundedCornerShape(50),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = VaultColors.TextPrimary)
-                    ) { Text("Desconectar Spotify", fontSize = 13.sp) }
-                } else {
-                    Button(
-                        onClick = onConnectSpotify,
-                        enabled = !spotifyBusy,
-                        shape = RoundedCornerShape(50),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = VaultColors.Accent,
-                            contentColor = VaultColors.OnAccent
-                        )
-                    ) { Text("Conectar Spotify", fontWeight = FontWeight.SemiBold, fontSize = 13.sp) }
-                }
-            }
-        }
-        item {
-            SettingsSection("ECUALIZADOR") {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Ecualizador nativo", color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
-                        Text(
-                            if (equalizerBands.isEmpty()) "Esperando sesión de audio..." else "Bandas: ${equalizerBands.size}",
-                            color = VaultColors.TextSecondary, fontSize = 12.sp
-                        )
-                    }
-                    Switch(
-                        checked = eqEnabled,
-                        onCheckedChange = { onEqualizerEnabled(it) },
-                        colors = SwitchDefaults.colors(checkedThumbColor = VaultColors.OnAccent, checkedTrackColor = VaultColors.Accent)
-                    )
-                }
-
-                Spacer(Modifier.height(14.dp))
-                Text("Presets", color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-                Spacer(Modifier.height(8.dp))
-                PresetChips(
-                    selected = eqPreset,
-                    onSelect = { onEqualizerPreset(it) }
-                )
-
-                Spacer(Modifier.height(14.dp))
-                Text(
-                    "Volume Boost",
-                    color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 13.sp
-                )
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    "Aumenta la ganancia general sin distorsión. Independiente del preset.",
-                    color = VaultColors.TextTertiary, fontSize = 11.sp
-                )
-                var loudnessDrag by remember(loudnessGainMb) { mutableStateOf<Float?>(null) }
-                val shownLoudnessDb = (loudnessDrag ?: loudnessGainMb.toFloat()) / 1000f
                 Slider(
-                    value = loudnessDrag ?: loudnessGainMb.toFloat(),
-                    onValueChange = { loudnessDrag = it },
+                    value = dragValue ?: crossfadeSeconds.toFloat(),
+                    onValueChange = { dragValue = it },
                     onValueChangeFinished = {
-                        loudnessDrag?.toInt()?.let(onLoudnessChange)
-                        loudnessDrag = null
+                        dragValue?.toInt()?.let(onCrossfadeChange)
+                        dragValue = null
                     },
-                    valueRange = 0f..3000f,
-                    colors = SliderDefaults.colors(thumbColor = VaultColors.Accent, activeTrackColor = VaultColors.Accent, inactiveTrackColor = VaultColors.Surface3)
+                    valueRange = 0f..12f,
+                    steps = 11,
+                    colors = SliderDefaults.colors(thumbColor = VaultColors.Accent, activeTrackColor = VaultColors.Accent, inactiveTrackColor = VaultColors.Surface3),
+                    modifier = Modifier.weight(1f)
                 )
                 Text(
-                    String.format(java.util.Locale.US, "%+5.1f dB", shownLoudnessDb),
+                    if (shownSeconds == 0) "OFF" else "${shownSeconds}s",
                     color = VaultColors.Accent,
                     fontSize = 12.sp,
-                    fontFamily = VaultFonts.Mono
+                    fontFamily = VaultFonts.Mono,
+                    modifier = Modifier.width(48.dp),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.End
                 )
-
-                if (bassBoostAvailable) {
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        "Bass Boost (efecto nativo)",
-                        color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 13.sp
-                    )
-                    var bbDrag by remember { mutableStateOf<Float?>(null) }
-                    Slider(
-                        value = bbDrag ?: eqPreset.bassBoost.toFloat(),
-                        onValueChange = { bbDrag = it },
-                        onValueChangeFinished = {
-                            bbDrag?.toInt()?.let(onBassBoostStrength)
-                            bbDrag = null
-                        },
-                        valueRange = 0f..1000f,
-                        colors = SliderDefaults.colors(thumbColor = VaultColors.Accent, activeTrackColor = VaultColors.Accent, inactiveTrackColor = VaultColors.Surface3)
-                    )
+            }
+        }
+        SettingsSection("ALMACENAMIENTO") {
+            Text("Ruta de descargas", color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+            Spacer(Modifier.height(6.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(VaultIcons.FolderOpen, null, tint = VaultColors.Accent, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(downloadDirLabel, color = VaultColors.Accent, fontSize = 12.sp, fontFamily = VaultFonts.Mono)
+            }
+            Spacer(Modifier.height(12.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(
+                    onClick = onPickDownloadFolder,
+                    shape = RoundedCornerShape(50),
+                    colors = ButtonDefaults.buttonColors(containerColor = VaultColors.Accent, contentColor = VaultColors.OnAccent),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+                ) {
+                    Icon(VaultIcons.FolderOpen, null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Elegir carpeta", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                 }
-
-                if (virtualizerAvailable) {
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        "Virtualizador",
-                        color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 13.sp
+                OutlinedButton(
+                    onClick = onUseInternalFolder,
+                    shape = RoundedCornerShape(50),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = VaultColors.TextPrimary)
+                ) {
+                    Text("Usar carpeta interna", fontSize = 13.sp)
+                }
+            }
+        }
+        SettingsSection("SPOTIFY") {
+            Text(
+                if (spotifyConnected) "Cuenta conectada en este dispositivo" else "Spotify no está conectado",
+                color = VaultColors.TextPrimary,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 15.sp
+            )
+            Spacer(Modifier.height(12.dp))
+            if (spotifyConnected) {
+                OutlinedButton(
+                    onClick = onDisconnectSpotify,
+                    enabled = !spotifyBusy,
+                    shape = RoundedCornerShape(50),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = VaultColors.TextPrimary)
+                ) { Text("Desconectar Spotify", fontSize = 13.sp) }
+            } else {
+                Button(
+                    onClick = onConnectSpotify,
+                    enabled = !spotifyBusy,
+                    shape = RoundedCornerShape(50),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = VaultColors.Accent,
+                        contentColor = VaultColors.OnAccent
                     )
-                    var virtDrag by remember { mutableStateOf<Float?>(null) }
-                    Slider(
-                        value = virtDrag ?: eqPreset.virtualizer.toFloat(),
-                        onValueChange = { virtDrag = it },
-                        onValueChangeFinished = {
-                            virtDrag?.toInt()?.let(onVirtualizerStrength)
-                            virtDrag = null
-                        },
-                        valueRange = 0f..1000f,
-                        colors = SliderDefaults.colors(thumbColor = VaultColors.Accent, activeTrackColor = VaultColors.Accent, inactiveTrackColor = VaultColors.Surface3)
-                    )
-                }
-
-                if (equalizerBands.isNotEmpty()) {
-                    Spacer(Modifier.height(14.dp))
-                    Text("Bandas", color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-                    Spacer(Modifier.height(4.dp))
-                }
-                equalizerBands.forEach { band ->
-                    Column {
-                        Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                            Text("${band.centerFrequencyHz} Hz", color = VaultColors.TextPrimary, fontSize = 12.sp, fontFamily = VaultFonts.Mono)
-                            Text("${band.level / 100f} dB", color = VaultColors.TextSecondary, fontSize = 12.sp, fontFamily = VaultFonts.Mono)
-                        }
-                        Slider(
-                            value = band.level.toFloat(),
-                            onValueChange = { onEqualizerBand(band.index, it.toInt().toShort()) },
-                            valueRange = band.minLevel.toFloat()..band.maxLevel.toFloat(),
-                            colors = SliderDefaults.colors(thumbColor = VaultColors.Accent, activeTrackColor = VaultColors.Accent, inactiveTrackColor = VaultColors.Surface3)
-                        )
-                    }
-                }
-                Text(
-                    "El ecualizador usa el efecto Equalizer nativo de Android y la sesión de audio de Media3.",
-                    color = VaultColors.TextTertiary, fontSize = 11.sp
-                )
+                ) { Text("Conectar Spotify", fontWeight = FontWeight.SemiBold, fontSize = 13.sp) }
             }
         }
     }
 }
-
 @Composable
 private fun SettingsSection(title: String, content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit) {
     val hybrid = LocalHybridDesign.current
@@ -3546,6 +4103,83 @@ private fun SettingsSection(title: String, content: @Composable androidx.compose
         Text(title, color = VaultColors.Accent, fontSize = 10.sp, fontFamily = VaultFonts.Mono, letterSpacing = 2.sp)
         Spacer(Modifier.height(12.dp))
         content()
+    }
+}
+
+@Composable
+private fun SearchSegmentedControl(
+    selected: SearchTab,
+    trackCount: Int,
+    albumCount: Int,
+    onSelected: (SearchTab) -> Unit
+) {
+    val hybrid = LocalHybridDesign.current
+    val outerShape = RoundedCornerShape(if (hybrid) 14.dp else 10.dp)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(outerShape)
+            .background(VaultColors.Surface2)
+            .border(1.dp, VaultColors.Divider, outerShape)
+            .padding(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        SearchSegment(
+            label = "Canciones",
+            count = trackCount,
+            selected = selected == SearchTab.TRACKS,
+            modifier = Modifier.weight(1f),
+            onClick = { onSelected(SearchTab.TRACKS) }
+        )
+        SearchSegment(
+            label = "Álbumes",
+            count = albumCount,
+            selected = selected == SearchTab.ALBUMS,
+            modifier = Modifier.weight(1f),
+            onClick = { onSelected(SearchTab.ALBUMS) }
+        )
+    }
+}
+
+@Composable
+private fun SearchSegment(
+    label: String,
+    count: Int,
+    selected: Boolean,
+    modifier: Modifier,
+    onClick: () -> Unit
+) {
+    val shape = RoundedCornerShape(10.dp)
+    val background by animateColorAsState(
+        targetValue = if (selected) VaultColors.Accent else Color.Transparent,
+        animationSpec = tween(180),
+        label = "searchSegmentBg"
+    )
+    Row(
+        modifier = modifier
+            .height(42.dp)
+            .clip(shape)
+            .background(background)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            color = if (selected) VaultColors.OnAccent else VaultColors.TextPrimary,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold
+        )
+        if (count > 0) {
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = count.toString(),
+                color = if (selected) VaultColors.OnAccent.copy(alpha = 0.78f) else VaultColors.TextTertiary,
+                fontSize = 11.sp,
+                fontFamily = VaultFonts.Mono
+            )
+        }
     }
 }
 
@@ -3615,37 +4249,37 @@ private fun PresetChips(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun QueueBottomSheet(queue: List<Track>, currentIndex: Int, vm: MusicVaultViewModel, onDismiss: () -> Unit) {
+    val adapter = remember {
+        PlaybackQueueAdapter(
+            onMove = vm::moveQueueItem,
+            onRemove = vm::removeFromQueue
+        )
+    }
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = VaultColors.Surface1) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 8.dp)) {
-                Text("A continuación", color = VaultColors.TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
-                Spacer(Modifier.height(10.dp))
-                if (queue.isEmpty()) {
-                    Text("La cola está vacía.", color = VaultColors.TextSecondary, modifier = Modifier.padding(vertical = 24.dp))
-                } else {
-                    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 520.dp)) {
-                    itemsIndexed(queue, key = { index, track -> "${track.id}#$index" }) { index, track ->
-                        Row(
-                            Modifier.fillMaxWidth().animateItem().padding(vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(VaultIcons.DragHandle, "Reordenar", tint = VaultColors.TextTertiary)
-                            AsyncImage(track.coverUri, track.title, Modifier.size(44.dp).clip(RoundedCornerShape(6.dp)))
-                            Spacer(Modifier.width(10.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    track.title,
-                                    color = if (index == currentIndex) VaultColors.Accent else VaultColors.TextPrimary,
-                                    maxLines = 1,
-                                    fontWeight = FontWeight.Medium
-                                )
-                                Text(track.artistName, color = VaultColors.TextSecondary, fontSize = 12.sp, maxLines = 1)
+            Text("A continuación", color = VaultColors.TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
+            Spacer(Modifier.height(10.dp))
+            if (queue.isEmpty()) {
+                Text("La cola está vacía.", color = VaultColors.TextSecondary, modifier = Modifier.padding(vertical = 24.dp))
+            } else {
+                val queueHeight = (queue.size * 64).coerceIn(64, 520).dp
+                AndroidView(
+                    modifier = Modifier.fillMaxWidth().height(queueHeight),
+                    factory = { context ->
+                        RecyclerView(context).apply {
+                            layoutManager = LinearLayoutManager(context).apply {
+                                isItemPrefetchEnabled = true
+                                initialPrefetchItemCount = 8
                             }
-                            IconButton(enabled = index > 0, onClick = { vm.moveQueueItem(index, index - 1) }) { Icon(Icons.Default.KeyboardArrowUp, "Subir", tint = VaultColors.TextPrimary) }
-                            IconButton(enabled = index < queue.lastIndex, onClick = { vm.moveQueueItem(index, index + 1) }) { Icon(Icons.Default.KeyboardArrowDown, "Bajar", tint = VaultColors.TextPrimary) }
-                            IconButton(onClick = { vm.removeFromQueue(index) }) { Icon(VaultIcons.DeleteOutline, "Quitar", tint = VaultColors.Error) }
+                            this.adapter = adapter
+                            itemAnimator = null
+                            setItemViewCacheSize(12)
+                            recycledViewPool.setMaxRecycledViews(0, 16)
+                            overScrollMode = RecyclerView.OVER_SCROLL_IF_CONTENT_SCROLLS
                         }
-                    }
-                }
+                    },
+                    update = { adapter.update(queue, currentIndex) }
+                )
             }
             Spacer(Modifier.height(12.dp))
         }
@@ -3799,7 +4433,7 @@ internal fun AlbumCard(
                 ) {
                     IconButton(onClick = onDownloadAll, modifier = Modifier.size(40.dp)) {
                         if (isDownloading) {
-                            DownloadDotsSpinner(modifier = Modifier.size(26.dp), dotColor = VaultColors.TextPrimary)
+                            ThinDownloadProgress(modifier = Modifier.width(28.dp), color = VaultColors.TextPrimary)
                         } else {
                             Icon(VaultIcons.Download, contentDescription = "Descargar álbum", tint = VaultColors.TextPrimary)
                         }
@@ -3939,8 +4573,14 @@ internal fun TrackRow(
         }
         when {
             displayedProgress != null -> {
-                IconButton(onClick = onCancelDownload) {
-                    DownloadDotsSpinner(modifier = Modifier.size(28.dp))
+                Box(
+                    Modifier.size(48.dp).clickable(onClick = onCancelDownload),
+                    contentAlignment = Alignment.Center
+                ) {
+                    ThinDownloadProgress(
+                        progress = ((displayedProgress ?: 0) / 100f).coerceIn(0f, 1f),
+                        modifier = Modifier.width(30.dp)
+                    )
                 }
             }
             track.isDownloaded -> {
@@ -4080,8 +4720,10 @@ private fun RemoteAlbumDetailActionsMenu(
 @Composable
 private fun ChoiceDialog(title: String, choices: List<Pair<String, String>>, onDismiss: () -> Unit, onSelect: (String) -> Unit) {
     AlertDialog(onDismissRequest = onDismiss, title = { Text(title) }, text = {
-        if (choices.isEmpty()) Text("No tienes álbumes creados.") else LazyColumn(Modifier.heightIn(max = 360.dp)) {
-            items(choices, key = { it.first }) { (id, label) ->
+        if (choices.isEmpty()) Text("No tienes álbumes creados.") else Column(
+            Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())
+        ) {
+            choices.forEach { (id, label) ->
                 Text(label, Modifier.fillMaxWidth().clickable { onSelect(id) }.padding(14.dp))
             }
         }
@@ -4100,8 +4742,8 @@ private fun AlbumChoiceDialog(
     AlertDialog(onDismissRequest = onDismiss, title = { Text("Agregar a álbum") }, text = {
         Column {
             TextButton(onClick = onCreate, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Add, null); Spacer(Modifier.width(6.dp)); Text("Crear nuevo álbum") }
-            LazyColumn(Modifier.heightIn(max = 360.dp)) {
-                items(albums, key = { it.id }) { album ->
+            Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
+                albums.forEach { album ->
                     Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text(album.title, Modifier.weight(1f).clickable { onSelect(album.id) }.padding(10.dp))
                         if (album.id != "playlist:favorites") {

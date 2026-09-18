@@ -77,14 +77,12 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             MusicVaultTheme {
-                MusicVaultApp(viewModel)
+                MusicVaultApp(
+                    vm = viewModel,
+                    onAppReadyForPermissions = ::requestStoragePermissionsIfNeeded
+                )
             }
         }
-
-        // Solicita permisos de almacenamiento al iniciar la app. Si todos
-        // están otorgados (incluido el WRITE legacy en API ≤ 28), no se
-        // muestra nada y la app sigue igual que antes.
-        requestStoragePermissionsIfNeeded()
     }
 
     override fun onResume() {
@@ -101,6 +99,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestStoragePermissionsIfNeeded() {
+        // Do not interrupt first-run onboarding with a system permission dialog.
+        if (!viewModel.estadoInicialCargado.value || viewModel.esPrimeraVez.value) return
+
         // Evita relanzar el diálogo cuando el usuario ya denegó el permiso
         // dos veces (Android marca el permiso como "permanently denied" y el
         // diálogo dejaría de tener efecto). El usuario tendría que ir a

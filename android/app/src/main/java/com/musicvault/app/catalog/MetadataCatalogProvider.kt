@@ -145,34 +145,84 @@ class MetadataCatalogProvider(
         winner ?: emptyList()
     }
 
-    suspend fun searchTracksFast(query: String, limit: Int = 20): List<CatalogTrack> =
-        fastWithQualityGate(
-            query,
-            fetch = { p -> safeCall { p.searchTracks(query, limit) } },
-            score = { t, q -> SearchScorer.score(t, q, 0, 1) }
-        )
+    /**
+     * Fast song search deliberately does NOT race yt-dlp against Deezer.
+     *
+     * yt-dlp ultimately performs blocking native/process work and is not guaranteed to
+     * stop immediately when its coroutine is cancelled. The old race could therefore
+     * receive a perfectly good Deezer result, cancel YouTube, then still remain inside
+     * coroutineScope until the YouTube child unwound. The ViewModel timeout would fire
+     * first and the UI ended up with zero songs while albums (which do not use yt-dlp)
+     * appeared normally.
+     *
+     * For ordinary music searches we query the ordered primary source first and return
+     * immediately when it has a solid match. Secondary providers are only touched when
+     * the preferred source really returned no useful result.
+     */
+    suspend fun searchTracksFast(query: String, limit: Int = 20): List<CatalogTrack> {
+        val ordered = orderedTrackProviders(query)
+        if (ordered.isEmpty()) return emptyList()
+
+        var bestWeakResult: List<CatalogTrack> = emptyList()
+        for ((index, source) in ordered.withIndex()) {
+            val timeoutMs = if (index == 0) TRACK_PRIMARY_FAST_TIMEOUT_MS else TRACK_FALLBACK_FAST_TIMEOUT_MS
+            val raw = withTimeoutOrNull(timeoutMs) {
+                safeCall { source.searchTracks(query, limit) }
+            }.orEmpty().filterValidTracks()
+            if (raw.isEmpty()) continue
+
+            val ranked = SearchScorer.mergeAndRank(query, listOf(raw)).take(limit)
+            if (ranked.isEmpty()) continue
+
+            val topScore = ranked.maxOf { SearchScorer.score(it, query, 0, 1) }
+            if (topScore >= PRIMARY_WEAK_THRESHOLD) return ranked
+            if (bestWeakResult.isEmpty()) bestWeakResult = ranked
+        }
+        return bestWeakResult
+    }
 
     /**
      * Same scoring as [searchTracksFast] but always merges across every
      * provider (no early-exit on first non-empty list). Used when the UI wants
      * the best precision even at the cost of latency.
      */
-    suspend fun searchTracksMerged(query: String, limit: Int = 20): List<CatalogTrack> = coroutineScope {
+    suspend fun searchTracksMerged(query: String, limit: Int = 20): List<CatalogTrack> {
         val ordered = orderedTrackProviders(query)
-        val results = mergeAll(ordered.map { provider ->
-            async { safeCall { provider.searchTracks(query, limit) } }
-        })
-        SearchScorer.mergeAndRank(query, listOf(results)).take(limit)
+        if (ordered.isEmpty()) return emptyList()
+
+        val buckets = mutableListOf<List<CatalogTrack>>()
+        for ((index, source) in ordered.withIndex()) {
+            val timeoutMs = if (index == 0) TRACK_PRIMARY_MERGE_TIMEOUT_MS else TRACK_FALLBACK_MERGE_TIMEOUT_MS
+            val result = withTimeoutOrNull(timeoutMs) {
+                safeCall { source.searchTracks(query, limit) }
+            }.orEmpty().filterValidTracks()
+            if (result.isEmpty()) continue
+
+            buckets += result
+            val ranked = SearchScorer.mergeAndRank(query, buckets).take(limit)
+            val topScore = ranked.maxOfOrNull { SearchScorer.score(it, query, 0, 1) } ?: 0f
+
+            // A healthy Deezer/music-provider page is already enough for an
+            // interactive search. Do not make the user wait for yt-dlp merely
+            // to enrich a list that is already useful.
+            if (index == 0 && ranked.size >= MIN_PRIMARY_TRACK_RESULTS && topScore >= PRIMARY_WEAK_THRESHOLD) {
+                return ranked
+            }
+        }
+        return SearchScorer.mergeAndRank(query, buckets).take(limit)
     }
 
     suspend fun searchAlbumsFast(query: String, limit: Int = 10): List<CatalogAlbum> =
-        filterReachableAlbums(
-            fastWithQualityGate(
-                query,
-                fetch = { p -> safeCall { p.searchAlbums(query, limit) }.filterValidAlbums() },
-                score = { a, q -> SearchScorer.scoreAlbum(a, q, 0, 1) }
-            )
+        fastWithQualityGate(
+            query,
+            fetch = { p -> safeCall { p.searchAlbums(query, limit) }.filterValidAlbums() },
+            score = { a, q -> SearchScorer.scoreAlbum(a, q, 0, 1) }
         )
+
+    // Do not probe every album before first paint. A reachability check used to
+    // fan out into N extra album-detail requests and made an ordinary artist
+    // search wait several seconds. Album reachability is resolved only when the
+    // user actually opens the album via tracksForAlbum().
 
     suspend fun searchAlbumsMerged(query: String, limit: Int = 10): List<CatalogAlbum> = coroutineScope {
         val ordered = orderedTrackProviders(query)
@@ -311,5 +361,10 @@ class MetadataCatalogProvider(
          * scores around 140, while off-topic matches cluster below 60.
          */
         private const val PRIMARY_WEAK_THRESHOLD = 60f
+        private const val MIN_PRIMARY_TRACK_RESULTS = 3
+        private const val TRACK_PRIMARY_FAST_TIMEOUT_MS = 3_200L
+        private const val TRACK_FALLBACK_FAST_TIMEOUT_MS = 2_200L
+        private const val TRACK_PRIMARY_MERGE_TIMEOUT_MS = 3_500L
+        private const val TRACK_FALLBACK_MERGE_TIMEOUT_MS = 2_500L
     }
 }

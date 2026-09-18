@@ -18,9 +18,10 @@ import androidx.room.RoomDatabase
         FavoriteEntity::class,
         SearchHistoryEntity::class,
         DownloadRecordEntity::class,
-        CatalogSearchCacheEntity::class
+        CatalogSearchCacheEntity::class,
+        UserPreferences::class
     ],
-    version = 16,
+    version = 18,
     exportSchema = false
 )
 abstract class MusicDatabase : RoomDatabase() {
@@ -33,6 +34,7 @@ abstract class MusicDatabase : RoomDatabase() {
     abstract fun searchHistoryDao(): SearchHistoryDao
     abstract fun downloadRecordDao(): DownloadRecordDao
     abstract fun catalogSearchCacheDao(): CatalogSearchCacheDao
+    abstract fun userPreferencesDao(): UserPreferencesDao
 
     companion object {
         val MIGRATION_1_2 = object : androidx.room.migration.Migration(1, 2) {
@@ -125,6 +127,107 @@ abstract class MusicDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_16_17 = object : androidx.room.migration.Migration(16, 17) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                // Keep the migration schema identical to UserPreferences. Older builds
+                // created these columns as nullable, which makes Room fail validation
+                // after an in-place APK update even though a clean install works.
+                db.execSQL("CREATE TABLE IF NOT EXISTS user_preferences (userId TEXT NOT NULL PRIMARY KEY, generosFavoritos TEXT NOT NULL, artistasFavoritos TEXT NOT NULL, primeraVezCompleto INTEGER NOT NULL, fechaUltimaActualizacion INTEGER NOT NULL)")
+            }
+        }
+
+        /**
+         * Compatibility migration for installs upgraded from historical Music Vault
+         * APKs. Some of those builds shipped database version 17 with a different
+         * user_preferences schema (nullable columns) and/or an experimental FTS table.
+         * A clean install therefore worked while updating over the old APK crashed at
+         * Room schema validation during startup.
+         *
+         * This migration repairs only metadata/index structures. User tracks,
+         * playlists, favorites, history and download records are never deleted.
+         */
+        val MIGRATION_17_18 = object : androidx.room.migration.Migration(17, 18) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                normalizeUserPreferences(db)
+                rebuildTrackSearchIndex(db)
+            }
+        }
+
+        private fun tableExists(
+            db: androidx.sqlite.db.SupportSQLiteDatabase,
+            tableName: String
+        ): Boolean {
+            db.query(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+                arrayOf(tableName)
+            ).use { cursor ->
+                return cursor.moveToFirst()
+            }
+        }
+
+        private fun tableColumns(
+            db: androidx.sqlite.db.SupportSQLiteDatabase,
+            tableName: String
+        ): Set<String> {
+            if (!tableExists(db, tableName)) return emptySet()
+            val result = linkedSetOf<String>()
+            db.query("PRAGMA table_info(`$tableName`)").use { cursor ->
+                val nameIndex = cursor.getColumnIndex("name")
+                while (cursor.moveToNext()) {
+                    if (nameIndex >= 0) result += cursor.getString(nameIndex)
+                }
+            }
+            return result
+        }
+
+        private fun normalizeUserPreferences(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+            val oldTable = "user_preferences"
+            val newTable = "user_preferences_v18"
+            db.execSQL("DROP TABLE IF EXISTS $newTable")
+            db.execSQL(
+                "CREATE TABLE $newTable (" +
+                    "userId TEXT NOT NULL PRIMARY KEY, " +
+                    "generosFavoritos TEXT NOT NULL, " +
+                    "artistasFavoritos TEXT NOT NULL, " +
+                    "primeraVezCompleto INTEGER NOT NULL, " +
+                    "fechaUltimaActualizacion INTEGER NOT NULL)"
+            )
+
+            val columns = tableColumns(db, oldTable)
+            if (columns.isNotEmpty()) {
+                fun textExpr(column: String, fallback: String): String =
+                    if (column in columns) "COALESCE(`$column`, '$fallback')" else "'$fallback'"
+                fun numberExpr(column: String, fallback: Long): String =
+                    if (column in columns) "COALESCE(`$column`, $fallback)" else fallback.toString()
+
+                val userId = textExpr("userId", "current_user")
+                val genres = textExpr("generosFavoritos", "")
+                val artists = textExpr("artistasFavoritos", "")
+                val firstRun = numberExpr("primeraVezCompleto", 1L)
+                val updatedAt = numberExpr("fechaUltimaActualizacion", 0L)
+
+                db.execSQL(
+                    "INSERT OR REPLACE INTO $newTable " +
+                        "(userId, generosFavoritos, artistasFavoritos, primeraVezCompleto, fechaUltimaActualizacion) " +
+                        "SELECT $userId, $genres, $artists, $firstRun, $updatedAt FROM $oldTable"
+                )
+                db.execSQL("DROP TABLE $oldTable")
+            }
+            db.execSQL("ALTER TABLE $newTable RENAME TO $oldTable")
+        }
+
+        private fun rebuildTrackSearchIndex(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+            // The FTS table is only a derived search index. Rebuilding it is safe and
+            // prevents old experimental definitions/triggers from breaking startup.
+            db.execSQL("DROP TRIGGER IF EXISTS tracks_fts_insert")
+            db.execSQL("DROP TRIGGER IF EXISTS tracks_fts_update")
+            db.execSQL("DROP TRIGGER IF EXISTS tracks_fts_delete")
+            db.execSQL("DROP TABLE IF EXISTS tracks_fts")
+            db.execSQL("CREATE VIRTUAL TABLE tracks_fts USING FTS4(trackId TEXT NOT NULL, title TEXT NOT NULL, artistName TEXT NOT NULL, albumTitle TEXT NOT NULL)")
+            db.execSQL("INSERT INTO tracks_fts(trackId,title,artistName,albumTitle) SELECT id,title,artistName,albumTitle FROM tracks")
+            createFtsTriggers(db)
+        }
+
         private fun createFtsTriggers(db: androidx.sqlite.db.SupportSQLiteDatabase) {
             db.execSQL("""CREATE TRIGGER IF NOT EXISTS tracks_fts_insert AFTER INSERT ON tracks BEGIN
                 DELETE FROM tracks_fts WHERE trackId=new.id;
@@ -148,7 +251,7 @@ abstract class MusicDatabase : RoomDatabase() {
                 )
                 .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14)
                 // ✅ Performance optimizations for Room
-                .addMigrations(MIGRATION_14_15, MIGRATION_15_16)
+                .addMigrations(MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18)
                 .addCallback(object : RoomDatabase.Callback() {
                     override fun onOpen(db: androidx.sqlite.db.SupportSQLiteDatabase) {
                         createFtsTriggers(db)

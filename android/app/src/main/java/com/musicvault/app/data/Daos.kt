@@ -56,6 +56,8 @@ interface PlaylistDao {
     @Query("SELECT t.* FROM tracks t INNER JOIN playlist_tracks pt ON pt.trackId=t.id WHERE pt.playlistId=:playlistId ORDER BY pt.position") suspend fun getTracks(playlistId: String): List<TrackEntity>
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertAll(items: List<PlaylistEntity>)
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertTracks(items: List<PlaylistTrackEntity>)
+    @Query("UPDATE playlists SET coverUri=:coverUri WHERE id=:playlistId AND (coverUri IS NULL OR TRIM(coverUri)='')")
+    suspend fun setCoverIfEmpty(playlistId: String, coverUri: String)
     @Query("DELETE FROM playlist_tracks WHERE playlistId=:playlistId") suspend fun deleteTracks(playlistId: String)
     @Query("DELETE FROM playlist_tracks WHERE playlistId=:playlistId AND trackId=:trackId") suspend fun deleteTrack(playlistId: String, trackId: String)
     @Query("DELETE FROM playlists WHERE id=:id") suspend fun delete(id: String)
@@ -112,4 +114,19 @@ interface CatalogSearchCacheDao {
 
     @Query("DELETE FROM catalog_search_cache WHERE savedAt < :cutoff")
     suspend fun deleteOlderThan(cutoff: Long)
+}
+
+/**
+ * DAO for user preferences storage.
+ */
+@Dao
+interface UserPreferencesDao {
+    @Query("SELECT * FROM user_preferences WHERE userId = :userId")
+    suspend fun obtenerPreferencias(userId: String): UserPreferences?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertarPreferencias(prefs: UserPreferences)
+
+    @Query("UPDATE user_preferences SET generosFavoritos = :gen, artistasFavoritos = :art, primeraVezCompleto = :fp, fechaUltimaActualizacion = :f WHERE userId = :uid")
+    suspend fun actualizarPreferencias(gen: String, art: String, fp: Boolean, f: Long, uid: String)
 }

@@ -1,6 +1,7 @@
 package com.musicvault.app.ui
 
 import android.content.Context
+import android.content.res.ColorStateList
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -8,8 +9,10 @@ import android.graphics.Path
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewOutlineProvider
 import android.widget.ImageButton
 import android.widget.ImageView
+import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.graphics.drawable.Drawable
 import android.widget.ProgressBar
@@ -155,7 +158,8 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
         albumDownloads: Set<String>,
         selectedTrackId: String?,
         isPlaying: Boolean,
-        hybridDesign: Boolean
+        hybridDesign: Boolean,
+        onContentCommitted: (() -> Unit)? = null
     ) {
         val oldSelected = this.selectedTrackId
         val oldPlaying = this.isPlaying
@@ -174,7 +178,15 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
         // ticks included). Skip the item rebuild and DiffUtil when nothing changed.
         if (!auxiliaryDataChanged && !recommendationsChanged && !downloadsChanged && !designChanged &&
             oldSelected == selectedTrackId && oldPlaying == isPlaying
-        ) return
+        ) {
+            // Home may already contain the correct list when onboarding starts
+            // waiting for the visual handoff. Treat the existing committed list
+            // as ready instead of waiting for another data mutation.
+            if (recommendedTracks.isNotEmpty() && recommendedAlbums.isNotEmpty()) {
+                onContentCommitted?.invoke()
+            }
+            return
+        }
 
         this.playlists = playlists
         this.customAlbums = customAlbums
@@ -214,6 +226,7 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
                 if (item !is HomeFeedItem.TrackItem) notifyItemChanged(index)
             }
             notifyPlayerRows(oldSelected, selectedTrackId, oldPlaying, isPlaying)
+            onContentCommitted?.invoke()
         }
     }
 
@@ -989,6 +1002,7 @@ internal class AlbumFeedAdapter(private val vm: MusicVaultViewModel, private val
     }
 
     var onAddAlbum: (() -> Unit)? = null
+    var onDeleteAlbum: ((Playlist) -> Unit)? = null
 
     init { setHasStableIds(true) }
 
@@ -1006,7 +1020,7 @@ internal class AlbumFeedAdapter(private val vm: MusicVaultViewModel, private val
 
     override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
         if (position == 0) (holder as AlbumHeaderHolder).bind(onAddAlbum)
-        else (holder as AlbumCardHolder).bind(getItem(position - 1))
+        else (holder as AlbumCardHolder).bind(getItem(position - 1), onDeleteAlbum)
     }
 
     fun update(items: List<Playlist>) {
@@ -1050,12 +1064,22 @@ private class AlbumCardHolder(context: Context, private val vm: MusicVaultViewMo
     private val cover = itemView.findViewWithTag<ImageView>("albumCover")
     private val title = itemView.findViewWithTag<TextView>("albumTitle")
     private val description = itemView.findViewWithTag<TextView>("albumDescription")
+    private val more = itemView.findViewWithTag<ImageButton>("albumMore")
     private var playlist: Playlist? = null
-    init { itemView.setOnClickListener { playlist?.let(vm::openPlaylist) } }
-    fun bind(value: Playlist) {
+    private var onDelete: ((Playlist) -> Unit)? = null
+    init {
+        itemView.setOnClickListener { playlist?.let(vm::openPlaylist) }
+        more.setOnClickListener {
+            val current = playlist ?: return@setOnClickListener
+            if (current.id != "playlist:favorites") onDelete?.invoke(current)
+        }
+    }
+    fun bind(value: Playlist, onDelete: ((Playlist) -> Unit)?) {
         playlist = value
+        this.onDelete = onDelete
         title.text = value.title
         description.text = value.description
+        more.visibility = if (value.id == "playlist:favorites") View.GONE else View.VISIBLE
         if (value.id == "playlist:favorites") {
             cover.setImageDrawable(HeartDrawable())
             cover.setColorFilter(null)
@@ -1091,6 +1115,15 @@ private fun makeAlbumCard(context: Context, hybrid: Boolean): LinearLayout {
     text.addView(TextView(context).apply { tag="albumTitle"; setTextColor(Color.rgb(241,234,217)); textSize=16f; setTypeface(typeface, android.graphics.Typeface.BOLD); maxLines=1; ellipsize=android.text.TextUtils.TruncateAt.END })
     text.addView(TextView(context).apply { tag="albumDescription"; setTextColor(Color.rgb(179,169,146)); textSize=13f; maxLines=2; ellipsize=android.text.TextUtils.TruncateAt.END })
     root.addView(text)
+    root.addView(ImageButton(context).apply {
+        tag = "albumMore"
+        background = null
+        setImageResource(android.R.drawable.ic_menu_delete)
+        setColorFilter(Color.WHITE)
+        contentDescription = "Eliminar playlist"
+        layoutParams = LinearLayout.LayoutParams(dp(48), dp(48))
+        isFocusable = true
+    })
     return root
 }
 
@@ -1103,4 +1136,278 @@ private fun loadCover(context: Context, image: ImageView, url: String?, sizePx: 
     }
     val request = ImageRequest.Builder(context).data(url).size(Size(sizePx, sizePx)).memoryCacheKey("musicvault:$url:$sizePx").diskCacheKey(url).crossfade(false).target(image).build()
     CoverImageCache.loader(context).enqueue(request)
+}
+
+
+/**
+ * Native, fixed-height picker used by the create-playlist dialog.
+ *
+ * The old Compose scrolling list was convenient but each fast fling could compose
+ * image/checkbox rows while Coil was also starting cover requests. RecyclerView
+ * recycles a tiny pool of native rows instead, which keeps the modal smooth even
+ * with hundreds or thousands of downloaded tracks. Selection lives in the
+ * adapter so filtering never loses checked songs.
+ */
+internal class PlaylistTrackPickerAdapter(
+    private val onSelectionCountChanged: (Int) -> Unit
+) : ListAdapter<Track, PlaylistTrackPickerAdapter.PickerHolder>(PickerTrackDiff) {
+
+    private val selectedIds = LinkedHashSet<String>()
+
+    init { setHasStableIds(true) }
+
+    override fun getItemId(position: Int): Long = stableLongId("playlist-picker:${getItem(position).id}")
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): PickerHolder =
+        PickerHolder(makePlaylistPickerRow(parent.context)) { track -> toggle(track) }
+
+    override fun onBindViewHolder(holder: PickerHolder, position: Int) {
+        val track = getItem(position)
+        holder.bind(track, track.id in selectedIds)
+    }
+
+    override fun onBindViewHolder(holder: PickerHolder, position: Int, payloads: MutableList<Any>) {
+        if (payloads.isNotEmpty()) {
+            val track = getItem(position)
+            holder.bindChecked(track.id in selectedIds)
+        } else {
+            onBindViewHolder(holder, position)
+        }
+    }
+
+    fun update(items: List<Track>) {
+        if (currentList == items) return
+        submitList(items.toList())
+    }
+
+    fun selectedIds(): Set<String> = selectedIds.toSet()
+
+    fun selectAll(items: List<Track>) {
+        val before = selectedIds.size
+        items.forEach { selectedIds.add(it.id) }
+        if (selectedIds.size != before) {
+            onSelectionCountChanged(selectedIds.size)
+            notifyItemRangeChanged(0, itemCount, PAYLOAD_CHECK)
+        }
+    }
+
+    fun clearSelection() {
+        if (selectedIds.isEmpty()) return
+        selectedIds.clear()
+        onSelectionCountChanged(0)
+        notifyItemRangeChanged(0, itemCount, PAYLOAD_CHECK)
+    }
+
+    private fun toggle(track: Track) {
+        if (!selectedIds.add(track.id)) selectedIds.remove(track.id)
+        onSelectionCountChanged(selectedIds.size)
+        val pos = currentList.indexOfFirst { it.id == track.id }
+        if (pos >= 0) notifyItemChanged(pos, PAYLOAD_CHECK)
+    }
+
+    internal class PickerHolder(
+        itemView: View,
+        onToggle: (Track) -> Unit
+    ) : RecyclerView.ViewHolder(itemView) {
+        private val cover = itemView.findViewWithTag<ImageView>("pickerCover")
+        private val title = itemView.findViewWithTag<TextView>("pickerTitle")
+        private val artist = itemView.findViewWithTag<TextView>("pickerArtist")
+        private val check = itemView.findViewWithTag<CheckBox>("pickerCheck")
+        private var current: Track? = null
+
+        init {
+            itemView.setOnClickListener { current?.let(onToggle) }
+            // Keep one click target for the whole row. This avoids duplicate
+            // listener churn when RecyclerView rebinds a recycled checkbox.
+            check.isClickable = false
+            check.isFocusable = false
+        }
+
+        fun bind(track: Track, checked: Boolean) {
+            current = track
+            title.text = track.title
+            artist.text = track.artistName
+            check.isChecked = checked
+
+            cover.dispose()
+            cover.setColorFilter(null)
+            cover.scaleType = ImageView.ScaleType.CENTER_CROP
+            if (track.coverUri.isNullOrBlank()) {
+                cover.setImageResource(android.R.drawable.ic_menu_gallery)
+            } else {
+                loadCover(itemView.context, cover, track.coverUri, 104)
+            }
+        }
+
+        fun bindChecked(checked: Boolean) {
+            check.isChecked = checked
+        }
+    }
+
+    private companion object {
+        const val PAYLOAD_CHECK = "picker-check"
+    }
+}
+
+private object PickerTrackDiff : DiffUtil.ItemCallback<Track>() {
+    override fun areItemsTheSame(oldItem: Track, newItem: Track): Boolean = oldItem.id == newItem.id
+    override fun areContentsTheSame(oldItem: Track, newItem: Track): Boolean = oldItem == newItem
+}
+
+private fun makePlaylistPickerRow(context: Context): LinearLayout {
+    val d = context.resources.displayMetrics.density
+    fun dp(v: Int) = (v * d).roundToInt()
+
+    return LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        minimumHeight = dp(64)
+        setPadding(dp(10), dp(6), dp(8), dp(6))
+        layoutParams = RecyclerView.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            dp(64)
+        )
+        background = android.graphics.drawable.GradientDrawable().apply {
+            setColor(Color.TRANSPARENT)
+            cornerRadius = dp(10).toFloat()
+        }
+
+        addView(ImageView(context).apply {
+            tag = "pickerCover"
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            layoutParams = LinearLayout.LayoutParams(dp(46), dp(46))
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.rgb(37, 33, 28))
+                cornerRadius = dp(9).toFloat()
+            }
+            clipToOutline = true
+            outlineProvider = ViewOutlineProvider.BACKGROUND
+        })
+
+        addView(LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
+                marginStart = dp(11)
+                marginEnd = dp(8)
+            }
+            addView(TextView(context).apply {
+                tag = "pickerTitle"
+                setTextColor(Color.rgb(241, 234, 217))
+                textSize = 14f
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setTypeface(typeface, android.graphics.Typeface.BOLD)
+            })
+            addView(TextView(context).apply {
+                tag = "pickerArtist"
+                setTextColor(Color.rgb(179, 169, 146))
+                textSize = 12f
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            })
+        })
+
+        addView(CheckBox(context).apply {
+            tag = "pickerCheck"
+            layoutParams = LinearLayout.LayoutParams(dp(42), dp(42))
+            gravity = Gravity.CENTER
+            buttonTintList = ColorStateList(
+                arrayOf(
+                    intArrayOf(android.R.attr.state_checked),
+                    intArrayOf()
+                ),
+                intArrayOf(
+                    Color.rgb(211, 178, 112),
+                    Color.rgb(126, 117, 99)
+                )
+            )
+        })
+    }
+}
+
+/** Native picker for Spotify import. Keeps large imported playlists smooth while scrolling. */
+internal class SpotifyImportTrackPickerAdapter(
+    initialSelection: Set<String>,
+    private val onSelectionChanged: (Set<String>) -> Unit
+) : ListAdapter<com.musicvault.app.spotify.SpotifyTrack, SpotifyImportTrackPickerAdapter.Holder>(SpotifyImportTrackDiff) {
+
+    private val selectedIds = LinkedHashSet<String>().apply { addAll(initialSelection) }
+
+    init { setHasStableIds(true) }
+
+    override fun getItemId(position: Int): Long = stableLongId("spotify-picker:${getItem(position).id}")
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): Holder =
+        Holder(makePlaylistPickerRow(parent.context)) { track -> toggle(track) }
+
+    override fun onBindViewHolder(holder: Holder, position: Int) {
+        val track = getItem(position)
+        holder.bind(track, track.id in selectedIds)
+    }
+
+    override fun onBindViewHolder(holder: Holder, position: Int, payloads: MutableList<Any>) {
+        if (payloads.isNotEmpty()) holder.bindChecked(getItem(position).id in selectedIds)
+        else onBindViewHolder(holder, position)
+    }
+
+    fun update(items: List<com.musicvault.app.spotify.SpotifyTrack>) {
+        if (currentList == items) return
+        submitList(items.toList())
+    }
+
+    fun selectAll(items: List<com.musicvault.app.spotify.SpotifyTrack>) {
+        items.forEach { selectedIds.add(it.id) }
+        onSelectionChanged(selectedIds.toSet())
+        if (itemCount > 0) notifyItemRangeChanged(0, itemCount, PAYLOAD_CHECK)
+    }
+
+    fun clearSelection() {
+        if (selectedIds.isEmpty()) return
+        selectedIds.clear()
+        onSelectionChanged(emptySet())
+        if (itemCount > 0) notifyItemRangeChanged(0, itemCount, PAYLOAD_CHECK)
+    }
+
+    private fun toggle(track: com.musicvault.app.spotify.SpotifyTrack) {
+        if (!selectedIds.add(track.id)) selectedIds.remove(track.id)
+        onSelectionChanged(selectedIds.toSet())
+        val pos = currentList.indexOfFirst { it.id == track.id }
+        if (pos >= 0) notifyItemChanged(pos, PAYLOAD_CHECK)
+    }
+
+    internal class Holder(itemView: View, onToggle: (com.musicvault.app.spotify.SpotifyTrack) -> Unit) : RecyclerView.ViewHolder(itemView) {
+        private val cover = itemView.findViewWithTag<ImageView>("pickerCover")
+        private val title = itemView.findViewWithTag<TextView>("pickerTitle")
+        private val artist = itemView.findViewWithTag<TextView>("pickerArtist")
+        private val check = itemView.findViewWithTag<CheckBox>("pickerCheck")
+        private var current: com.musicvault.app.spotify.SpotifyTrack? = null
+
+        init {
+            itemView.setOnClickListener { current?.let(onToggle) }
+            check.isClickable = false
+            check.isFocusable = false
+        }
+
+        fun bind(track: com.musicvault.app.spotify.SpotifyTrack, checked: Boolean) {
+            current = track
+            title.text = track.title
+            artist.text = track.artist
+            check.isChecked = checked
+            cover.dispose()
+            cover.setColorFilter(null)
+            cover.scaleType = ImageView.ScaleType.CENTER_CROP
+            if (track.coverUrl.isNullOrBlank()) cover.setImageResource(android.R.drawable.ic_menu_gallery)
+            else loadCover(itemView.context, cover, track.coverUrl, 104)
+        }
+
+        fun bindChecked(checked: Boolean) { check.isChecked = checked }
+    }
+
+    private companion object { const val PAYLOAD_CHECK = "spotify-picker-check" }
+}
+
+private object SpotifyImportTrackDiff : DiffUtil.ItemCallback<com.musicvault.app.spotify.SpotifyTrack>() {
+    override fun areItemsTheSame(oldItem: com.musicvault.app.spotify.SpotifyTrack, newItem: com.musicvault.app.spotify.SpotifyTrack): Boolean = oldItem.id == newItem.id
+    override fun areContentsTheSame(oldItem: com.musicvault.app.spotify.SpotifyTrack, newItem: com.musicvault.app.spotify.SpotifyTrack): Boolean = oldItem == newItem
 }

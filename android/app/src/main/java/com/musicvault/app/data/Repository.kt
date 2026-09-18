@@ -57,8 +57,8 @@ class MusicRepository(private val db: MusicDatabase) {
         else -> false
     }
 
-    suspend fun createPlaylist(id: String, title: String, description: String) {
-        db.playlistDao().upsertAll(listOf(PlaylistEntity(id, title, description)))
+    suspend fun createPlaylist(id: String, title: String, description: String, coverUri: String? = null) {
+        db.playlistDao().upsertAll(listOf(PlaylistEntity(id, title, description, coverUri)))
     }
 
     suspend fun createAlbum(id: String, title: String, tracks: List<Track>) {
@@ -74,6 +74,12 @@ class MusicRepository(private val db: MusicDatabase) {
             val additions = tracks.filter { existing.add(it.id) }
             val start = dao.nextPosition(id)
             dao.upsertTracks(additions.mapIndexed { index, track -> PlaylistTrackEntity(id, track.id, start + index) })
+            // A user-created playlist should never stay visually empty once it
+            // has music. Keep an imported/custom cover if it already exists;
+            // otherwise use the artwork from the first song that was added.
+            additions.firstOrNull { !it.coverUri.isNullOrBlank() }?.coverUri?.let { cover ->
+                dao.setCoverIfEmpty(id, cover)
+            }
         }
     }
 
