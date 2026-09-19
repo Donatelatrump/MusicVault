@@ -21,8 +21,10 @@ from .library import read_track
 from .downloader import downloader_command, youtube_arguments, explain_download_error
 from .models import Track, data_dir, parse_lrc, stable_id
 from .songmirror import import_spotify_playlist, import_spotify_track
+from .streaming import (youtube_search as fast_youtube_search, youtube_playlist_search,
+                        youtube_playlist_tracks, StreamCancelled)
 
-USER_AGENT = "MusicVault/0.8.0 (Linux desktop music library)"
+USER_AGENT = "MusicVault/0.9.4 (Linux desktop music library)"
 MUSICBRAINZ_LOCK = threading.Lock()
 MUSICBRAINZ_LAST = 0.0
 
@@ -130,7 +132,7 @@ class Catalog:
             return cached
         if source == "youtube":
             try:
-                result = [t.to_dict() for t in youtube_search(query, cancel)]
+                result = [t.to_dict() for t in fast_youtube_search(query, cancel)]
                 self.db.cache_put(key, result)
                 return result
             except Exception:
@@ -253,6 +255,32 @@ class Catalog:
         self._album_memory[key] = tuple(tracks)
         while len(self._album_memory) > 12:
             self._album_memory.popitem(last=False)
+        return tracks
+
+    def search_playlists(self, query, cancel=None):
+        query = query.strip()
+        key = "search:playlists:youtube:" + query.casefold()
+        cached = self.db.cache_get(key)
+        if cached is not None:
+            return cached
+        try:
+            playlists = youtube_playlist_search(query, cancel)
+        except StreamCancelled:
+            return []
+        if playlists:
+            self.db.cache_put(key, playlists)
+            return playlists
+        stale = self.db.cache_get(key, ttl=None)
+        return stale or []
+
+    def playlist_tracks(self, playlist, cancel=None):
+        key = f"playlist:youtube:{playlist['id']}"
+        cached = self.db.cache_get(key, 6 * 3600)
+        if cached is not None:
+            return [Track.from_dict(item) for item in cached]
+        tracks = youtube_playlist_tracks(playlist, cancel, limit=500)
+        if tracks:
+            self.db.cache_put(key, [track.to_dict() for track in tracks])
         return tracks
 
     def spotify_playlist(self, url, progress=None):

@@ -165,9 +165,17 @@ class MetadataCatalogProvider(
 
         var bestWeakResult: List<CatalogTrack> = emptyList()
         for ((index, source) in ordered.withIndex()) {
-            val timeoutMs = if (index == 0) TRACK_PRIMARY_FAST_TIMEOUT_MS else TRACK_FALLBACK_FAST_TIMEOUT_MS
+            val timeoutMs = trackSearchTimeoutMs(source, merged = false, isFirst = index == 0)
+            // yt-dlp has non-trivial process startup cost. Asking it for the full
+            // 40-row UI page on the fallback path only delays first paint, so fetch
+            // a compact first page and return it immediately when it is relevant.
+            val providerLimit = if (source is YouTubeMetadataProvider) {
+                minOf(limit, YOUTUBE_FAST_RESULT_LIMIT)
+            } else {
+                limit
+            }
             val raw = withTimeoutOrNull(timeoutMs) {
-                safeCall { source.searchTracks(query, limit) }
+                safeCall { source.searchTracks(query, providerLimit) }
             }.orEmpty().filterValidTracks()
             if (raw.isEmpty()) continue
 
@@ -192,22 +200,19 @@ class MetadataCatalogProvider(
 
         val buckets = mutableListOf<List<CatalogTrack>>()
         for ((index, source) in ordered.withIndex()) {
-            val timeoutMs = if (index == 0) TRACK_PRIMARY_MERGE_TIMEOUT_MS else TRACK_FALLBACK_MERGE_TIMEOUT_MS
+            val timeoutMs = trackSearchTimeoutMs(source, merged = true, isFirst = index == 0)
             val result = withTimeoutOrNull(timeoutMs) {
                 safeCall { source.searchTracks(query, limit) }
             }.orEmpty().filterValidTracks()
             if (result.isEmpty()) continue
 
             buckets += result
-            val ranked = SearchScorer.mergeAndRank(query, buckets).take(limit)
-            val topScore = ranked.maxOfOrNull { SearchScorer.score(it, query, 0, 1) } ?: 0f
-
-            // A healthy Deezer/music-provider page is already enough for an
-            // interactive search. Do not make the user wait for yt-dlp merely
-            // to enrich a list that is already useful.
-            if (index == 0 && ranked.size >= MIN_PRIMARY_TRACK_RESULTS && topScore >= PRIMARY_WEAK_THRESHOLD) {
-                return ranked
-            }
+            // The merged pass intentionally continues into YouTube even when
+            // Deezer returned several usable rows. NewPipe search is cheap enough
+            // (~1-2 s on the test phone) and fixes queries where Deezer returns
+            // plausible-but-poor matches (ASMR, mixes, talks, niche uploads, etc.).
+            // The UI already published the fast Deezer page, so this refinement
+            // never blocks first paint.
         }
         return SearchScorer.mergeAndRank(query, buckets).take(limit)
     }
@@ -327,6 +332,24 @@ class MetadataCatalogProvider(
         return emptyList()
     }
 
+
+    /**
+     * Deezer normally answers in well under a second. YouTube now uses NewPipe
+     * first and yt-dlp only as a compatibility fallback, so keep enough budget
+     * for a NewPipe request plus one fallback without treating a transient delay
+     * as an authoritative empty search.
+     */
+    private fun trackSearchTimeoutMs(source: CatalogProvider, merged: Boolean, isFirst: Boolean): Long {
+        if (source is YouTubeMetadataProvider) {
+            return if (merged) TRACK_YOUTUBE_MERGE_TIMEOUT_MS else TRACK_YOUTUBE_FAST_TIMEOUT_MS
+        }
+        return if (merged) {
+            if (isFirst) TRACK_PRIMARY_MERGE_TIMEOUT_MS else TRACK_FALLBACK_MERGE_TIMEOUT_MS
+        } else {
+            if (isFirst) TRACK_PRIMARY_FAST_TIMEOUT_MS else TRACK_FALLBACK_FAST_TIMEOUT_MS
+        }
+    }
+
     private fun CatalogAlbum.isValid(): Boolean =
         id.isNotBlank() && title.isNotBlank() && artistName.isNotBlank()
 
@@ -362,9 +385,12 @@ class MetadataCatalogProvider(
          */
         private const val PRIMARY_WEAK_THRESHOLD = 60f
         private const val MIN_PRIMARY_TRACK_RESULTS = 3
+        private const val YOUTUBE_FAST_RESULT_LIMIT = 12
         private const val TRACK_PRIMARY_FAST_TIMEOUT_MS = 3_200L
         private const val TRACK_FALLBACK_FAST_TIMEOUT_MS = 2_200L
         private const val TRACK_PRIMARY_MERGE_TIMEOUT_MS = 3_500L
         private const val TRACK_FALLBACK_MERGE_TIMEOUT_MS = 2_500L
+        private const val TRACK_YOUTUBE_FAST_TIMEOUT_MS = 12_000L
+        private const val TRACK_YOUTUBE_MERGE_TIMEOUT_MS = 14_000L
     }
 }

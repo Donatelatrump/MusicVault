@@ -11,6 +11,13 @@
 -keep class androidx.compose.runtime.** { *; }
 -keepclassmembers class androidx.compose.runtime.** { *; }
 
+
+# NewPipeExtractor (primary streaming resolver)
+-keep class org.mozilla.javascript.** { *; }
+-keep class org.mozilla.classfile.ClassFileWriter
+-dontwarn org.mozilla.javascript.tools.**
+-keep class org.schabi.newpipe.extractor.** { *; }
+
 # Preserve yt-dlp android classes
 -keep class com.yausername.youtubedl_android.** { *; }
 -dontwarn com.yausername.youtubedl_android.**

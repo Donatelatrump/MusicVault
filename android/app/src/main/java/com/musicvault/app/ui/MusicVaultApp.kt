@@ -105,6 +105,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.core.content.ContextCompat
@@ -124,9 +126,11 @@ import com.musicvault.app.data.Playlist
 import com.musicvault.app.data.Track
 import com.musicvault.app.data.UserPreferences
 import com.musicvault.app.catalog.CatalogAlbum
+import com.musicvault.app.catalog.CatalogPlaylist
 import com.musicvault.app.catalog.CatalogTrack
 import com.musicvault.app.ui.search.RemoteResultItem
 import com.musicvault.app.ui.search.RemoteResultsAdapter
+import com.musicvault.app.ui.search.YoutubePlaylistTracksAdapter
 import com.musicvault.app.ui.search.MoreAction
 import com.musicvault.app.ui.theme.VaultColors
 import com.musicvault.app.ui.theme.VaultIcons
@@ -929,72 +933,95 @@ private fun VaultModalDialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
-        Surface(
+        // Keep the modal inside the real dialog viewport. Some of the richer
+        // dialogs (notably create-playlist) contain a search field plus a
+        // fixed-height native RecyclerView. Without a bounded viewport that
+        // content can push the action row below the screen, making the
+        // "Crear playlist" button look as if it disappeared.
+        BoxWithConstraints(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 18.dp)
-                .widthIn(max = 560.dp),
-            shape = RoundedCornerShape(28.dp),
-            color = VaultColors.Surface1,
-            contentColor = VaultColors.TextPrimary,
-            tonalElevation = 0.dp,
-            shadowElevation = 24.dp,
-            border = BorderStroke(1.dp, VaultColors.Divider)
+                .fillMaxSize()
+                .padding(vertical = 12.dp),
+            contentAlignment = Alignment.Center
         ) {
-            Column {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(start = 20.dp, top = 18.dp, end = 10.dp, bottom = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp)
+                    .widthIn(max = 560.dp)
+                    .heightIn(max = maxHeight),
+                shape = RoundedCornerShape(28.dp),
+                color = VaultColors.Surface1,
+                contentColor = VaultColors.TextPrimary,
+                tonalElevation = 0.dp,
+                shadowElevation = 24.dp,
+                border = BorderStroke(1.dp, VaultColors.Divider)
+            ) {
+                Column {
+                    Row(
                         modifier = Modifier
-                            .size(46.dp)
-                            .clip(RoundedCornerShape(15.dp))
-                            .background(VaultColors.AccentSoft),
-                        contentAlignment = Alignment.Center
+                            .fillMaxWidth()
+                            .padding(start = 20.dp, top = 18.dp, end = 10.dp, bottom = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(icon, contentDescription = null, tint = VaultColors.Accent, modifier = Modifier.size(24.dp))
-                    }
-                    Spacer(Modifier.width(13.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            title,
-                            color = VaultColors.TextPrimary,
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.ExtraBold,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        if (!subtitle.isNullOrBlank()) {
-                            Spacer(Modifier.height(2.dp))
+                        Box(
+                            modifier = Modifier
+                                .size(46.dp)
+                                .clip(RoundedCornerShape(15.dp))
+                                .background(VaultColors.AccentSoft),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(icon, contentDescription = null, tint = VaultColors.Accent, modifier = Modifier.size(24.dp))
+                        }
+                        Spacer(Modifier.width(13.dp))
+                        Column(Modifier.weight(1f)) {
                             Text(
-                                subtitle,
-                                color = VaultColors.TextSecondary,
-                                fontSize = 12.sp,
+                                title,
+                                color = VaultColors.TextPrimary,
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.ExtraBold,
                                 maxLines = 2,
                                 overflow = TextOverflow.Ellipsis
                             )
+                            if (!subtitle.isNullOrBlank()) {
+                                Spacer(Modifier.height(2.dp))
+                                Text(
+                                    subtitle,
+                                    color = VaultColors.TextSecondary,
+                                    fontSize = 12.sp,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                        IconButton(onClick = onDismiss) {
+                            Icon(Icons.Default.Close, contentDescription = "Cerrar", tint = VaultColors.TextSecondary)
                         }
                     }
-                    IconButton(onClick = onDismiss) {
-                        Icon(Icons.Default.Close, contentDescription = "Cerrar", tint = VaultColors.TextSecondary)
-                    }
+                    HorizontalDivider(color = VaultColors.Divider.copy(alpha = 0.8f))
+
+                    // Header and actions remain fixed. Only the center section is
+                    // allowed to scroll when the device/IME leaves less height.
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f, fill = false)
+                            .verticalScroll(rememberScrollState())
+                            .padding(horizontal = 20.dp, vertical = 16.dp),
+                        content = content
+                    )
+
+                    HorizontalDivider(color = VaultColors.Divider.copy(alpha = 0.8f))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(VaultColors.SurfaceBase)
+                            .padding(horizontal = 18.dp, vertical = 14.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
+                        verticalAlignment = Alignment.CenterVertically,
+                        content = actions
+                    )
                 }
-                HorizontalDivider(color = VaultColors.Divider.copy(alpha = 0.8f))
-                Column(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
-                    content = content
-                )
-                HorizontalDivider(color = VaultColors.Divider.copy(alpha = 0.8f))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(VaultColors.SurfaceBase)
-                        .padding(horizontal = 18.dp, vertical = 14.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
-                    verticalAlignment = Alignment.CenterVertically,
-                    content = actions
-                )
             }
         }
     }
@@ -1259,7 +1286,19 @@ internal fun RecommendationTrackCard(
     val progress by progressFlow.collectAsStateWithLifecycle(initialValue = null)
     val downloading = progress != null && !track.isDownloaded
     val cardSize = if (hybrid) 128.dp else 150.dp
-    Column(Modifier.width(cardSize)) {
+    val pressInteraction = remember { MutableInteractionSource() }
+    val pressed by pressInteraction.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (pressed) 0.965f else 1f,
+        animationSpec = tween(durationMillis = if (pressed) 70 else 120),
+        label = "recommendationPress"
+    )
+    Column(
+        Modifier
+            .width(cardSize)
+            .scale(pressScale)
+            .clickable(interactionSource = pressInteraction, indication = null, onClick = onPlay)
+    ) {
         Box(Modifier.size(cardSize)) {
             AsyncImage(
                 model = ImageRequest.Builder(LocalContext.current)
@@ -1270,7 +1309,7 @@ internal fun RecommendationTrackCard(
                     .crossfade(false)
                     .build(),
                 contentDescription = null,
-                modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(12.dp)).clickable(onClick = onPlay),
+                modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(12.dp)),
                 contentScale = ContentScale.Crop,
                 imageLoader = CoverImageCache.loader(LocalContext.current)
             )
@@ -1289,15 +1328,15 @@ internal fun RecommendationTrackCard(
                     overflow = TextOverflow.Ellipsis
                 )
             }
-            when {
-                downloading -> ThinDownloadProgress(progress = ((progress ?: 0) / 100f).coerceIn(0f, 1f), modifier = Modifier.width(34.dp))
-                track.isDownloaded -> actions()
-                else -> {
-                    IconButton(onClick = onPlay, modifier = Modifier.size(38.dp)) {
-                        Icon(if (isPlaying) VaultIcons.Pause else Icons.Default.PlayArrow, if (isPlaying) "Pausar" else "Descargar y reproducir", tint = VaultColors.TextPrimary)
-                    }
-                }
+            if (downloading) {
+                ThinDownloadProgress(
+                    progress = ((progress ?: 0) / 100f).coerceIn(0f, 1f),
+                    modifier = Modifier.width(28.dp)
+                )
             }
+            // Same interaction as list rows: tap the card to play; overflow is
+            // always present and owns Download/Delete/queue actions.
+            actions()
         }
     }
 }
@@ -1345,7 +1384,7 @@ private data class SearchScreenState(
     val active: Boolean
 )
 
-private enum class SearchTab { TRACKS, ALBUMS }
+private enum class SearchTab { TRACKS, ALBUMS, PLAYLISTS }
 
 @Composable
 private fun SearchScreen(
@@ -1363,6 +1402,14 @@ private fun SearchScreen(
     var deleteSearchTrack by remember { mutableStateOf<CatalogTrack?>(null) }
     var searchTab by rememberSaveable { mutableStateOf(SearchTab.TRACKS) }
     var submittedQuery by rememberSaveable { mutableStateOf("") }
+    var remotePlaylists by remember { mutableStateOf<List<CatalogPlaylist>>(emptyList()) }
+    var playlistsLoading by remember { mutableStateOf(false) }
+    var loadedPlaylistQuery by remember { mutableStateOf("") }
+    var selectedRemotePlaylist by remember { mutableStateOf<CatalogPlaylist?>(null) }
+    var remotePlaylistTracks by remember { mutableStateOf<List<CatalogTrack>>(emptyList()) }
+    var remotePlaylistLoading by remember { mutableStateOf(false) }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
     val latestIsPlaying by rememberUpdatedState(isPlaying)
     val latestSelectedTrackId by rememberUpdatedState(state.selectedTrackId)
 
@@ -1384,20 +1431,63 @@ private fun SearchScreen(
                 } else {
                     vm.playRemote(track)
                 }
-            }
+            },
+            onPlaylistClick = { playlist -> selectedRemotePlaylist = playlist }
         )
     }
     // The downloaded-id set only changes when the library changes; rebuilding it
     // on every unrelated recomposition was pure churn for the search list.
     var searchText by rememberSaveable { mutableStateOf("") }
+    val latestSearchTab by rememberUpdatedState(searchTab)
+    val latestSubmittedQuery by rememberUpdatedState(submittedQuery)
     fun submitCurrentSearch() {
         val query = searchText.trim()
         if (query.isBlank()) return
+        keyboardController?.hide()
+        focusManager.clearFocus(force = true)
         submittedQuery = query
-        // Every fresh search opens on songs; the album results are fetched in
-        // the same request and are one tap away in the segmented switch below.
+        remotePlaylists = emptyList()
+        loadedPlaylistQuery = ""
+        playlistsLoading = false
+        // Every fresh search opens on songs; albums/playlists remain one tap away.
         searchTab = SearchTab.TRACKS
         vm.submitSearch(query)
+    }
+
+    LaunchedEffect(submittedQuery, searchTab) {
+        val query = submittedQuery.trim()
+        if (searchTab != SearchTab.PLAYLISTS || query.isBlank() || loadedPlaylistQuery == query) return@LaunchedEffect
+        playlistsLoading = true
+        try {
+            remotePlaylists = vm.searchYouTubePlaylists(query, 20)
+            loadedPlaylistQuery = query
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            remotePlaylists = emptyList()
+            loadedPlaylistQuery = query
+        } finally {
+            playlistsLoading = false
+        }
+    }
+
+    LaunchedEffect(selectedRemotePlaylist?.id) {
+        val playlist = selectedRemotePlaylist ?: run {
+            remotePlaylistTracks = emptyList()
+            remotePlaylistLoading = false
+            return@LaunchedEffect
+        }
+        remotePlaylistTracks = emptyList()
+        remotePlaylistLoading = true
+        try {
+            remotePlaylistTracks = vm.loadYouTubePlaylistTracks(playlist, 500)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            remotePlaylistTracks = emptyList()
+        } finally {
+            remotePlaylistLoading = false
+        }
     }
     val downloadedIds = remember(state.downloaded) {
         state.downloaded
@@ -1407,7 +1497,7 @@ private fun SearchScreen(
             .toSet()
     }
 
-    val resultItems = remember(submittedQuery, searchTab, state.remoteAlbums, state.remoteTracks, state.isSearching) {
+    val resultItems = remember(submittedQuery, searchTab, state.remoteAlbums, state.remoteTracks, remotePlaylists, state.isSearching, playlistsLoading) {
         buildList<RemoteResultItem> {
             if (submittedQuery.isBlank()) return@buildList
             when (searchTab) {
@@ -1423,6 +1513,13 @@ private fun SearchScreen(
                         state.remoteAlbums.forEach { add(RemoteResultItem.AlbumItem(it)) }
                     } else if (!state.isSearching) {
                         add(RemoteResultItem.HeaderItem("No encontramos álbumes para “$submittedQuery”."))
+                    }
+                }
+                SearchTab.PLAYLISTS -> {
+                    if (remotePlaylists.isNotEmpty()) {
+                        remotePlaylists.forEach { add(RemoteResultItem.PlaylistItem(it)) }
+                    } else if (!playlistsLoading) {
+                        add(RemoteResultItem.HeaderItem("No encontramos playlists para “$submittedQuery”."))
                     }
                 }
             }
@@ -1473,13 +1570,21 @@ private fun SearchScreen(
                     selected = searchTab,
                     trackCount = state.remoteTracks.size,
                     albumCount = state.remoteAlbums.size,
-                    onSelected = { searchTab = it }
+                    playlistCount = remotePlaylists.size,
+                    onSelected = { tab ->
+                        keyboardController?.hide()
+                        focusManager.clearFocus(force = true)
+                        searchTab = tab
+                    }
                 )
             }
         }
 
         AnimatedVisibility(
-            visible = state.isSearching && submittedQuery.isNotBlank(),
+            visible = submittedQuery.isNotBlank() && (
+                (searchTab != SearchTab.PLAYLISTS && state.isSearching) ||
+                    (searchTab == SearchTab.PLAYLISTS && playlistsLoading)
+            ),
             enter = fadeIn(tween(150)) + expandVertically(spring(stiffness = Spring.StiffnessMedium)),
             exit = fadeOut(tween(120)) + shrinkVertically(spring(stiffness = Spring.StiffnessMedium))
         ) {
@@ -1495,9 +1600,10 @@ private fun SearchScreen(
         Box(Modifier.fillMaxWidth().weight(1f)) {
             // Skeleton placeholders while the search is in flight and no rows
             // exist yet: the shape of the final content instead of a blank gap.
-            if (state.isSearching && submittedQuery.isNotBlank() &&
-                ((searchTab == SearchTab.TRACKS && state.remoteTracks.isEmpty()) ||
-                    (searchTab == SearchTab.ALBUMS && state.remoteAlbums.isEmpty()))
+            if (submittedQuery.isNotBlank() &&
+                (((searchTab == SearchTab.TRACKS && state.isSearching && state.remoteTracks.isEmpty()) ||
+                    (searchTab == SearchTab.ALBUMS && state.isSearching && state.remoteAlbums.isEmpty()) ||
+                    (searchTab == SearchTab.PLAYLISTS && playlistsLoading && remotePlaylists.isEmpty())))
             ) {
                 Column(Modifier.fillMaxSize().padding(horizontal = 4.dp)) {
                     repeat(7) { SkeletonRow() }
@@ -1518,7 +1624,20 @@ private fun SearchScreen(
                         recycledViewPool.setMaxRecycledViews(1, 8)
                         recycledViewPool.setMaxRecycledViews(2, 12)
                         recycledViewPool.setMaxRecycledViews(3, 18)
+                        recycledViewPool.setMaxRecycledViews(4, 10)
                         overScrollMode = RecyclerView.OVER_SCROLL_IF_CONTENT_SCROLLS
+                        addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                            override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+                                if (newState != RecyclerView.SCROLL_STATE_IDLE) return
+                                if (latestSearchTab != SearchTab.TRACKS || latestSubmittedQuery.isBlank()) return
+                                val lm = recyclerView.layoutManager as? LinearLayoutManager ?: return
+                                val first = lm.findFirstVisibleItemPosition()
+                                val last = lm.findLastVisibleItemPosition()
+                                if (first != RecyclerView.NO_POSITION) {
+                                    vm.prewarmVisibleSearchWindow(first, last)
+                                }
+                            }
+                        })
                     }
                 },
                 update = { recyclerView ->
@@ -1561,6 +1680,16 @@ private fun SearchScreen(
                     actionAction = null
                 }
             )
+        }
+        MoreAction.DOWNLOAD -> if (selectedTrack != null) {
+            vm.requestRemoteDownload(selectedTrack)
+            actionTrack = null
+            actionAction = null
+        }
+        MoreAction.CANCEL_DOWNLOAD -> if (selectedTrack != null) {
+            vm.cancelDownload("${selectedTrack.provider}:recording:${selectedTrack.id}")
+            actionTrack = null
+            actionAction = null
         }
         MoreAction.DELETE -> if (selectedTrack != null) {
             deleteSearchTrack = selectedTrack
@@ -1613,6 +1742,106 @@ private fun SearchScreen(
                 TextButton(onClick = { showCreateAlbum = false; actionTrack = null }) { Text("Cancelar") }
             }
         )
+    }
+
+    selectedRemotePlaylist?.let { playlist ->
+        YoutubePlaylistPreviewDialog(
+            playlist = playlist,
+            tracks = remotePlaylistTracks,
+            loading = remotePlaylistLoading,
+            onDismiss = { selectedRemotePlaylist = null },
+            onTrackClick = vm::playRemote,
+            onImport = {
+                vm.importYouTubePlaylist(playlist, remotePlaylistTracks)
+                selectedRemotePlaylist = null
+            }
+        )
+    }
+}
+
+@Composable
+private fun YoutubePlaylistPreviewDialog(
+    playlist: CatalogPlaylist,
+    tracks: List<CatalogTrack>,
+    loading: Boolean,
+    onDismiss: () -> Unit,
+    onTrackClick: (CatalogTrack) -> Unit,
+    onImport: () -> Unit
+) {
+    val adapter = remember { YoutubePlaylistTracksAdapter(onTrackClick) }
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth(0.94f)
+                .fillMaxHeight(0.86f),
+            shape = RoundedCornerShape(20.dp),
+            color = VaultColors.Surface1,
+            tonalElevation = 6.dp
+        ) {
+            Column(Modifier.fillMaxSize().padding(18.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CachedCover(
+                        url = playlist.coverUri,
+                        contentDescription = playlist.title,
+                        modifier = Modifier.size(72.dp).clip(RoundedCornerShape(12.dp)),
+                        targetSizePx = 180,
+                        contentScale = ContentScale.Crop
+                    )
+                    Spacer(Modifier.width(14.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(playlist.title, color = VaultColors.TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            buildString {
+                                append(playlist.uploaderName.ifBlank { "YouTube" })
+                                val count = if (playlist.trackCount > 0) playlist.trackCount else tracks.size.toLong()
+                                if (count > 0) append(" · $count elementos")
+                            },
+                            color = VaultColors.TextSecondary,
+                            fontSize = 12.sp
+                        )
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, "Cerrar", tint = VaultColors.TextSecondary)
+                    }
+                }
+                Spacer(Modifier.height(14.dp))
+                Button(
+                    onClick = onImport,
+                    enabled = tracks.isNotEmpty() && !loading,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = VaultColors.Accent, contentColor = VaultColors.OnAccent)
+                ) {
+                    Icon(Icons.Default.Add, null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Agregar a MusicVault")
+                }
+                if (loading) {
+                    Spacer(Modifier.height(10.dp))
+                    LinearProgressIndicator(Modifier.fillMaxWidth(), color = VaultColors.Accent, trackColor = VaultColors.Surface2)
+                    Spacer(Modifier.height(8.dp))
+                    Text("Cargando canciones de YouTube…", color = VaultColors.TextTertiary, fontSize = 11.sp)
+                } else {
+                    Spacer(Modifier.height(10.dp))
+                }
+                AndroidView(
+                    modifier = Modifier.fillMaxWidth().weight(1f).clipToBounds(),
+                    factory = { context ->
+                        RecyclerView(context).apply {
+                            layoutManager = LinearLayoutManager(context)
+                            this.adapter = adapter
+                            setHasFixedSize(true)
+                            itemAnimator = null
+                            setItemViewCacheSize(12)
+                        }
+                    },
+                    update = { adapter.submitList(tracks) }
+                )
+            }
+        }
     }
 }
 
@@ -1702,25 +1931,16 @@ private fun RemoteTrackRow(
             )
 
         }
-        when {
-            downloading -> {
-                Box(
-                    Modifier.size(48.dp).clickable(onClick = onCancelDownload),
-                    contentAlignment = Alignment.Center
-                ) {
-                    ThinDownloadProgress(progress = progressFraction, modifier = Modifier.width(30.dp))
-                }
+        if (downloading) {
+            Box(
+                Modifier.width(38.dp).height(48.dp).clickable(onClick = onCancelDownload),
+                contentAlignment = Alignment.Center
+            ) {
+                ThinDownloadProgress(progress = progressFraction, modifier = Modifier.width(28.dp))
             }
-            downloaded -> {
-                IconButton(onClick = onMore) {
-                    Icon(Icons.Default.MoreVert, "Más opciones", tint = VaultColors.TextPrimary)
-                }
-            }
-            else -> {
-                IconButton(onClick = onPlayToggle) {
-                    Icon(if (isPlaying) VaultIcons.Pause else Icons.Default.PlayArrow, if (isPlaying) "Pausar" else "Reproducir", tint = VaultColors.TextPrimary)
-                }
-            }
+        }
+        IconButton(onClick = onMore) {
+            Icon(Icons.Default.MoreVert, "Más opciones", tint = VaultColors.TextPrimary)
         }
     }
 }
@@ -2371,6 +2591,16 @@ private fun RemoteAlbumDetail(
             actionAction = null
         }
         MoreAction.ALBUM -> Unit // handled by the chooser below
+        MoreAction.DOWNLOAD -> if (selectedTrack != null) {
+            vm.requestRemoteDownload(selectedTrack)
+            actionTrack = null
+            actionAction = null
+        }
+        MoreAction.CANCEL_DOWNLOAD -> if (selectedTrack != null) {
+            vm.cancelDownload("${selectedTrack.provider}:recording:${selectedTrack.id}")
+            actionTrack = null
+            actionAction = null
+        }
         MoreAction.DELETE -> if (selectedTrack != null) {
             deleteTrack = selectedTrack
             actionTrack = null
@@ -2454,7 +2684,11 @@ private fun PlaylistDetail(
 ) {
     val context = LocalContext.current
     val hybrid = LocalHybridDesign.current
-    val adapter = remember(vm, hybrid) { PlaylistDetailAdapter(vm, hybrid) }
+    // A playlist detail must start from its header every time it is opened.
+    // Key the adapter/reset state to the playlist so RecyclerView/Compose cannot
+    // carry a scroll anchor from a previously opened detail screen.
+    val adapter = remember(playlist.id, vm, hybrid) { PlaylistDetailAdapter(vm, hybrid) }
+    val resetScrollOnOpen = remember(playlist.id) { mutableStateOf(true) }
     val customAlbums = remember(albums) { albums.filter { it.id.startsWith("album:custom:") } }
     val pendingDownloads = remember(tracks) { tracks.count { !it.isDownloaded || it.audioUri == null } }
     // Header identity only changes when what it renders changes; playback
@@ -2490,10 +2724,13 @@ private fun PlaylistDetail(
                     dp(context, if (hybrid) 16 else 20), dp(context, if (hybrid) 16 else 20)
                 )
                 overScrollMode = RecyclerView.OVER_SCROLL_IF_CONTENT_SCROLLS
+                // The detail is transient navigation UI; restoring RecyclerView's
+                // hierarchy state can reopen a playlist at an old/bottom position.
+                isSaveEnabled = false
                 this.adapter = adapter
             }
         },
-        update = {
+        update = { recyclerView ->
             adapter.update(
                 tracks = tracks,
                 playlists = playlists,
@@ -2502,8 +2739,16 @@ private fun PlaylistDetail(
                 isPlaying = isPlaying,
                 onRowClick = { vm.playPlaylistTrack(playlist, it) },
                 onPlayNew = { vm.playPlaylistTrack(playlist, it) },
+                onRemoveFromPlaylist = { vm.removeTrackFromPlaylist(playlist.id, it.id) },
                 header = headerContent
             )
+            if (resetScrollOnOpen.value) {
+                resetScrollOnOpen.value = false
+                recyclerView.post {
+                    (recyclerView.layoutManager as? LinearLayoutManager)
+                        ?.scrollToPositionWithOffset(0, 0)
+                }
+            }
         }
     )
 }
@@ -2616,9 +2861,11 @@ private fun MiniPlayer(
     // Keeping it out of MusicVaultApp prevents the entire navigation/search tree
     // from recomposing on every playback tick.
     val playbackProgress by vm.playbackProgress.collectAsStateWithLifecycle()
-    val durationMs = playbackProgress.durationMs.coerceAtLeast(track.durationMs)
-    val positionMs = playbackProgress.positionMs
-    val fraction = if (durationMs > 0) (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
+    val preparingTrackId by vm.preparingTrackId.collectAsStateWithLifecycle()
+    val isPreparing = preparingTrackId == track.id
+    val durationMs = if (isPreparing) track.durationMs else playbackProgress.durationMs.coerceAtLeast(track.durationMs)
+    val positionMs = if (isPreparing) 0L else playbackProgress.positionMs
+    val fraction = if (!isPreparing && durationMs > 0) (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
     // Progress ticks every 500 ms while playing; a matching linear tween between
     // samples renders as continuous motion instead of a sprint-and-stop retarget.
     val animatedFraction by animateFloatAsState(
@@ -2685,13 +2932,30 @@ private fun MiniPlayer(
                     tint = if (favorite) VaultColors.Favorite else VaultColors.TextPrimary
                 )
             }
-            IconButton(onClick = onToggle) {
-                Icon(if (isPlaying) VaultIcons.Pause else Icons.Default.PlayArrow, null, tint = VaultColors.OnAccent, modifier = Modifier
-                    .size(if (hybrid) 44.dp else 34.dp)
-                    .clip(CircleShape)
-                    .background(VaultColors.Accent)
-                    .padding(if (hybrid) 10.dp else 4.dp)
-                )
+            IconButton(onClick = onToggle, enabled = !isPreparing) {
+                Box(
+                    modifier = Modifier
+                        .size(if (hybrid) 44.dp else 34.dp)
+                        .clip(CircleShape)
+                        .background(VaultColors.Accent),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isPreparing) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(if (hybrid) 20.dp else 17.dp),
+                            strokeWidth = 2.dp,
+                            color = VaultColors.OnAccent,
+                            trackColor = Color.Transparent
+                        )
+                    } else {
+                        Icon(
+                            if (isPlaying) VaultIcons.Pause else Icons.Default.PlayArrow,
+                            null,
+                            tint = VaultColors.OnAccent,
+                            modifier = Modifier.padding(if (hybrid) 10.dp else 4.dp)
+                        )
+                    }
+                }
             }
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(VaultColors.Divider))
@@ -4111,6 +4375,7 @@ private fun SearchSegmentedControl(
     selected: SearchTab,
     trackCount: Int,
     albumCount: Int,
+    playlistCount: Int,
     onSelected: (SearchTab) -> Unit
 ) {
     val hybrid = LocalHybridDesign.current
@@ -4128,15 +4393,22 @@ private fun SearchSegmentedControl(
             label = "Canciones",
             count = trackCount,
             selected = selected == SearchTab.TRACKS,
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.weight(1.08f),
             onClick = { onSelected(SearchTab.TRACKS) }
         )
         SearchSegment(
             label = "Álbumes",
             count = albumCount,
             selected = selected == SearchTab.ALBUMS,
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.weight(0.84f),
             onClick = { onSelected(SearchTab.ALBUMS) }
+        )
+        SearchSegment(
+            label = "Playlists",
+            count = playlistCount,
+            selected = selected == SearchTab.PLAYLISTS,
+            modifier = Modifier.weight(1.08f),
+            onClick = { onSelected(SearchTab.PLAYLISTS) }
         )
     }
 }
@@ -4161,23 +4433,32 @@ private fun SearchSegment(
             .clip(shape)
             .background(background)
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp),
+            .padding(horizontal = 7.dp),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
             text = label,
             color = if (selected) VaultColors.OnAccent else VaultColors.TextPrimary,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Bold
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            softWrap = false
         )
         if (count > 0) {
-            Spacer(Modifier.width(6.dp))
+            Spacer(Modifier.width(4.dp))
+            val compactCount = when {
+                count < 1000 -> count.toString()
+                count < 10_000 -> String.format(java.util.Locale.US, "%.1fk", count / 1000f).replace(".0k", "k")
+                else -> "${count / 1000}k+"
+            }
             Text(
-                text = count.toString(),
+                text = compactCount,
                 color = if (selected) VaultColors.OnAccent.copy(alpha = 0.78f) else VaultColors.TextTertiary,
-                fontSize = 11.sp,
-                fontFamily = VaultFonts.Mono
+                fontSize = 10.sp,
+                fontFamily = VaultFonts.Mono,
+                maxLines = 1,
+                softWrap = false
             )
         }
     }
@@ -4571,31 +4852,20 @@ internal fun TrackRow(
             )
 
         }
-        when {
-            displayedProgress != null -> {
-                Box(
-                    Modifier.size(48.dp).clickable(onClick = onCancelDownload),
-                    contentAlignment = Alignment.Center
-                ) {
-                    ThinDownloadProgress(
-                        progress = ((displayedProgress ?: 0) / 100f).coerceIn(0f, 1f),
-                        modifier = Modifier.width(30.dp)
-                    )
-                }
-            }
-            track.isDownloaded -> {
-                actions()
-            }
-            else -> {
-                IconButton(onClick = onPlayToggle) {
-                    Icon(
-                        if (isPlaying) VaultIcons.Pause else Icons.Default.PlayArrow,
-                        if (isPlaying) "Pausar" else "Reproducir",
-                        tint = VaultColors.TextPrimary
-                    )
-                }
+        if (displayedProgress != null) {
+            Box(
+                Modifier.width(38.dp).height(48.dp).clickable(onClick = onCancelDownload),
+                contentAlignment = Alignment.Center
+            ) {
+                ThinDownloadProgress(
+                    progress = ((displayedProgress ?: 0) / 100f).coerceIn(0f, 1f),
+                    modifier = Modifier.width(28.dp)
+                )
             }
         }
+        // Playback is owned by the whole row. The trailing affordance is always
+        // the overflow menu, regardless of whether the track is local or online.
+        actions()
     }
 }
 
@@ -4608,6 +4878,7 @@ internal fun TrackActionsMenu(
     favorite: Boolean = false
 ) {
     val currentFavorite = vm.isFavorite(track.id)
+    val currentProgress by vm.downloadProgressFor(track.id).collectAsStateWithLifecycle(initialValue = null)
     var showAlbums by remember { mutableStateOf(false) }
     var showCreateAlbum by remember { mutableStateOf(false) }
     var newAlbumName by remember { mutableStateOf("") }
@@ -4629,13 +4900,22 @@ internal fun TrackActionsMenu(
                     menu.add(0, 1, 0, "Agregar a cola de reproducción")
                     menu.add(0, 2, 1, if (currentFavorite) "Quitar de Me gusta" else "Me gusta")
                     menu.add(0, 3, 2, "Agregar a álbum")
-                    if (track.isDownloaded) menu.add(0, 4, 3, "Eliminar canción")
+                    when {
+                        track.isDownloaded && !track.audioUri.isNullOrBlank() ->
+                            menu.add(0, 4, 3, "Eliminar canción descargada")
+                        currentProgress != null ->
+                            menu.add(0, 6, 3, "Cancelar descarga")
+                        else ->
+                            menu.add(0, 5, 3, "Descargar")
+                    }
                     setOnMenuItemClickListener { item ->
                         when (item.itemId) {
                             1 -> vm.addToQueue(track)
                             2 -> vm.toggleFavorite(track)
                             3 -> showAlbums = true
                             4 -> confirmDelete = true
+                            5 -> vm.requestDownload(track)
+                            6 -> vm.cancelDownload(track.id)
                         }
                         true
                     }

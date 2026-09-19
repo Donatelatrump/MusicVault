@@ -99,13 +99,6 @@ class Mpv:
             self.handle = None
 
 
-PRESETS = {
-    "Plano": [0, 0, 0, 0, 0], "Bass Boost": [9.75, 8.25, 3, 0, 0],
-    "Volume Boost": [5.25, 3, 1.5, 1.5, 2.25], "Claridad de voz": [-4.5, -1.5, 6.75, 4.5, -1.5],
-    "Rock": [6.75, 3.75, -1.5, 4.5, 6], "Pop": [2.25, 4.5, 6, 3.75, 3],
-    "Jazz": [4.5, 3.75, 1.5, 3, 4.5], "Electrónica": [10.5, 5.25, -3, 1.5, 8.25],
-}
-
 
 class Player(QObject):
     changed = pyqtSignal()
@@ -115,6 +108,7 @@ class Player(QObject):
     error = pyqtSignal(str)
     need_track = pyqtSignal(object)
     seeked = pyqtSignal(float)
+    stream_cached = pyqtSignal(object, str)
 
     def __init__(self, db, parent=None, audio_output=None, deck_factory=Mpv):
         super().__init__(parent)
@@ -128,6 +122,11 @@ class Player(QObject):
         self.active = 0
         self.queue, self.index = [], -1
         self.playing, self.loaded = False, False
+        self.preparing = False
+        self.prepared_streams = {}
+        self.current_source = ""
+        self.current_record_path = ""
+        self.current_stream_seeked = False
         self.position = self.duration = 0
         self.volume = db.setting("volume", 75)
         self.shuffle = db.setting("shuffle", False)
@@ -144,7 +143,6 @@ class Player(QObject):
         self.timer.timeout.connect(self.tick)
         self.timer.start()
         self.set_volume(self.volume)
-        self.apply_equalizer(db.setting("equalizer", [0] * 5), db.setting("loudness", 0), db.setting("stereo", 1))
         saved = db.setting("queue", {})
         self.queue = [t for key in saved.get("ids", []) if (t := db.get_track(key))]
         self.index = min(saved.get("index", 0), len(self.queue) - 1)
@@ -175,21 +173,21 @@ class Player(QObject):
             self.index = 0
         self.play_index(self.index)
 
-    def play_index(self, index, crossfade=False):
-        if not 0 <= index < len(self.queue):
-            return
-        self.request_generation += 1
-        track = self.db.resolve_track(self.queue[index])
-        if not track.path or not Path(track.path).is_file():
-            self.stop()
-            self.index = index
-            self.persist_queue()
-            self.track_changed.emit(track)
-            if track.source != "local":
-                self.need_track.emit(track)
-            else:
-                self.error.emit(f"No se encuentra el archivo: {track.path}")
-            return
+    def prepared_stream(self, track):
+        row = self.prepared_streams.get(track.id)
+        if not row:
+            return ""
+        url, expires = row
+        if time.monotonic() >= expires:
+            self.prepared_streams.pop(track.id, None)
+            return ""
+        return url
+
+    def prepare_stream(self, track, url, ttl=600):
+        if url:
+            self.prepared_streams[track.id] = (url, time.monotonic() + ttl)
+
+    def _load_source(self, index, track, source, crossfade=False, record_path=""):
         self._save_progress()
         self._finish_fade()
         if crossfade and self.loaded:
@@ -203,13 +201,65 @@ class Player(QObject):
         self.deck.events()
         self.queue[index] = track
         self.index, self.position, self.duration = index, 0, track.duration
-        self.loaded, self.playing = False, True
+        self.loaded, self.playing, self.preparing = False, True, False
+        self.current_source = source
+        self.current_record_path = record_path
+        self.current_stream_seeked = False
         self.deck.set("pause", "no")
-        self.deck.command("loadfile", track.path, "replace")
+        if record_path and source.startswith(("http://", "https://")):
+            try:
+                self.deck.command("loadfile", source, "replace", "-1", f"stream-record={record_path}")
+            except RuntimeError:
+                self.current_record_path = ""
+                self.deck.command("loadfile", source, "replace")
+        else:
+            self.deck.command("loadfile", source, "replace")
         self.history_id = self.db.record_play(track)
         self.persist_queue()
         self.track_changed.emit(track)
         self.changed.emit()
+
+    def play_index(self, index, crossfade=False):
+        if not 0 <= index < len(self.queue):
+            return
+        self.request_generation += 1
+        track = self.db.resolve_track(self.queue[index])
+        if track.path and Path(track.path).is_file():
+            self._load_source(index, track, track.path, crossfade=crossfade)
+            return
+        prepared = self.prepared_stream(track) if track.source != "local" else ""
+        if prepared:
+            self._load_source(index, track, prepared, crossfade=crossfade)
+            return
+        self.stop()
+        self.index = index
+        self.queue[index] = track
+        self.preparing = track.source != "local"
+        self.persist_queue()
+        self.track_changed.emit(track)
+        self.changed.emit()
+        if track.source != "local":
+            self.need_track.emit(track)
+        else:
+            self.error.emit(f"No se encuentra el archivo: {track.path}")
+
+    def play_resolved(self, track, source, record_path="", expected_index=None, request=None):
+        if expected_index is not None and self.index != expected_index:
+            return False
+        if request is not None and self.request_generation != request:
+            return False
+        if not self.current or self.current.id != track.id:
+            return False
+        if source.startswith(("http://", "https://")):
+            self.prepare_stream(track, source)
+        self._load_source(self.index, track, source, record_path=record_path)
+        return True
+
+    def preparation_failed(self, track):
+        if self.current and self.current.id == track.id:
+            self.preparing = False
+            self.playing = False
+            self.changed.emit()
 
     def downloaded(self, track):
         for i, existing in enumerate(self.queue):
@@ -218,6 +268,8 @@ class Player(QObject):
         self.persist_queue()
 
     def toggle(self):
+        if self.preparing:
+            return
         if not self.loaded:
             if self.current:
                 self.play_index(self.index)
@@ -225,6 +277,8 @@ class Player(QObject):
         self.set_playing(not self.playing)
 
     def set_playing(self, value):
+        if self.preparing:
+            return
         if value and not self.loaded:
             if self.current:
                 self.play_index(self.index)
@@ -282,6 +336,8 @@ class Player(QObject):
 
     def seek(self, position):
         if self.loaded:
+            if self.current_source.startswith(("http://", "https://")):
+                self.current_stream_seeked = True
             self._finish_fade()
             self.position = max(0, min(float(position), self.duration))
             self.deck.command("seek", self.position, "absolute+exact")
@@ -349,25 +405,6 @@ class Player(QObject):
     def set_sleep(self, minutes):
         self.sleep_deadline = time.monotonic() + minutes * 60 if minutes > 0 else None
 
-    def apply_equalizer(self, bands, loudness=0, stereo=1):
-        bands = [max(-15, min(float(g), 15)) for g in bands]
-        if len(bands) != 5:
-            raise ValueError("El ecualizador requiere cinco bandas.")
-        loudness, stereo = max(0, min(float(loudness), 12)), max(0, min(float(stereo), 2))
-        filters = [f"equalizer=f={frequency}:t=o:w=1:g={gain}" for frequency, gain in zip((60, 230, 910, 3600, 14000), bands) if gain]
-        if stereo != 1:
-            filters.append(f"extrastereo=m={stereo}")
-        if loudness:
-            filters.append(f"volume={loudness}dB")
-        if filters:
-            filters.append("alimiter=limit=0.95:level=false")
-        expression = "lavfi=[" + ",".join(filters) + "]" if filters else ""
-        for deck in self.decks:
-            deck.set("af", expression)
-        self.db.set_setting("equalizer", bands)
-        self.db.set_setting("loudness", loudness)
-        self.db.set_setting("stereo", stereo)
-
     def _save_progress(self):
         if self.history_id and self.duration:
             self.db.completion(self.history_id, self.position / self.duration)
@@ -381,6 +418,7 @@ class Player(QObject):
     def stop(self):
         self.request_generation += 1
         self._save_progress()
+        self.preparing = False
         self._finish_fade()
         self.deck.command("stop")
         self.loaded = self.playing = False
@@ -408,6 +446,10 @@ class Player(QObject):
             elif event == 7 and reason == 0:
                 self.position = self.duration
                 self._save_progress()
+                if (self.current and self.current_source.startswith(("http://", "https://"))
+                        and self.current_record_path and not self.current_stream_seeked):
+                    self.stream_cached.emit(self.current, self.current_record_path)
+                self.current_record_path = ""
                 successor = self.next_index(automatic=True)
                 if successor is None:
                     successor = self.related_successor()
@@ -443,7 +485,7 @@ class Player(QObject):
             successor = self.next_index(automatic=True)
             if successor is not None and successor != self.index and 0 < self.duration - self.position <= self.crossfade:
                 track = self.db.get_track(self.queue[successor].id) or self.queue[successor]
-                if track.path and Path(track.path).is_file():
+                if (track.path and Path(track.path).is_file()) or self.prepared_stream(track):
                     self.play_index(successor, crossfade=True)
 
     def close(self):

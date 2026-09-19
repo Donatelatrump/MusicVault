@@ -16,7 +16,7 @@ def until(predicate, timeout=5000):
     assert predicate(), "Timed out waiting for playback state"
 
 
-def test_real_decode_pause_seek_equalizer_and_eof(app, db, audio_file):
+def test_real_decode_pause_seek_and_eof(app, db, audio_file):
     player = Player(db, audio_output="null")
     errors = []
     player.error.connect(errors.append)
@@ -29,7 +29,6 @@ def test_real_decode_pause_seek_equalizer_and_eof(app, db, audio_file):
         paused = player.position
         QTest.qWait(200)
         assert abs(player.position - paused) < 0.1
-        player.apply_equalizer([3, -2, 4, 0, 1], 2, 1.1)
         player.seek(1.5)
         player.set_playing(True)
         until(lambda: player.index == 1 and player.loaded)

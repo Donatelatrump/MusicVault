@@ -9,7 +9,7 @@ import tarfile
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.8.0"
+VERSION = "0.9.4"
 
 
 def copy_app(destination):
@@ -64,7 +64,7 @@ Installed-Size: {size}
 Depends: python3 (>= 3.10), python3-pyqt6, python3-pyqt6.qtwebengine, python3-mutagen, python3-dbus, python3-gi, libmpv2, ffmpeg, yt-dlp
 Recommends: nodejs (>= 22) | deno (>= 2.3)
 Description: Native desktop music library for Linux
- Local playback, editable queues, playlists, lyrics, downloads and MPRIS controls.
+ Local and streaming playback, editable queues, YouTube playlists, downloads and MPRIS controls.
 """)
         deb = args.output / f"musicvault_{VERSION}_amd64.deb"
         subprocess.run(["dpkg-deb", "--root-owner-group", "--build", str(package), str(deb)], check=True)

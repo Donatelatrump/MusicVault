@@ -1,26 +1,32 @@
 package com.musicvault.app.catalog
 
+import com.musicvault.app.providers.Providers
+import com.musicvault.app.providers.NewPipeStreamResolver
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.max
 
 /**
- * YouTube metadata provider backed by yt-dlp.
- *
- * This provider only extracts search metadata. Downloads stay routed through
- * the existing Providers integration.
+ * YouTube metadata provider. NewPipeExtractor is the fast primary search path;
+ * yt-dlp is kept only as a compatibility fallback. Downloads stay routed
+ * through the existing Providers integration.
  */
 class YouTubeMetadataProvider : CatalogProvider {
     companion object {
         const val PROVIDER_ID = "youtube"
         const val SOURCE_NAME = "YouTube"
         private const val MAX_PAGE_LIMIT = 25
+        private const val SEARCH_ATTEMPTS = 2
+        private const val RETRY_DELAY_MS = 220L
     }
 
     private val queryCache = ConcurrentHashMap<String, List<CatalogTrack>>()
@@ -31,29 +37,161 @@ class YouTubeMetadataProvider : CatalogProvider {
         if (normalized.isBlank()) return emptyList()
         queryCache[cacheKey(normalized, limit)]?.let { return it }
 
-        val results = try {
-            withContext(Dispatchers.IO) {
-                val request = YoutubeDLRequest("ytsearch${limit.coerceIn(1, MAX_PAGE_LIMIT)}:$query")
-                request.addOption("--flat-playlist")
-                request.addOption("--skip-download")
-                request.addOption("--dump-single-json")
-                request.addOption("--no-warnings")
-                request.addOption("--no-progress")
-
-                val response = YoutubeDL.getInstance().execute(request, null, true)
-                parseSearchResponse(response.out, query, limit)
+        // Primary search path: NewPipeExtractor. On the test device this returns
+        // YouTube candidates in ~1.2-1.4 s, while starting yt-dlp can take 15-20 s.
+        // This also makes ASMR/podcast searches independent from Deezer quality.
+        val newPipeResults = try {
+            NewPipeStreamResolver.searchYoutube(query, limit.coerceIn(1, MAX_PAGE_LIMIT)).map { item ->
+                CatalogTrack(
+                    id = item.id,
+                    title = item.title,
+                    artistId = item.uploader,
+                    artistName = item.uploader,
+                    albumId = null,
+                    albumTitle = null,
+                    durationMs = item.durationMs,
+                    coverUri = item.thumbnailUrl ?: "https://i.ytimg.com/vi/${item.id}/hqdefault.jpg",
+                    provider = PROVIDER_ID,
+                    description = null,
+                    url = item.url,
+                    source = SOURCE_NAME,
+                    sourceId = item.id,
+                    contentType = classifyContentType(
+                        queryFallback = query,
+                        title = item.title,
+                        uploader = item.uploader,
+                        description = null,
+                        categories = null,
+                        tags = null
+                    )
+                )
             }
         } catch (e: CancellationException) {
             throw e
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            currentCoroutineContext().ensureActive()
+            android.util.Log.w("MusicVaultYouTubeSearch", "NewPipe search failed for '$query'; falling back to yt-dlp", error)
             emptyList()
         }
 
-        queryCache[cacheKey(normalized, limit)] = results
-        results.forEach { item ->
-            infoCache[item.sourceId ?: item.id] = item
+        if (newPipeResults.isNotEmpty()) {
+            queryCache[cacheKey(normalized, limit)] = newPipeResults
+            newPipeResults.forEach { item -> infoCache[item.sourceId ?: item.id] = item }
+            return newPipeResults
+        }
+
+        // Compatibility fallback only. Never turn an uninitialized yt-dlp runtime
+        // into an authoritative empty YouTube search.
+        if (!Providers.ensureYoutubeReady()) return emptyList()
+
+        var results: List<CatalogTrack> = emptyList()
+        for (attempt in 0 until SEARCH_ATTEMPTS) {
+            results = try {
+                withContext(Dispatchers.IO) {
+                    searchFlatLines(query, limit)
+                        .ifEmpty { searchJsonFallback(query, limit) }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (error: Exception) {
+                currentCoroutineContext().ensureActive()
+                android.util.Log.w("MusicVaultYouTubeSearch", "yt-dlp search attempt ${attempt + 1} failed for '$query'", error)
+                emptyList()
+            }
+
+            if (results.isNotEmpty()) break
+            if (attempt + 1 < SEARCH_ATTEMPTS) delay(RETRY_DELAY_MS)
+        }
+
+        // Never memoize a transient failure as an authoritative empty search.
+        if (results.isNotEmpty()) {
+            queryCache[cacheKey(normalized, limit)] = results
+            results.forEach { item -> infoCache[item.sourceId ?: item.id] = item }
         }
         return results
+    }
+
+    private fun searchFlatLines(query: String, limit: Int): List<CatalogTrack> {
+        val safeLimit = limit.coerceIn(1, MAX_PAGE_LIMIT)
+        val request = YoutubeDLRequest("ytsearch${safeLimit}:$query").apply {
+            addOption("--flat-playlist")
+            addOption("--skip-download")
+            addOption("--ignore-errors")
+            addOption("--no-warnings")
+            addOption("--no-progress")
+            addOption("--extractor-retries", "2")
+            addOption("--retries", "2")
+            addOption("--socket-timeout", "8")
+            addOption(
+                "--print",
+                "%(id)s\t%(title)s\t%(uploader)s\t%(channel)s\t%(duration)s\t%(thumbnail)s\t%(webpage_url)s"
+            )
+        }
+        val response = YoutubeDL.getInstance().execute(request, null, false)
+        return parseFlatSearchLines(response.out, query, safeLimit)
+    }
+
+    private fun parseFlatSearchLines(raw: String, query: String, limit: Int): List<CatalogTrack> {
+        return raw.lineSequence().mapNotNull { rawLine ->
+            val fields = rawLine.trim().split('\t', limit = 7)
+            if (fields.size < 2) return@mapNotNull null
+            val id = cleanField(fields.getOrNull(0)) ?: return@mapNotNull null
+            val title = cleanField(fields.getOrNull(1)) ?: return@mapNotNull null
+            val uploader = cleanField(fields.getOrNull(2))
+                ?: cleanField(fields.getOrNull(3))
+                ?: "YouTube"
+            val durationMs = cleanField(fields.getOrNull(4))
+                ?.toDoubleOrNull()?.times(1_000.0)?.toLong()?.coerceAtLeast(0L) ?: 0L
+            val thumbnail = cleanField(fields.getOrNull(5))
+                ?: "https://i.ytimg.com/vi/$id/hqdefault.jpg"
+            val webpageUrl = cleanField(fields.getOrNull(6))
+                ?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
+                ?: "https://www.youtube.com/watch?v=$id"
+
+            CatalogTrack(
+                id = id,
+                title = title,
+                artistId = uploader,
+                artistName = uploader,
+                albumId = null,
+                albumTitle = null,
+                durationMs = durationMs,
+                coverUri = thumbnail,
+                provider = PROVIDER_ID,
+                description = null,
+                url = webpageUrl,
+                source = SOURCE_NAME,
+                sourceId = id,
+                contentType = classifyContentType(
+                    queryFallback = query,
+                    title = title,
+                    uploader = uploader,
+                    description = null,
+                    categories = null,
+                    tags = null
+                )
+            )
+        }.distinctBy { it.id }.take(limit).toList()
+    }
+
+    private fun cleanField(value: String?): String? = value
+        ?.trim()
+        ?.takeIf { it.isNotBlank() && !it.equals("NA", true) && !it.equals("null", true) && it != "None" }
+
+    private fun searchJsonFallback(query: String, limit: Int): List<CatalogTrack> {
+        val request = YoutubeDLRequest("ytsearch${limit.coerceIn(1, MAX_PAGE_LIMIT)}:$query").apply {
+            addOption("--flat-playlist")
+            addOption("--skip-download")
+            addOption("--dump-single-json")
+            addOption("--no-warnings")
+            addOption("--no-progress")
+            addOption("--ignore-errors")
+            addOption("--extractor-retries", "2")
+            addOption("--retries", "2")
+            addOption("--socket-timeout", "8")
+        }
+        val response = YoutubeDL.getInstance().execute(request, null, false)
+        return parseSearchResponse(response.out, query, limit)
     }
 
     override suspend fun searchArtists(query: String, limit: Int): List<CatalogArtist> = emptyList()

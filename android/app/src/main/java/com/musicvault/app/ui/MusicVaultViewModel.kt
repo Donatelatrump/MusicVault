@@ -13,6 +13,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.musicvault.app.catalog.CatalogAlbum
+import com.musicvault.app.catalog.CatalogPlaylist
 import com.musicvault.app.catalog.CatalogRepository
 import com.musicvault.app.catalog.CatalogTrack
 import com.musicvault.app.catalog.CoverImageCache
@@ -27,8 +28,10 @@ import com.musicvault.app.permissions.StoragePermissions
 import com.musicvault.app.player.AudioEffects
 import com.musicvault.app.player.EqualizerPreset
 import com.musicvault.app.player.PlayerController
+import com.musicvault.app.player.StreamingCache
 import com.musicvault.app.providers.ProviderResult
 import com.musicvault.app.providers.Providers
+import com.musicvault.app.providers.NewPipeStreamResolver
 import com.musicvault.app.download.DownloadForegroundService
 import com.musicvault.app.spotify.SpotifyLink
 import com.musicvault.app.spotify.SpotifyLinkKind
@@ -50,6 +53,10 @@ import com.musicvault.app.player.AudioSessionBridge
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.flow.first
 import kotlin.coroutines.resume
 import java.text.Normalizer
@@ -135,6 +142,12 @@ class MusicVaultViewModel(
     private val _section = MutableStateFlow(AppSection.HOME)
     private val _search = MutableStateFlow("")
     private val _selectedTrack = MutableStateFlow<Track?>(null)
+    // Track shown immediately in the mini-player while its remote URL is being
+    // resolved/buffered. The spinner is cleared only when that exact track
+    // actually starts producing audio.
+    private val _preparingTrackId = MutableStateFlow<String?>(null)
+    val preparingTrackId: StateFlow<String?> = _preparingTrackId.asStateFlow()
+    private var streamSelectionGeneration = 0L
     private val _selectedPlaylist = MutableStateFlow<Playlist?>(null)
     private val _selectedPlaylistTracks = MutableStateFlow<List<Track>>(emptyList())
     private val _selectedRemoteAlbum = MutableStateFlow<CatalogAlbum?>(null)
@@ -194,6 +207,11 @@ class MusicVaultViewModel(
     private val downloadLock = Any()
     private val downloadJobs = mutableMapOf<String, Job>()
     private val downloadWaiters = mutableMapOf<String, MutableList<suspend (ProviderResult?) -> Unit>>()
+    // Bulk playlist downloads deliberately suppress per-attempt provider errors.
+    // A large import can transiently fail on an individual YouTube request and
+    // immediately recover on retry; surfacing every intermediate failure makes
+    // the UI look broken even when the batch ultimately succeeds.
+    private val quietDownloadIds = mutableSetOf<String>()
     private var errorAutoClearJob: Job? = null
 
     private val downloadReceiver = object : BroadcastReceiver() {
@@ -223,6 +241,15 @@ class MusicVaultViewModel(
     private var storagePermissionDeniedCount = 0
     private var storagePermissionPrompted = false
     private var searchJob: Job? = null
+    private var searchStreamWarmJob: Job? = null
+    private var homeStreamWarmJob: Job? = null
+    private var searchStreamWarmSignature: List<String> = emptyList()
+    // Speculative extraction is deliberately single-flight. NewPipe is much
+    // lighter than yt-dlp, but two simultaneous YouTube extractors still compete
+    // for CPU/network on slower phones and links.
+    private val searchStreamWarmSlots = Semaphore(1)
+    @Volatile
+    private var activeSpeculativeWarmTrackId: String? = null
     // Monotonic generation prevents a slow/cancel-resistant provider request from
     // publishing stale results after the user has typed a newer query.
     private var searchGeneration: Long = 0L
@@ -234,7 +261,23 @@ class MusicVaultViewModel(
          * refreshed. Short enough that the user never feels a stall.
          */
         const val SEARCH_FAST_TIMEOUT_MS = 4_500L
+        // Track search may legitimately fall through from Deezer to yt-dlp.
+        // Keep album/UI search fast, but do not abort the YouTube fallback while
+        // it is still starting.
+        const val SEARCH_TRACK_FAST_TIMEOUT_MS = 15_000L
         const val SEARCH_REFINE_TIMEOUT_MS = 2_500L
+        const val SEARCH_TRACK_REFINE_TIMEOUT_MS = 16_000L
+        // Give the user/UI a short settling window before speculative network
+        // work starts. This avoids resolving rows that flash past during a fast
+        // search refinement or fling, while still hiding NewPipe latency during
+        // the few seconds users normally spend reading titles/covers.
+        const val STREAM_SCREEN_IDLE_WARMUP_MS = 650L
+        const val STREAM_SCROLL_IDLE_WARMUP_MS = 420L
+        const val STREAM_WARM_WINDOW_SIZE = 4
+        const val STREAM_WARM_FULL_RESOLVE_COUNT = 3
+        const val BULK_DOWNLOAD_CONCURRENCY = 2
+        const val BULK_DOWNLOAD_MAX_ATTEMPTS = 3
+        const val BULK_DOWNLOAD_RETRY_BASE_DELAY_MS = 1_200L
     }
 
     fun detectarEstadoInicial() {
@@ -300,6 +343,15 @@ class MusicVaultViewModel(
     }
     private var playlistJob: Job? = null
     private var activePlaylistId: String? = null
+    // Playlist streaming is deliberately windowed. Only the current item plus
+    // two successors are resolved/prebuffered, preventing a 300-song playlist
+    // from becoming 300 yt-dlp requests while still keeping Next/crossfade hot.
+    private var activePlaylistOrder: List<Track> = emptyList()
+    private var activePlaylistAppendIndex: Int = -1
+    private val playlistLookAheadMutex = Mutex()
+    private var playlistLookAheadJob: Job? = null
+    private var lastStreamRetryId: String? = null
+    private var lastStreamRetryAt: Long = 0L
     // True only when the user explicitly created/selected a playback queue.
     // A normal single-track play also creates a Media3 item, but that must not
     // force Next to stay on a one-item queue.
@@ -744,7 +796,7 @@ class MusicVaultViewModel(
         albumId = ct.albumId?.let { "${ct.provider}:release:$it" } ?: "unknown",
         albumTitle = ct.albumTitle ?: "Álbum desconocido", durationMs = ct.durationMs,
         audioUri = null, isDownloaded = false, coverUri = ct.coverUri,
-        source = ct.source, sourceId = ct.sourceId
+        source = ct.source, sourceId = ct.sourceId ?: ct.id, url = ct.url
     )
 
     // Recommendations are isolated from fast-changing player/download UI state.
@@ -950,7 +1002,11 @@ class MusicVaultViewModel(
         // what keeps the crossfade (and playback itself) alive across tracks.
         // Explicit queues (playlists) manage their own items and are skipped.
         player.onNextItemNeeded = { finishedTrackId ->
-            if (!explicitQueueMode) {
+            if (explicitQueueMode && activePlaylistId != null) {
+                // Managed playlist: replenish the small streaming look-ahead
+                // window instead of resolving/downloading the whole playlist.
+                schedulePlaylistLookAhead(finishedTrackId)
+            } else if (!explicitQueueMode) {
                 val generation = queueGeneration
                 viewModelScope.launch {
                     val current = finishedTrackId
@@ -960,10 +1016,73 @@ class MusicVaultViewModel(
                 }
             }
         }
+        player.onPlaybackError = errorHandler@{ trackId ->
+            val id = trackId ?: return@errorHandler
+            val now = android.os.SystemClock.elapsedRealtime()
+            // One forced re-resolution per 30 s per track prevents retry loops
+            // while transparently recovering an expired CDN signature/403.
+            if (lastStreamRetryId == id && now - lastStreamRetryAt < 30_000L) return@errorHandler
+            val logical = activePlaylistOrder.firstOrNull { it.id == id }
+                ?: queue.value.firstOrNull { it.id == id }
+                ?: _selectedTrack.value?.takeIf { it.id == id }
+            if (logical == null || logical.isDownloaded) return@errorHandler
+            lastStreamRetryId = id
+            lastStreamRetryAt = now
+            Providers.invalidateStream(id)
+            viewModelScope.launch(Dispatchers.IO) {
+                val refreshed = resolveForStreaming(
+                    logical.copy(audioUri = null, isDownloaded = false),
+                    forceRefresh = true
+                )
+                if (refreshed == null) {
+                    withContext(Dispatchers.Main.immediate) {
+                        if (_preparingTrackId.value == id) _preparingTrackId.value = null
+                        showError("No se pudo reanudar ${logical.title} por streaming.")
+                    }
+                    return@launch
+                }
+                withContext(Dispatchers.Main.immediate) {
+                    player.retryCurrent(refreshed)
+                    _selectedTrack.value = refreshed
+                }
+            }
+        }
         // Keep the home-screen widget in sync with playback state/track changes.
         player.onPlaybackUiChanged = {
             com.musicvault.app.widget.MusicWidgetProvider.push(appContext)
         }
+        // Keep the first Home recommendations hot as well, but only one
+        // speculative resolver may run at a time. A user tap cancels this job
+        // so the selected track gets CPU/network priority immediately.
+        viewModelScope.launch(Dispatchers.IO) {
+            combine(recommendations, _section) { pair, section ->
+                if (section == AppSection.HOME) {
+                    pair.first.filterNot { it.isDownloaded && !it.audioUri.isNullOrBlank() }.take(3)
+                } else {
+                    emptyList()
+                }
+            }
+                .distinctUntilChangedBy { list -> list.map { it.id } }
+                .collectLatest { visible ->
+                    homeStreamWarmJob?.cancel()
+                    homeStreamWarmJob = null
+                    if (visible.isNotEmpty()) {
+                        homeStreamWarmJob = viewModelScope.launch(Dispatchers.IO) {
+                            // Home cards are usually read for a moment before a
+                            // tap. Spend that otherwise idle time resolving all
+                            // three likely choices sequentially.
+                            delay(STREAM_SCREEN_IDLE_WARMUP_MS)
+                            warmStreamingCandidates(
+                                visible,
+                                fullResolveCount = STREAM_WARM_FULL_RESOLVE_COUNT
+                            ) {
+                                _section.value == AppSection.HOME && _preparingTrackId.value == null
+                            }
+                        }
+                    }
+                }
+        }
+
         // Home discovery: fetch catalog tracks from both the existing library
         // and the tastes chosen during onboarding. The small delay keeps this
         // network work away from the first frame.
@@ -1039,6 +1158,32 @@ class MusicVaultViewModel(
             }
             launch {
                 player.ended.filter { it > 0L }.collect { nextTrack() }
+            }
+            launch {
+                combine(player.progress, player.isPlaying) { progress, playing -> progress.trackId to playing }
+                    .collect { (trackId, playing) ->
+                        if (playing && trackId != null && trackId == _preparingTrackId.value) {
+                            _preparingTrackId.value = null
+                        }
+                    }
+            }
+            launch {
+                player.progress
+                    .map { it.trackId }
+                    .filterNotNull()
+                    .distinctUntilChanged()
+                    .collect { trackId ->
+                        // Keep selectedTrack/UI synchronized immediately on an
+                        // automatic streaming transition, and refill the two-item
+                        // playlist look-ahead while the new track is playing.
+                        activePlaylistOrder.firstOrNull { it.id == trackId }?.let { logical ->
+                            val queued = queue.value.firstOrNull { it.id == trackId } ?: logical
+                            if (_selectedTrack.value?.id != trackId) _selectedTrack.value = queued
+                        }
+                        if (explicitQueueMode && activePlaylistId != null) {
+                            schedulePlaylistLookAhead(trackId)
+                        }
+                    }
             }
             player.progress
                 .filter { it.trackId != null && it.durationMs > 0L }
@@ -1275,7 +1420,7 @@ class MusicVaultViewModel(
                 // Songs and albums no longer wait on one another. Deezer's first
                 // useful result for either category is published immediately.
                 val tracksFastJob = launch {
-                    fastTracks = withTimeoutOrNull(SEARCH_FAST_TIMEOUT_MS) {
+                    fastTracks = withTimeoutOrNull(SEARCH_TRACK_FAST_TIMEOUT_MS) {
                         catalog.searchTracksFast(query, 40)
                     }.orEmpty()
                     if (fastTracks.isNotEmpty()) {
@@ -1293,15 +1438,16 @@ class MusicVaultViewModel(
                 tracksFastJob.join()
                 albumsFastJob.join()
 
-                // Normal music searches are already complete after the fast
-                // Deezer path. Only pay for the slower multi-provider merge when
-                // a category came back empty or suspiciously small.
-                val refineTracksJob = if (fastTracks.size < 5) launch {
-                    val refined = withTimeoutOrNull(SEARCH_REFINE_TIMEOUT_MS) {
+                // Always run a non-blocking merged refinement. Deezer still
+                // paints the first page immediately, but NewPipe can add/replace
+                // weak Deezer matches ~1-2 s later (critical for ASMR, mixes,
+                // talks and niche YouTube-only content).
+                val refineTracksJob = launch {
+                    val refined = withTimeoutOrNull(SEARCH_TRACK_REFINE_TIMEOUT_MS) {
                         catalog.searchTracksMerged(query, 40)
                     }.orEmpty()
                     if (refined.isNotEmpty()) publishRemoteTracks(generation, refined)
-                } else null
+                }
 
                 val refineAlbumsJob = if (fastAlbums.isEmpty()) launch {
                     val refined = withTimeoutOrNull(SEARCH_REFINE_TIMEOUT_MS) {
@@ -1327,10 +1473,224 @@ class MusicVaultViewModel(
         }
     }
 
+    suspend fun searchYouTubePlaylists(query: String, limit: Int = 20): List<CatalogPlaylist> =
+        withContext(Dispatchers.IO) {
+            NewPipeStreamResolver.searchYoutubePlaylists(query, limit).map { item ->
+                CatalogPlaylist(
+                    id = item.id,
+                    title = item.title,
+                    uploaderName = item.uploader,
+                    trackCount = item.streamCount,
+                    coverUri = item.thumbnailUrl,
+                    url = item.url
+                )
+            }
+        }
+
+    suspend fun loadYouTubePlaylistTracks(playlist: CatalogPlaylist, maxItems: Int = 500): List<CatalogTrack> =
+        withContext(Dispatchers.IO) {
+            val content = NewPipeStreamResolver.loadYoutubePlaylist(playlist.url, maxItems) ?: return@withContext emptyList()
+            content.tracks.map { item ->
+                CatalogTrack(
+                    id = item.id,
+                    title = item.title,
+                    artistId = "youtube:${item.uploader}",
+                    artistName = item.uploader,
+                    albumId = "youtube:playlist:${playlist.id}",
+                    albumTitle = playlist.title,
+                    durationMs = item.durationMs,
+                    coverUri = item.thumbnailUrl ?: playlist.coverUri,
+                    provider = "youtube",
+                    description = null,
+                    url = item.url,
+                    source = "YouTube",
+                    sourceId = item.id,
+                    contentType = com.musicvault.app.catalog.CatalogContentType.MUSIC
+                )
+            }
+        }
+
+    fun importYouTubePlaylist(playlist: CatalogPlaylist, tracks: List<CatalogTrack>) {
+        if (tracks.isEmpty()) {
+            showError("La playlist no tiene canciones disponibles para importar.")
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                val stored = tracks.map { remote ->
+                    Track(
+                        id = "${remote.provider}:recording:${remote.id}",
+                        title = remote.title,
+                        artistName = remote.artistName,
+                        albumId = remote.albumId ?: "youtube:playlist:${playlist.id}",
+                        albumTitle = remote.albumTitle ?: playlist.title,
+                        durationMs = remote.durationMs,
+                        audioUri = null,
+                        isDownloaded = false,
+                        coverUri = remote.coverUri ?: playlist.coverUri,
+                        source = "YouTube",
+                        sourceId = remote.sourceId ?: remote.id,
+                        url = remote.url
+                    )
+                }
+                repository.replaceImportedPlaylist(
+                    id = "playlist:youtube:${playlist.id}",
+                    title = playlist.title,
+                    description = "Importada desde YouTube · ${playlist.uploaderName}",
+                    coverUri = playlist.coverUri ?: stored.firstOrNull()?.coverUri,
+                    tracks = stored
+                )
+                showProvider("${playlist.title} se agregó a MusicVault con ${stored.size} canciones.")
+            }.onFailure { failure ->
+                showError(failure.message ?: "No se pudo importar la playlist de YouTube.")
+            }
+        }
+    }
+
     private fun publishRemoteTracks(generation: Long, tracks: List<CatalogTrack>) {
         if (generation != searchGeneration) return
         CoverImageCache.prefetch(appContext, tracks.map { it.coverUri })
         if (generation == searchGeneration) _remoteTracks.value = tracks
+
+        // Do not start extraction the instant a fast/refined result list lands.
+        // Search can replace its first Deezer page with a merged NewPipe page a
+        // moment later; waiting for the screen to settle avoids throwing away a
+        // 2-4 s stream extraction. Once stable, fully resolve the first three
+        // likely taps and only match the fourth. Work stays strictly sequential.
+        scheduleSearchWarmWindow(
+            generation = generation,
+            warmCandidates = tracks.take(STREAM_WARM_WINDOW_SIZE).map(::catalogTrackForStreaming),
+            delayMs = STREAM_SCREEN_IDLE_WARMUP_MS
+        )
+    }
+
+    /**
+     * RecyclerView calls this when Search stops scrolling. The warm window follows
+     * what the user is actually reading instead of continuing to prepare rows that
+     * have already disappeared off-screen. A small look-ahead covers the next tap.
+     */
+    fun prewarmVisibleSearchWindow(firstVisible: Int, lastVisible: Int) {
+        if (_section.value != AppSection.SEARCH || firstVisible < 0) return
+        val tracks = _remoteTracks.value
+        if (tracks.isEmpty()) return
+        val start = firstVisible.coerceIn(0, tracks.lastIndex)
+        val visibleEnd = lastVisible.coerceAtLeast(start).coerceAtMost(tracks.lastIndex)
+        val endExclusive = (visibleEnd + 3).coerceAtMost(tracks.size)
+        val candidates = tracks.subList(start, endExclusive)
+            .take(STREAM_WARM_WINDOW_SIZE)
+            .map(::catalogTrackForStreaming)
+        scheduleSearchWarmWindow(
+            generation = searchGeneration,
+            warmCandidates = candidates,
+            delayMs = STREAM_SCROLL_IDLE_WARMUP_MS
+        )
+    }
+
+    private fun scheduleSearchWarmWindow(
+        generation: Long,
+        warmCandidates: List<Track>,
+        delayMs: Long
+    ) {
+        if (warmCandidates.isEmpty() || _preparingTrackId.value != null) return
+        val warmSignature = warmCandidates.map { it.id }
+        if (warmSignature == searchStreamWarmSignature && searchStreamWarmJob?.isActive == true) return
+        searchStreamWarmSignature = warmSignature
+        searchStreamWarmJob?.cancel()
+        searchStreamWarmJob = viewModelScope.launch(Dispatchers.IO) {
+            delay(delayMs)
+            if (generation != searchGeneration || _section.value != AppSection.SEARCH) return@launch
+            android.util.Log.d(
+                "MusicVaultStreamPerf",
+                "screen-warm-search start=${warmCandidates.firstOrNull()?.id} count=${warmCandidates.size}"
+            )
+            warmStreamingCandidates(
+                candidates = warmCandidates,
+                fullResolveCount = STREAM_WARM_FULL_RESOLVE_COUNT
+            ) {
+                generation == searchGeneration &&
+                    _section.value == AppSection.SEARCH &&
+                    _preparingTrackId.value == null
+            }
+        }
+    }
+
+    /**
+     * Warm a tiny screen-local window without turning Search/Home into bulk
+     * extraction. The first [fullResolveCount] rows receive complete signed stream
+     * URLs; the remaining row only caches the stable YouTube match. NewPipe work is
+     * single-flight so slow phones/connections never run extractors in parallel.
+     */
+    private suspend fun warmStreamingCandidates(
+        candidates: List<Track>,
+        fullResolveCount: Int = STREAM_WARM_FULL_RESOLVE_COUNT,
+        stillRelevant: () -> Boolean = { true }
+    ) {
+        val window = candidates.take(STREAM_WARM_WINDOW_SIZE)
+        if (window.isEmpty() || !stillRelevant()) return
+
+        suspend fun warmTrack(track: Track, full: Boolean, index: Int) {
+            if (!stillRelevant()) return
+            searchStreamWarmSlots.withPermit {
+                if (!stillRelevant()) return@withPermit
+                activeSpeculativeWarmTrackId = track.id
+                try {
+                    val started = android.os.SystemClock.elapsedRealtime()
+                    if (full) {
+                        val resolved = Providers.resolveStream(
+                            name = track.title,
+                            author = track.artistName,
+                            sourceUrl = sourceUrlFor(track),
+                            cacheKey = track.id
+                        )
+                        if (resolved != null) {
+                            android.util.Log.d(
+                                "MusicVaultStreamPerf",
+                                "screen-warm-ready ${android.os.SystemClock.elapsedRealtime() - started}ms index=$index key=${track.id}"
+                            )
+                        }
+                    } else {
+                        val matched = Providers.prewarmYoutubeMatch(
+                            name = track.title,
+                            author = track.artistName,
+                            sourceUrl = sourceUrlFor(track),
+                            cacheKey = track.id
+                        )
+                        if (matched) {
+                            android.util.Log.d(
+                                "MusicVaultStreamPerf",
+                                "screen-warm-match ${android.os.SystemClock.elapsedRealtime() - started}ms index=$index key=${track.id}"
+                            )
+                        }
+                    }
+                } finally {
+                    if (activeSpeculativeWarmTrackId == track.id) {
+                        activeSpeculativeWarmTrackId = null
+                    }
+                }
+            }
+        }
+
+        // Phase 1: make the most likely tap genuinely hot as soon as possible.
+        warmTrack(window.first(), full = true, index = 0)
+        if (!stillRelevant()) return
+
+        // Phase 2: cheaply learn the YouTube IDs for the rest of the visible
+        // window. This removes the ~1-1.5 s Deezer->YouTube match cost even if
+        // the user taps row 2/3 before their complete URL warmup is reached.
+        window.drop(1).forEachIndexed { offset, track ->
+            warmTrack(track, full = false, index = offset + 1)
+            if (!stillRelevant()) return
+        }
+
+        // Phase 3: spend the remaining viewing time completing rows 2 and 3.
+        // Their cached matches mean this stage normally pays only NewPipe's
+        // direct audio extraction (~2-3 s in the user's measured device).
+        window.drop(1)
+            .take((fullResolveCount - 1).coerceAtLeast(0))
+            .forEachIndexed { offset, track ->
+                warmTrack(track, full = true, index = offset + 1)
+                if (!stillRelevant()) return
+            }
     }
 
     private fun publishRemoteAlbums(generation: Long, albums: List<CatalogAlbum>) {
@@ -1340,28 +1700,106 @@ class MusicVaultViewModel(
     }
 
     fun selectTrack(track: Track) {
-        activePlaylistId = null
+        // User intent wins over unrelated speculative work. If this exact track
+        // is already warming, keep that extraction alive so the tap joins the
+        // per-track resolver lock/cache instead of throwing away several seconds
+        // of NewPipe work and starting again.
+        if (activeSpeculativeWarmTrackId != track.id) {
+            searchStreamWarmJob?.cancel()
+            searchStreamWarmJob = null
+            homeStreamWarmJob?.cancel()
+            homeStreamWarmJob = null
+        }
+        StreamingCache.markPlaybackRequested(track.id)
+        clearActivePlaylistPlayback()
         explicitQueueMode = false
+        val generation = ++streamSelectionGeneration
+
         if (track.audioUri != null && track.isDownloaded) {
-            _selectedTrack.value = track
-            player.play(track)
-            viewModelScope.launch {
-                repository.recordPlay(track, 0f)
-                // No smart-next here: the player fires onNextItemNeeded when the
-                // item has no successor, which handles every entry point
-                // uniformly and keeps the queue (and crossfade) alive.
+            _preparingTrackId.value = null
+            playReadyTrack(track)
+            return
+        }
+
+        // Remote taps update the UI immediately: the mini-player switches to
+        // the requested song at once and shows a loader in its play button while
+        // NewPipe/yt-dlp fallback + Media3 prepare playback. Pause the previous audio so the new
+        // title can never be displayed while an older song keeps sounding.
+        player.pause()
+        _selectedTrack.value = track
+        _preparingTrackId.value = track.id
+
+        viewModelScope.launch {
+            val streamed = resolveForStreaming(track)
+            // A slow previous tap must never steal playback after the user has
+            // already selected a different song.
+            if (generation != streamSelectionGeneration || _selectedTrack.value?.id != track.id) return@launch
+            if (streamed == null) {
+                _preparingTrackId.value = null
+                showError("No se pudo preparar ${track.title} para streaming.")
+                return@launch
             }
-        } else {
-            // A remote/non-downloaded track is a download action, not a playback action.
-            // Do not select it in the player and do not autoplay when the download finishes.
-            requestDownloadInternal(track.id, track.title, track.artistName) { result ->
-                if (result is ProviderResult.Success) {
-                    val updated = track.copy(audioUri = result.audioUri, isDownloaded = true)
-                    database.trackDao().upsertAll(listOf(TrackEntity(updated.id, updated.title, updated.artistName, updated.albumId, updated.albumTitle, updated.durationMs, updated.audioUri, true, updated.coverUri)))
-                }
-            }
+            playReadyTrack(streamed)
         }
     }
+
+    private suspend fun resolveForStreaming(
+        track: Track,
+        prebuffer: Boolean = false,
+        forceRefresh: Boolean = false
+    ): Track? {
+        if (track.isDownloaded && !track.audioUri.isNullOrBlank()) return track
+
+        // Fully cached streams reopen immediately and do not invoke yt-dlp or
+        // the network. CacheDataSource serves this synthetic URI entirely from
+        // the stable Track.id cache key.
+        StreamingCache.playbackUriIfComplete(appContext, track.id)?.let { cachedUri ->
+            return track.copy(audioUri = cachedUri, isDownloaded = false)
+        }
+
+        val resolveStarted = android.os.SystemClock.elapsedRealtime()
+        val resolved = withTimeoutOrNull(20_000L) {
+            Providers.resolveStream(
+                name = track.title,
+                author = track.artistName,
+                sourceUrl = sourceUrlFor(track),
+                cacheKey = track.id,
+                forceRefresh = forceRefresh
+            )
+        } ?: return null
+        StreamingCache.rememberFormat(appContext, track.id, resolved.extension, resolved.mimeType)
+        if (prebuffer && !StreamingCache.hasPrefetchedPrefix(appContext, track.id)) {
+            StreamingCache.prefetchPrefix(appContext, track.id, resolved.url)
+        }
+        android.util.Log.d(
+            "MusicVaultStreamPerf",
+            "ready-to-media3 id=${track.id} ${android.os.SystemClock.elapsedRealtime() - resolveStarted}ms prebuffer=$prebuffer"
+        )
+        return track.copy(audioUri = resolved.url, isDownloaded = false)
+    }
+
+    private fun playReadyTrack(track: Track) {
+        _selectedTrack.value = track
+        player.play(track)
+        viewModelScope.launch { repository.recordPlay(track, 0f) }
+    }
+
+    private fun sourceUrlFor(track: Track): String? = track.url ?: track.sourceId?.takeIf {
+        track.source.equals("youtube", ignoreCase = true) || track.id.startsWith("youtube:", ignoreCase = true)
+    }?.let { "https://www.youtube.com/watch?v=$it" }
+
+    private fun catalogTrackForStreaming(track: CatalogTrack): Track = Track(
+        id = "${track.provider}:recording:${track.id}",
+        title = track.title,
+        artistName = track.artistName,
+        albumId = track.albumId?.let { "${track.provider}:release:$it" } ?: "unknown",
+        albumTitle = track.albumTitle ?: "Álbum desconocido",
+        durationMs = track.durationMs,
+        coverUri = track.coverUri,
+        source = track.source ?: displaySource(track),
+        sourceId = track.sourceId ?: track.id,
+        url = track.url
+    )
 
     fun playRemote(track: CatalogTrack) {
         val localId = "${track.provider}:recording:${track.id}"
@@ -1370,30 +1808,13 @@ class MusicVaultViewModel(
             selectTrack(local)
             return
         }
-        // A remote track that is not downloaded must never enter the player automatically.
-        // The first click downloads it; a later click on the now-downloaded track plays it.
-        requestRemoteDownload(track, autoPlay = false)
+        selectTrack(catalogTrackForStreaming(track))
     }
 
     fun playRecommendation(track: Track) {
-        if (track.isDownloaded && track.audioUri != null) {
-            selectTrack(track)
-            return
-        }
-        val parts = track.id.split(":", limit = 3)
-        if (parts.size == 3 && parts[1] == "recording") {
-            playRemote(CatalogTrack(
-                id = parts[2],
-                title = track.title,
-                artistId = "",
-                artistName = track.artistName,
-                albumId = track.albumId.substringAfter(":release:", "").takeIf { it.isNotBlank() },
-                albumTitle = track.albumTitle,
-                durationMs = track.durationMs,
-                coverUri = track.coverUri,
-                provider = parts[0]
-            ))
-        }
+        // Recommendations follow the same contract as every other song row:
+        // local files play locally; online items resolve and stream on demand.
+        selectTrack(track)
     }
 
     fun downloadRecommendedAlbum(album: Album) {
@@ -1458,7 +1879,20 @@ class MusicVaultViewModel(
         }
     }
 
-    fun togglePlayback() = player.toggle()
+    fun togglePlayback() {
+        // If a remote preparation failed, the mini-player still represents the
+        // song the user asked for while Media3 may still hold the previous item.
+        // Pressing Play should retry the visible song, never resume an unrelated
+        // stale media item.
+        if (_preparingTrackId.value != null) return
+        val selected = _selectedTrack.value
+        val controllerTrackId = player.progress.value.trackId
+        if (selected != null && selected.id != controllerTrackId) {
+            selectTrack(selected)
+        } else {
+            player.toggle()
+        }
+    }
     fun seekTo(positionMs: Long) = player.seekTo(positionMs)
     fun refreshPlaybackState() = player.refreshPlaybackState()
     fun openFullPlayer() { if (_selectedTrack.value != null) _fullPlayer.value = true }
@@ -1467,6 +1901,26 @@ class MusicVaultViewModel(
     fun toggleShuffle() {
         val enabled = !_shuffle.value
         _shuffle.value = enabled
+        if (explicitQueueMode && activePlaylistId != null) {
+            // Managed streaming playlists already define their own logical order.
+            // Rebuild only the future window instead of asking Media3 to shuffle a
+            // queue that intentionally contains just current + two successors.
+            val currentId = player.progress.value.trackId ?: _selectedTrack.value?.id
+            val all = _selectedPlaylistTracks.value
+            val current = all.firstOrNull { it.id == currentId } ?: return
+            playlistLookAheadJob?.cancel()
+            playlistLookAheadJob = null
+            player.trimAfterCurrent()
+            activePlaylistOrder = if (enabled) {
+                listOf(current) + all.filterNot { it.id == current.id }.shuffled()
+            } else {
+                all
+            }
+            activePlaylistAppendIndex = activePlaylistOrder.indexOfFirst { it.id == current.id }.coerceAtLeast(0)
+            player.setShuffle(false)
+            schedulePlaylistLookAhead(current.id)
+            return
+        }
         player.setShuffle(enabled)
         if (!explicitQueueMode && activePlaylistId == null && enabled) {
             _selectedTrack.value?.let { viewModelScope.launch { enqueueSmartNext(it) } }
@@ -1477,49 +1931,109 @@ class MusicVaultViewModel(
 
     fun playPlaylist(playlist: Playlist, shuffle: Boolean = _shuffle.value) {
         viewModelScope.launch(Dispatchers.IO) {
-            val tracks = repository.getPlaylistTracks(playlist.id)
-                .filter { it.isDownloaded && it.audioUri != null }
-            if (tracks.isEmpty()) {
-                _errorMessage.value = "Esta playlist no tiene canciones descargadas."
+            val allTracks = repository.getPlaylistTracks(playlist.id)
+            if (allTracks.isEmpty()) {
+                _errorMessage.value = "Esta playlist está vacía."
                 return@launch
             }
-            activePlaylistId = playlist.id
-            _selectedPlaylist.value = playlist
-            _selectedPlaylistTracks.value = tracks
-            _shuffle.value = shuffle
-            withContext(Dispatchers.Main.immediate) {
-                explicitQueueMode = true
-                // When shuffle is requested, start from a genuinely random item
-                // instead of always beginning with item 0. Media3 then keeps the
-                // rest of the queue shuffled within this playlist.
-                val startIndex = if (shuffle && tracks.size > 1) tracks.indices.random() else 0
-                player.playQueue(tracks, startIndex, shuffle)
-                _selectedTrack.value = tracks[startIndex]
-                repository.recordPlay(tracks[startIndex], 0f)
-            }
+            val start = if (shuffle && allTracks.size > 1) allTracks.random() else allTracks.first()
+            StreamingCache.markPlaybackRequested(start.id)
+            startManagedPlaylistPlayback(playlist, allTracks, start, shuffle)
         }
     }
 
     fun playPlaylistTrack(playlist: Playlist, track: Track, shuffle: Boolean = _shuffle.value) {
         viewModelScope.launch(Dispatchers.IO) {
-            val tracks = repository.getPlaylistTracks(playlist.id)
-                .filter { it.isDownloaded && it.audioUri != null }
-            val index = tracks.indexOfFirst { it.id == track.id }
-            if (index < 0) {
+            val allTracks = repository.getPlaylistTracks(playlist.id)
+            val current = allTracks.firstOrNull { it.id == track.id }
+            if (current == null) {
                 _errorMessage.value = "La canción ya no está disponible en esta playlist."
                 return@launch
             }
+            StreamingCache.markPlaybackRequested(current.id)
+            startManagedPlaylistPlayback(playlist, allTracks, current, shuffle)
+        }
+    }
+
+    /**
+     * Starts a playlist from local audio or streaming using a tiny moving window.
+     * Only current + two successors are ever resolved/prebuffered at once.
+     */
+    private suspend fun startManagedPlaylistPlayback(
+        playlist: Playlist,
+        allTracks: List<Track>,
+        requested: Track,
+        shuffle: Boolean
+    ) {
+        val ready = resolveForStreaming(requested) ?: run {
+            _errorMessage.value = "La canción sigue en la playlist, pero no se pudo preparar el streaming."
+            return
+        }
+        val order = if (shuffle) {
+            listOf(requested) + allTracks.filterNot { it.id == requested.id }.shuffled()
+        } else {
+            allTracks
+        }
+        val logicalIndex = order.indexOfFirst { it.id == requested.id }.coerceAtLeast(0)
+
+        withContext(Dispatchers.Main.immediate) {
+            playlistLookAheadJob?.cancel()
             activePlaylistId = playlist.id
+            activePlaylistOrder = order
+            activePlaylistAppendIndex = logicalIndex
             _selectedPlaylist.value = playlist
-            _selectedPlaylistTracks.value = tracks
+            _selectedPlaylistTracks.value = allTracks
             _shuffle.value = shuffle
-            withContext(Dispatchers.Main.immediate) {
-                explicitQueueMode = true
-                player.playQueue(tracks, index, shuffle)
-                _selectedTrack.value = tracks[index]
-                repository.recordPlay(tracks[index], 0f)
+            explicitQueueMode = true
+            // Our logical order is already shuffled when requested. Keep Media3
+            // shuffle off so dynamic append order remains deterministic.
+            player.setShuffle(false)
+            player.play(ready)
+            _selectedTrack.value = ready
+            repository.recordPlay(ready, 0f)
+        }
+        schedulePlaylistLookAhead(ready.id)
+    }
+
+    private fun schedulePlaylistLookAhead(currentTrackId: String? = null) {
+        if (activePlaylistId == null || activePlaylistOrder.isEmpty() || !explicitQueueMode) return
+        if (playlistLookAheadJob?.isActive == true) return
+        val generation = queueGeneration
+        playlistLookAheadJob = viewModelScope.launch(Dispatchers.IO) {
+            ensurePlaylistLookAhead(currentTrackId, generation)
+        }
+    }
+
+    private suspend fun ensurePlaylistLookAhead(currentTrackId: String?, generation: Long) {
+        playlistLookAheadMutex.withLock {
+            if (!explicitQueueMode || activePlaylistId == null || generation != queueGeneration) return
+            val id = currentTrackId ?: player.progress.value.trackId ?: _selectedTrack.value?.id ?: return
+            val currentLogical = activePlaylistOrder.indexOfFirst { it.id == id }
+            if (currentLogical < 0) return
+            if (activePlaylistAppendIndex < currentLogical) activePlaylistAppendIndex = currentLogical
+            val target = (currentLogical + 2).coerceAtMost(activePlaylistOrder.lastIndex)
+
+            while (activePlaylistAppendIndex < target && generation == queueGeneration && explicitQueueMode) {
+                val nextIndex = activePlaylistAppendIndex + 1
+                val candidate = activePlaylistOrder[nextIndex]
+                // Resolve URL + cache a small prefix before adding it to Media3.
+                // If one unavailable song fails, skip it and continue so it can
+                // never dead-end a large imported playlist.
+                val ready = resolveForStreaming(candidate, prebuffer = true)
+                activePlaylistAppendIndex = nextIndex
+                if (ready != null && generation == queueGeneration && explicitQueueMode) {
+                    withContext(Dispatchers.Main.immediate) { player.append(ready) }
+                }
             }
         }
+    }
+
+    private fun clearActivePlaylistPlayback() {
+        playlistLookAheadJob?.cancel()
+        playlistLookAheadJob = null
+        activePlaylistId = null
+        activePlaylistOrder = emptyList()
+        activePlaylistAppendIndex = -1
     }
 
     fun setCrossfadeSeconds(seconds: Int) {
@@ -1557,12 +2071,29 @@ class MusicVaultViewModel(
     fun isFavorite(trackId: String): Boolean = state.value.favoriteIds.contains(trackId)
 
     fun addToQueue(track: Track) {
-        if (!track.isDownloaded || track.audioUri == null) {
+        if (track.isDownloaded && !track.audioUri.isNullOrBlank()) {
+            activateExplicitQueueMode()
+            pendingQueueEntries += PendingQueueEntry(ready = true, track = track)
+            flushPendingQueue()
             return
         }
+
+        // Queueing an online song must not silently turn into a permanent
+        // download. Resolve the temporary stream and append that instead.
         activateExplicitQueueMode()
-        pendingQueueEntries += PendingQueueEntry(ready = true, track = track)
-        flushPendingQueue()
+        val generation = queueGeneration
+        val entry = PendingQueueEntry()
+        pendingQueueEntries += entry
+        viewModelScope.launch {
+            val streamed = resolveForStreaming(track)
+            withContext(Dispatchers.Main.immediate) {
+                if (generation == queueGeneration) {
+                    entry.ready = true
+                    entry.track = streamed
+                    flushPendingQueue()
+                }
+            }
+        }
     }
 
     fun addRemoteTrackToQueue(track: CatalogTrack) {
@@ -1572,22 +2103,7 @@ class MusicVaultViewModel(
             addToQueue(local)
             return
         }
-        // Queue intent is explicit as soon as the user presses "add to queue";
-        // otherwise smart-next can keep appending auto-picked successors while
-        // the download is still in flight.
-        activateExplicitQueueMode()
-        val generation = queueGeneration
-        val entry = PendingQueueEntry()
-        pendingQueueEntries += entry
-        requestRemoteDownload(track, autoPlay = false) { ready ->
-            withContext(Dispatchers.Main.immediate) {
-                if (generation == queueGeneration) {
-                    entry.ready = true
-                    entry.track = ready
-                    flushPendingQueue()
-                }
-            }
-        }
+        addToQueue(catalogTrackForStreaming(track))
     }
 
     private fun flushPendingQueue() {
@@ -1698,7 +2214,7 @@ class MusicVaultViewModel(
                 val remaining = if (index >= 0) _remoteAlbumTracks.value.drop(index + 1) else _remoteAlbumTracks.value
                 val nextRemote = if (_shuffle.value && remaining.isNotEmpty()) remaining.randomOrNull() else remaining.firstOrNull()
                 if (nextRemote != null) {
-                    requestRemoteDownload(nextRemote, autoPlay = true)
+                    selectTrack(catalogTrackForStreaming(nextRemote))
                     return@launch
                 }
             }
@@ -1770,9 +2286,8 @@ class MusicVaultViewModel(
             val remaining = if (index >= 0) _remoteAlbumTracks.value.drop(index + 1) else _remoteAlbumTracks.value
             val nextRemote = if (_shuffle.value && remaining.isNotEmpty()) remaining.randomOrNull() else remaining.firstOrNull()
             if (nextRemote != null) {
-                requestRemoteDownload(nextRemote, autoPlay = false) { ready ->
-                    ready?.let { appendSmartCandidate(current, it, generation) }
-                }
+                val streamed = resolveForStreaming(catalogTrackForStreaming(nextRemote), prebuffer = true)
+                streamed?.let { appendSmartCandidate(current, it, generation) }
                 return
             }
         }
@@ -1816,9 +2331,8 @@ class MusicVaultViewModel(
                 it.title.isNotBlank() && "${it.provider}:recording:${it.id}" !in existingIds
             }
             if (candidate != null) {
-                requestRemoteDownload(candidate, autoPlay = false) { ready ->
-                    ready?.let { appendSmartCandidate(current, it, generation) }
-                }
+                val streamed = resolveForStreaming(catalogTrackForStreaming(candidate), prebuffer = true)
+                streamed?.let { appendSmartCandidate(current, it, generation) }
             } else {
                 localCandidates.randomOrNull()?.let { appendSmartCandidate(current, it, generation) }
             }
@@ -2033,7 +2547,7 @@ class MusicVaultViewModel(
     }
 
     fun requestDownload(track: Track) {
-        requestDownloadInternal(track.id, track.title, track.artistName, track.url) { result ->
+        requestDownloadInternal(track.id, track.title, track.artistName, sourceUrlFor(track)) { result ->
             if (result is ProviderResult.Success) {
                 repository.setDownloaded(track, result.audioUri)
                 persistDownloadedLyrics(
@@ -2051,16 +2565,28 @@ class MusicVaultViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val pending = repository.getPlaylistTracks(playlist.id)
-                    .filterNot { it.isDownloaded && it.audioUri != null }
+                    .filterNot { it.isDownloaded && !it.audioUri.isNullOrBlank() }
                 if (pending.isEmpty()) {
                     showProvider("La playlist ya está descargada.")
                     return@launch
                 }
-                val completed = pending.map { track ->
-                    async { awaitTrackDownload(track) }
-                }.awaitAll().count { it }
-                if (completed > 0) {
-                    showProvider("$completed canciones descargadas de ${playlist.title}.")
+
+                // Do not launch hundreds of foreground-service requests at once.
+                // Large Spotify imports are intentionally processed in small
+                // batches; each song receives transient retries before being
+                // left pending for a later manual retry.
+                var completed = 0
+                pending.chunked(BULK_DOWNLOAD_CONCURRENCY).forEach { batch ->
+                    completed += batch.map { track ->
+                        async { awaitTrackDownloadWithRetry(track) }
+                    }.awaitAll().count { it }
+                }
+
+                val failed = pending.size - completed
+                when {
+                    failed == 0 -> showProvider("$completed canciones descargadas de ${playlist.title}.")
+                    completed > 0 -> showProvider("$completed descargadas; $failed quedaron pendientes. Puedes tocar Descargar otra vez para reintentarlas.")
+                    else -> showError("No se pudo completar la descarga. ${pending.size} canciones quedaron pendientes para reintentar.")
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -2072,17 +2598,36 @@ class MusicVaultViewModel(
         }
     }
 
-    private suspend fun awaitTrackDownload(track: Track): Boolean =
+    private suspend fun awaitTrackDownloadWithRetry(track: Track): Boolean {
+        synchronized(downloadLock) { quietDownloadIds += track.id }
+        return try {
+            repeat(BULK_DOWNLOAD_MAX_ATTEMPTS) { attempt ->
+                when (val result = awaitTrackDownloadResult(track)) {
+                    is ProviderResult.Success -> if (result.audioUri.isNotBlank()) return true
+                    is ProviderResult.Unavailable -> return false
+                    is ProviderResult.Error, null -> Unit
+                }
+                if (attempt < BULK_DOWNLOAD_MAX_ATTEMPTS - 1) {
+                    delay(BULK_DOWNLOAD_RETRY_BASE_DELAY_MS * (attempt + 1L))
+                }
+            }
+            false
+        } finally {
+            synchronized(downloadLock) { quietDownloadIds -= track.id }
+        }
+    }
+
+    private suspend fun awaitTrackDownloadResult(track: Track): ProviderResult? =
         kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
-            requestDownloadInternal(track.id, track.title, track.artistName, track.url) { result ->
-                if (result is ProviderResult.Success) {
+            requestDownloadInternal(track.id, track.title, track.artistName, sourceUrlFor(track)) { result ->
+                if (result is ProviderResult.Success && result.audioUri.isNotBlank()) {
                     repository.setDownloaded(track, result.audioUri)
                     persistDownloadedLyrics(
                         track = track,
                         localReference = result.localPath ?: result.audioUri
                     )
                 }
-                if (continuation.isActive) continuation.resume(result is ProviderResult.Success)
+                if (continuation.isActive) continuation.resume(result)
             }
         }
 
@@ -2151,49 +2696,56 @@ class MusicVaultViewModel(
         }
     }
 
-    fun addTrackToPlaylist(track: Track, playlistId: String) {
-        if (track.isDownloaded && track.audioUri != null) {
-            viewModelScope.launch(Dispatchers.IO) { repository.addTrackToPlaylist(playlistId, track) }
-            return
+    private suspend fun persistTrackReference(track: Track): Track {
+        val current = database.trackDao().get(track.id)
+        if (current?.isDownloaded == true && !current.audioUri.isNullOrBlank()) {
+            return track.copy(audioUri = current.audioUri, isDownloaded = true)
         }
-        requestDownloadInternal(track.id, track.title, track.artistName, track.url) { result ->
-            if (result is ProviderResult.Success) {
-                val ready = track.copy(audioUri = result.audioUri, isDownloaded = true)
-                repository.setDownloaded(track, result.audioUri)
-                repository.addTrackToPlaylist(playlistId, ready)
-            }
+        database.trackDao().upsertAll(
+            listOf(
+                TrackEntity(
+                    id = track.id,
+                    title = track.title,
+                    artistName = track.artistName,
+                    albumId = track.albumId,
+                    albumTitle = track.albumTitle,
+                    durationMs = track.durationMs,
+                    audioUri = null,
+                    isDownloaded = false,
+                    coverUri = track.coverUri,
+                    source = track.source,
+                    sourceId = track.sourceId
+                )
+            )
+        )
+        return track.copy(audioUri = null, isDownloaded = false)
+    }
+
+    fun addTrackToPlaylist(track: Track, playlistId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val stored = persistTrackReference(track)
+            repository.addTrackToPlaylist(playlistId, stored)
         }
     }
 
     fun addRemoteTrackToPlaylist(track: CatalogTrack, playlistId: String) {
-        val localId = "${track.provider}:recording:${track.id}"
-        val local = state.value.tracks.firstOrNull { it.id == localId && it.isDownloaded }
-        if (local != null) addTrackToPlaylist(local, playlistId)
-        else viewModelScope.launch(Dispatchers.IO) {
-            awaitRemoteDownload(track)?.let { repository.addTrackToPlaylist(playlistId, it) }
+        viewModelScope.launch(Dispatchers.IO) {
+            val stored = persistTrackReference(catalogTrackForStreaming(track))
+            repository.addTrackToPlaylist(playlistId, stored)
         }
     }
 
     fun addTrackToAlbum(track: Track, albumId: String) {
-        if (track.isDownloaded && track.audioUri != null) {
-            viewModelScope.launch(Dispatchers.IO) { repository.addTrackToAlbum(albumId, track) }
-            return
-        }
-        requestDownloadInternal(track.id, track.title, track.artistName, track.url) { result ->
-            if (result is ProviderResult.Success) {
-                val ready = track.copy(audioUri = result.audioUri, isDownloaded = true)
-                repository.setDownloaded(track, result.audioUri)
-                repository.addTrackToAlbum(albumId, ready)
-            }
+        viewModelScope.launch(Dispatchers.IO) {
+            val stored = persistTrackReference(track)
+            repository.addTrackToAlbum(albumId, stored)
         }
     }
 
     fun addRemoteTrackToAlbum(track: CatalogTrack, albumId: String) {
-        val localId = "${track.provider}:recording:${track.id}"
-        val local = state.value.tracks.firstOrNull { it.id == localId && it.isDownloaded }
-        if (local != null) addTrackToAlbum(local, albumId)
-        else viewModelScope.launch(Dispatchers.IO) {
-            awaitRemoteDownload(track)?.let { addTrackToAlbum(it, albumId) }
+        viewModelScope.launch(Dispatchers.IO) {
+            val stored = persistTrackReference(catalogTrackForStreaming(track))
+            repository.addTrackToAlbum(albumId, stored)
         }
     }
 
@@ -2207,6 +2759,16 @@ class MusicVaultViewModel(
             return
         }
         viewModelScope.launch(Dispatchers.IO) { repository.deletePlaylist(playlistId) }
+    }
+
+    fun removeTrackFromPlaylist(playlistId: String, trackId: String) {
+        if (playlistId == favoritesAlbumId) {
+            viewModelScope.launch(Dispatchers.IO) { repository.removeTrackFromPlaylist(playlistId, trackId) }
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.removeTrackFromPlaylist(playlistId, trackId)
+        }
     }
 
     private fun requestDownloadInternal(
@@ -2285,12 +2847,15 @@ class MusicVaultViewModel(
         }
 
         val waiters = synchronized(downloadLock) { downloadWaiters.remove(id).orEmpty().toList() }
+        val quietFailure = synchronized(downloadLock) { id in quietDownloadIds }
         viewModelScope.launch(Dispatchers.IO) {
             waiters.forEach { callback -> runCatching { callback(result) } }
-            when (result) {
-                is ProviderResult.Unavailable -> showError(result.reason)
-                is ProviderResult.Error -> showError(result.message)
-                is ProviderResult.Success -> Unit
+            if (!quietFailure) {
+                when (result) {
+                    is ProviderResult.Unavailable -> showError(result.reason)
+                    is ProviderResult.Error -> showError(result.message)
+                    is ProviderResult.Success -> Unit
+                }
             }
             _downloadProgress.value = _downloadProgress.value - id
             synchronized(downloadLock) { downloadJobs.remove(id) }

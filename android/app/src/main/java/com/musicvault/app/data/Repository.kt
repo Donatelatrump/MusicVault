@@ -101,6 +101,36 @@ class MusicRepository(private val db: MusicDatabase) {
         }
     }
 
+    suspend fun replaceImportedPlaylist(
+        id: String,
+        title: String,
+        description: String,
+        coverUri: String?,
+        tracks: List<Track>
+    ) {
+        db.withTransaction {
+            val trackDao = db.trackDao()
+            val existing = tracks.map { it.id }.distinct().chunked(500)
+                .flatMap { trackDao.getByIds(it) }.associateBy { it.id }
+            val entities = tracks.map { track ->
+                val current = existing[track.id]
+                val incoming = TrackEntity(
+                    track.id, track.title, track.artistName, track.albumId, track.albumTitle,
+                    track.durationMs, track.audioUri, track.isDownloaded, track.coverUri,
+                    track.source, track.sourceId
+                )
+                if (current?.isDownloaded == true && current.audioUri != null) {
+                    incoming.copy(audioUri = current.audioUri, isDownloaded = true)
+                } else incoming
+            }
+            trackDao.upsertAll(entities)
+            val playlistDao = db.playlistDao()
+            playlistDao.upsertAll(listOf(PlaylistEntity(id, title, description, coverUri)))
+            playlistDao.deleteTracks(id)
+            playlistDao.upsertTracks(tracks.mapIndexed { index, track -> PlaylistTrackEntity(id, track.id, index) })
+        }
+    }
+
     suspend fun replaceSpotifyPlaylist(id: String, title: String, coverUri: String?, tracks: List<Track>) {
         db.withTransaction {
             val trackDao = db.trackDao()

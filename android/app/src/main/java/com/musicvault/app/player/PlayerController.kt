@@ -7,6 +7,7 @@ import android.net.Uri
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
@@ -29,6 +30,7 @@ import kotlin.math.max
 /** Non-blocking MediaController facade with seeking, queue and crossfade. */
 @androidx.annotation.OptIn(markerClass = [UnstableApi::class])
 class PlayerController(context: Context) {
+    private val appContext = context.applicationContext
     data class PlaybackProgress(
         val trackId: String? = null,
         val positionMs: Long = 0L,
@@ -70,6 +72,10 @@ class PlayerController(context: Context) {
     // app should append one (continuous playback). Without a next item the
     // crossfade can never trigger.
     var onNextItemNeeded: ((finishedTrackId: String?) -> Unit)? = null
+    // Used only for recoverable remote-stream failures (for example an expired
+    // signed googlevideo URL). The ViewModel can re-resolve the URL and replace
+    // the current media item without destroying the rest of the queue.
+    var onPlaybackError: ((trackId: String?) -> Unit)? = null
     private var pendingRefillFor: String? = null
     // Last (trackId, isPlaying) pair pushed to the playback-UI listener. The
     // widget only mirrors those two values, so publishing on every progress
@@ -122,6 +128,9 @@ class PlayerController(context: Context) {
                     override fun onPlaybackStateChanged(playbackState: Int) {
                         publishProgress(controller)
                         if (playbackState == androidx.media3.common.Player.STATE_ENDED) _ended.value = System.nanoTime()
+                    }
+                    override fun onPlayerError(error: PlaybackException) {
+                        onPlaybackError?.invoke(controller.currentMediaItem?.mediaId?.takeIf { it.isNotBlank() })
                     }
                     override fun onRepeatModeChanged(repeatMode: Int) { _repeatMode.value = repeatMode }
                     override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) { _shuffle.value = shuffleModeEnabled }
@@ -203,8 +212,10 @@ class PlayerController(context: Context) {
 
     private fun mediaItem(track: Track): MediaItem? {
         val audioUri = track.audioUri ?: return null
-        return MediaItem.Builder()
-            .setUri(Uri.parse(audioUri))
+        val parsed = Uri.parse(audioUri)
+        val remoteStream = !track.isDownloaded && (parsed.scheme == "http" || parsed.scheme == "https")
+        val builder = MediaItem.Builder()
+            .setUri(parsed)
             .setMediaId(track.id)
             .setMediaMetadata(
                 MediaMetadata.Builder()
@@ -213,7 +224,14 @@ class PlayerController(context: Context) {
                     .setAlbumTitle(track.albumTitle)
                     .setArtworkUri(track.coverUri?.let(Uri::parse))
                     .build()
-            ).build()
+            )
+        if (remoteStream) {
+            // The direct googlevideo URL is short lived. A stable cache key makes
+            // Media3 reuse the bytes after yt-dlp resolves a fresh URL later.
+            StreamingCache.touch(appContext, track.id)
+            builder.setCustomCacheKey(StreamingCache.cacheKey(track.id))
+        }
+        return builder.build()
     }
 
     fun play(track: Track) {
@@ -223,6 +241,22 @@ class PlayerController(context: Context) {
             controller.setVolume(1f)
             controller.setMediaItem(item)
             controller.prepare()
+            controller.play()
+            publishQueue(controller)
+            publishProgress(controller)
+        }
+    }
+
+    fun retryCurrent(track: Track) {
+        val item = mediaItem(track) ?: return
+        knownTracks[track.id] = track
+        withController { controller ->
+            val index = controller.currentMediaItemIndex
+            if (index < 0 || controller.currentMediaItem?.mediaId != track.id) return@withController
+            val position = controller.currentPosition.coerceAtLeast(0L)
+            controller.replaceMediaItem(index, item)
+            controller.prepare()
+            controller.seekTo(index, position)
             controller.play()
             publishQueue(controller)
             publishProgress(controller)
@@ -306,6 +340,14 @@ class PlayerController(context: Context) {
         withController { controller ->
             if (afterTrackId != null && (controller.currentMediaItem?.mediaId != afterTrackId || controller.hasNextMediaItem())) return@withController
             controller.addMediaItem(item)
+            publishQueue(controller)
+        }
+    }
+
+    fun trimAfterCurrent() = withController { controller ->
+        val current = controller.currentMediaItemIndex
+        if (current >= 0 && current + 1 < controller.mediaItemCount) {
+            controller.removeMediaItems(current + 1, controller.mediaItemCount)
             publishQueue(controller)
         }
     }

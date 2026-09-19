@@ -91,25 +91,6 @@ def test_search_album_covers_keep_full_square_geometry(app, db, monkeypatch, tmp
         window.quit_app()
 
 
-def test_import_menu_offers_spotify_account_for_songmirror(app, db, monkeypatch):
-    player = Player(db, audio_output="null")
-    window = Window(db, player)
-    captured = []
-    try:
-        monkeypatch.setattr("musicvault.window.session_configured", lambda: False)
-
-        def capture(menu, _position):
-            captured.extend(action.text() for action in menu.actions() if not action.isSeparator())
-
-        monkeypatch.setattr("musicvault.window.QMenu.exec", capture)
-        window.import_dialog()
-        assert "Agregar cuenta de Spotify para SongMirror…" in captured
-        assert "Playlist de Spotify mediante SongMirror…" in captured
-        assert "Importar archivo de SongMirror…" not in captured
-    finally:
-        window.quit_app()
-
-
 def test_connected_account_offers_copied_spotify_track(app, db, monkeypatch):
     monkeypatch.setattr("musicvault.window.session_configured", lambda: True)
     player = Player(db, audio_output="null")

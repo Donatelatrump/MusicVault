@@ -76,6 +76,11 @@ class DownloadForegroundService : Service() {
                     onProgress = { progress -> broadcastProgress(id, progress) }
                 )
 
+                // ACTION_CANCEL removes this request from [running]. The
+                // provider may need a moment to unwind yt-dlp/CacheWriter; do
+                // not emit a second success/error after the explicit cancel.
+                if (!running.containsKey(id)) return@launch
+
                 if (result is ProviderResult.Success) {
                     val db = MusicDatabase.get(applicationContext)
                     db.downloadRecordDao().save(
@@ -106,12 +111,14 @@ class DownloadForegroundService : Service() {
                 }
                 broadcastResult(id, result)
             } catch (t: Throwable) {
-                broadcastResult(
-                    id,
-                    ProviderResult.Error(
-                        "Error inesperado durante la descarga: ${t.message ?: t.javaClass.simpleName}"
+                if (running.containsKey(id)) {
+                    broadcastResult(
+                        id,
+                        ProviderResult.Error(
+                            "Error inesperado durante la descarga: ${t.message ?: t.javaClass.simpleName}"
+                        )
                     )
-                )
+                }
             } finally {
                 running.remove(id)
                 lastProgress.remove(id)

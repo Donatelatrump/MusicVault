@@ -118,11 +118,11 @@ def _session():
         value = session_path().read_text(encoding="utf-8").strip()
     except OSError as exc:
         raise SpotifySessionError(
-            "Usa Importar música → Agregar cuenta de Spotify para SongMirror antes de importar la playlist."
+            "Conecta Spotify desde Ajustes → Cuenta antes de importar el enlace."
         ) from exc
     if not value:
         raise SpotifySessionError(
-            "Usa Importar música → Agregar cuenta de Spotify para SongMirror antes de importar la playlist."
+            "Conecta Spotify desde Ajustes → Cuenta antes de importar el enlace."
         )
     return value
 
@@ -190,7 +190,7 @@ def _access_token(cookie, request_json):
                 return token
     except (KeyError, TypeError, ValueError, _HTTPError) as exc:
         raise SpotifySessionError(
-            "Spotify rechazó la sesión. Vuelve a conectarla desde Importar música."
+            "Spotify rechazó la sesión. Vuelve a conectarla desde Ajustes → Cuenta."
         ) from exc
     raise SpotifySessionError(
         "Spotify rechazó la sesión o cambió su autenticación. Actualiza MusicVault o vuelve a conectarla."
@@ -219,7 +219,7 @@ def _pathfinder(operation, variables, token, request_json, query_hash):
     except _HTTPError as exc:
         if exc.status in {401, 403}:
             raise SpotifySessionError(
-                "Spotify rechazó la sesión. Vuelve a conectarla desde Importar música."
+                "Spotify rechazó la sesión. Vuelve a conectarla desde Ajustes → Cuenta."
             ) from exc
         raise
     errors = result.get("errors") or []
@@ -334,7 +334,7 @@ def fetch_track(track_id, cookie=None, request_json=None):
     except _HTTPError as exc:
         if exc.status in {401, 403}:
             raise SpotifySessionError(
-                "Spotify rechazó la sesión. Vuelve a conectarla desde Importar música."
+                "Spotify rechazó la sesión. Vuelve a conectarla desde Ajustes → Cuenta."
             ) from exc
         if exc.status == 404:
             raise SpotifySessionError("Spotify no encontró esa canción o la cuenta no puede verla.") from exc

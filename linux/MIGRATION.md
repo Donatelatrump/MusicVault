@@ -1,3 +1,11 @@
+# Migración 0.9.7
+
+- **Importar música** deja de aparecer en la barra lateral, encabezado y estado vacío.
+- Spotify se conecta/administra exclusivamente desde **Ajustes → Cuenta**.
+- Se elimina la entrada manual **Playlist de Spotify mediante SongMirror**; los enlaces compatibles se detectan desde el portapapeles.
+- La importación de música local se realiza desde **Ajustes → Biblioteca y almacenamiento → Música local → Importar carpeta**.
+- Las carpetas importadas se guardan como raíces de biblioteca para los escaneos posteriores.
+
 # Migración Android → Linux
 
 La aplicación principal para Linux está en `linux/`. No se puede convertir un APK ARM en una aplicación nativa x86_64 cambiando `abiFilters`: Compose Android, Room/Context, MediaStore, MediaSessionService, SAF y los efectos Android requieren sustituciones.
@@ -9,7 +17,6 @@ La aplicación principal para Linux está en `linux/`. No se puede convertir un 
 | MediaStore y permisos SAF | Selector nativo, rutas locales y escaneo de carpetas |
 | Media3 / ExoPlayer | libmpv mediante su API C estable |
 | Crossfade con reproductores móviles | Dos instancias de libmpv y rampa de volumen |
-| Android Equalizer / BassBoost / Virtualizer | Filtros FFmpeg de libmpv: EQ, ganancia, amplitud estéreo y limitador |
 | MediaSession / notificación / widget | MPRIS y bandeja del escritorio |
 | youtubedl-android + FFmpeg Android | Procesos yt-dlp y FFmpeg de la distribución x86_64 |
 | content:// y FileProvider | Archivos locales con rutas absolutas |
@@ -23,9 +30,9 @@ Adaptaciones que no son idénticas a la interfaz móvil:
 - Navegación inferior, estantes de portadas y filas con título/artista como en Android; se conservan menús contextuales y arrastre de archivos para escritorio. Las fuentes Inter, Space Grotesk e IBM Plex Mono se empaquetan desde los recursos originales.
 - MPRIS sustituye los controles del widget y la notificación móviles. La disponibilidad visual depende de GNOME/KDE u otro escritorio.
 - La animación circular no representa muestras de audio; el vinilo conserva una velocidad visual ajustable.
-- La continuación automática se basa en la biblioteca local. No implementa recomendaciones remotas automáticas ni el algoritmo de ranking completo de Android.
+- Inicio incluye recomendaciones remotas basadas en el onboarding o, para usuarios existentes, en los artistas de la biblioteca. La implementación Linux mantiene su propio ranking y caché, pero ya no obliga a repetir el test cuando hay música descargada/importada.
 - Las portadas locales se extraen de etiquetas o de imágenes de la carpeta; no se enriquece automáticamente toda la biblioteca mediante consultas remotas.
-- yt-dlp oficial se incluye con su componente EJS y se ejecuta con Python del sistema. La app detecta Node.js ≥22 o Deno ≥2.3, incluido Node instalado por nvm. FFmpeg sigue siendo una dependencia del sistema. No se reemplazan binarios del sistema.
-- No hay migración automática de bases Room, playlists móviles ni URI `content://`; se importa la música copiada al equipo.
+- yt-dlp oficial se incluye con su componente EJS y se ejecuta con Python del sistema. Además de descargas, resuelve streaming directo para libmpv, búsqueda de YouTube y playlists. La app detecta Node.js ≥22 o Deno ≥2.3, incluido Node instalado por nvm. FFmpeg sigue siendo una dependencia del sistema.
+- No hay migración automática de bases Room ni URI `content://`; se importa la música copiada al equipo. Las playlists de YouTube sí pueden guardarse como colecciones Linux manteniendo referencias remotas y reproducirse sin descarga previa.
 
 Los detalles de ejecución, distribución, datos y pruebas están en [README.md](README.md). No se afirma paridad visual exacta ni equivalencia del algoritmo de recomendaciones.

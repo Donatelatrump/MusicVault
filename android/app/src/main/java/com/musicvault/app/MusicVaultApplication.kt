@@ -5,6 +5,7 @@ import coil.ImageLoader
 import coil.ImageLoaderFactory
 import com.musicvault.app.catalog.CoverImageCache
 import com.musicvault.app.providers.Providers
+import com.musicvault.app.player.StreamingCache
 
 /**
  * Registers CoverImageCache's loader as the process-wide Coil singleton so
@@ -17,6 +18,10 @@ class MusicVaultApplication : Application(), ImageLoaderFactory {
     override fun onCreate() {
         super.onCreate()
         Providers.init(this)
+        // Open the Media3 cache DB and install/warm the preferred HTTP stack
+        // before the user taps Play. This removes first-stream setup work from
+        // the time-to-first-audio critical path.
+        StreamingCache.initialize(this)
     }
 
     override fun newImageLoader(): ImageLoader = CoverImageCache.loader(this)

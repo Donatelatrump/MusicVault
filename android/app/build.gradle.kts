@@ -13,8 +13,8 @@ android {
         applicationId = "com.musicvault.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 16
-        versionName = "0.5.5"
+        versionCode = 19
+        versionName = "0.5.8"
 
     }
 
@@ -58,6 +58,7 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        isCoreLibraryDesugaringEnabled = true
     }
 
     buildFeatures {
@@ -92,10 +93,15 @@ composeCompiler {
 }
 
 dependencies {
+    // Keep the runtime Kotlin libraries on the same line as the compiler/KSP.
+    // This prevents a transitive dependency from silently pulling Kotlin 2.2.x
+    // into a project still compiled with Kotlin 2.0.21.
+    implementation(enforcedPlatform("org.jetbrains.kotlin:kotlin-bom:2.0.21"))
+
     val composeBom = platform("androidx.compose:compose-bom:2024.12.01")
     implementation(composeBom)
     androidTestImplementation(composeBom)
-implementation("androidx.recyclerview:recyclerview:1.4.0")
+    implementation("androidx.recyclerview:recyclerview:1.4.0")
     implementation("androidx.activity:activity-compose:1.10.0")
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.documentfile:documentfile:1.0.1")
@@ -119,9 +125,26 @@ implementation("androidx.recyclerview:recyclerview:1.4.0")
     implementation("androidx.room:room-ktx:2.7.0")
     ksp("androidx.room:room-compiler:2.7.0")
 
-    implementation("androidx.media3:media3-exoplayer:1.5.1")
-    implementation("androidx.media3:media3-session:1.5.1")
-    implementation("androidx.media3:media3-ui:1.5.1")
+    // Media3 1.10.1 is intentionally pinned here. Media3 1.11.x is built
+    // with Kotlin 2.2 metadata, while MusicVault currently uses Kotlin 2.0.21
+    // + KSP 2.0.21. Keeping 1.10.1 preserves the streaming/cache/Cronet
+    // optimizations without forcing a risky whole-project Kotlin/KSP migration.
+    val media3Version = "1.10.1"
+    implementation("androidx.media3:media3-exoplayer:$media3Version")
+    implementation("androidx.media3:media3-datasource:$media3Version")
+    implementation("androidx.media3:media3-datasource-cronet:$media3Version")
+    implementation("androidx.media3:media3-database:$media3Version")
+    implementation("androidx.media3:media3-session:$media3Version")
+    implementation("androidx.media3:media3-ui:$media3Version")
+    // Preferred streaming network stack. Google Play Services Cronet gives
+    // HTTP/2 + HTTP/3/QUIC without bundling the ~8 MB embedded Cronet binary.
+    implementation("com.google.android.gms:play-services-cronet:18.1.1")
+
+    // Native/JVM-first YouTube resolver. NewPipeExtractor handles the primary
+    // stream URL extraction; yt-dlp remains a compatibility fallback.
+    implementation("com.github.teamnewpipe:newpipeextractor:0.26.5")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs_nio:2.0.3")
 
     implementation("io.coil-kt:coil-compose:2.7.0")
 

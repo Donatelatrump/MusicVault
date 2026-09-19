@@ -10,6 +10,8 @@ import androidx.media3.common.C
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -19,6 +21,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
 import android.view.KeyEvent
+import android.os.SystemClock
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionResult
@@ -37,6 +40,7 @@ class MusicPlaybackService : MediaSessionService() {
         if (key == "crossfade_seconds") updateCrossfadeMonitor()
     }
     private var crossfadeTargetIndex = androidx.media3.common.C.INDEX_UNSET
+    private val bufferingStartedAt = java.util.WeakHashMap<ExoPlayer, Long>()
     private val mediaAudioAttributes = AudioAttributes.Builder()
         .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
         .setUsage(C.USAGE_MEDIA)
@@ -125,13 +129,45 @@ class MusicPlaybackService : MediaSessionService() {
                 crossfadeTargetIndex = androidx.media3.common.C.INDEX_UNSET
                 target.volume = 1f
             }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                when (playbackState) {
+                    Player.STATE_BUFFERING -> bufferingStartedAt.putIfAbsent(target, SystemClock.elapsedRealtime())
+                    Player.STATE_READY -> {
+                        val mediaId = target.currentMediaItem?.mediaId
+                        bufferingStartedAt.remove(target)?.let { started ->
+                            Log.d(
+                                "MusicVaultStreamPerf",
+                                "media3 READY ${SystemClock.elapsedRealtime() - started}ms id=$mediaId"
+                            )
+                        }
+                        mediaId?.takeIf { it.isNotBlank() }?.let(StreamingCache::markPlaybackReady)
+                    }
+                }
+            }
         })
     }
 
-    private fun buildPlayer(requestAudioFocus: Boolean = true): ExoPlayer = ExoPlayer.Builder(this)
-        .setAudioAttributes(mediaAudioAttributes, requestAudioFocus)
-        .setHandleAudioBecomingNoisy(true)
-        .build()
+    private fun buildPlayer(requestAudioFocus: Boolean = true): ExoPlayer {
+        // Remote music can start safely with a much smaller startup buffer than
+        // Media3's general-purpose streaming defaults. Keep local/offline files
+        // on Media3's own local-playback defaults and tune streaming only.
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMsForStreaming(
+                10_000, // minBufferMs
+                30_000, // maxBufferMs
+                500,    // bufferForPlaybackMs
+                1_500   // bufferForPlaybackAfterRebufferMs
+            )
+            .setPrioritizeTimeOverSizeThresholdsForStreaming(true)
+            .build()
+        return ExoPlayer.Builder(this)
+            .setLoadControl(loadControl)
+            .setMediaSourceFactory(DefaultMediaSourceFactory(StreamingCache.dataSourceFactory(this)))
+            .setAudioAttributes(mediaAudioAttributes, requestAudioFocus)
+            .setHandleAudioBecomingNoisy(true)
+            .build()
+    }
 
     private fun startCrossfadeMonitor() {
         if (crossfadeMonitorJob?.isActive == true) return

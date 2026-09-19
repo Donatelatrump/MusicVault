@@ -45,3 +45,14 @@ data class CatalogAlbum(
     val coverUri: String? = null,
     val provider: String = "musicbrainz"
 )
+
+@Immutable
+data class CatalogPlaylist(
+    val id: String,
+    val title: String,
+    val uploaderName: String,
+    val trackCount: Long = 0L,
+    val coverUri: String? = null,
+    val url: String,
+    val provider: String = "youtube"
+)

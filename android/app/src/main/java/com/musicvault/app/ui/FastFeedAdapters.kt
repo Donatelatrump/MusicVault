@@ -420,7 +420,9 @@ internal class NativeTrackHolder(
     private val vm: MusicVaultViewModel,
     private val hybridDesign: Boolean = false,
     private val onRowClick: ((Track) -> Unit)? = null,
-    private val onPlayNew: ((Track) -> Unit)? = null
+    private val onPlayNew: ((Track) -> Unit)? = null,
+    private val onRemoveFromPlaylist: ((Track) -> Unit)? = null,
+    private val allowMissingTrackLongPressRemoval: Boolean = false
 ) : RecyclerView.ViewHolder(makeTrackRow(context, hybridDesign)) {
     private val image = itemView.findViewWithTag<ImageView>("cover")
     private val title = itemView.findViewWithTag<TextView>("title")
@@ -435,11 +437,22 @@ internal class NativeTrackHolder(
     private var currentPlaylists: List<Playlist> = emptyList()
     private var progressJob: Job? = null
     private var progressFlow: Flow<Int?>? = null
+    private var currentProgress: Int? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     init {
+        installTrackPressFeedback(itemView)
         actions.setOnClickListener { showActionsMenu(it) }
         itemView.setOnClickListener { track?.let { t -> (onRowClick ?: vm::selectTrack).invoke(t) } }
+        itemView.setOnLongClickListener {
+            val current = track ?: return@setOnLongClickListener false
+            if (allowMissingTrackLongPressRemoval && (!current.isDownloaded || current.audioUri.isNullOrBlank())) {
+                confirmPlaylistRemoval(current)
+                true
+            } else {
+                false
+            }
+        }
         play.setOnClickListener {
             val t = track ?: return@setOnClickListener
             if (t.id == selectedId) vm.togglePlayback()
@@ -448,6 +461,7 @@ internal class NativeTrackHolder(
     }
 
     fun bind(value: Track, flow: Flow<Int?>, playlists: List<Playlist>, albums: List<Album>, selectedId: String?, playing: Boolean) {
+        if (track?.id != value.id) currentProgress = null
         track = value
         currentPlaylists = playlists
         this.selectedId = selectedId
@@ -468,28 +482,29 @@ internal class NativeTrackHolder(
                 // Reads holder fields instead of stale bind-time captures.
                 flow.collect { p ->
                     val t = track ?: return@collect
-                    val downloading = p != null && !t.isDownloaded
+                    val ready = t.isDownloaded && !t.audioUri.isNullOrBlank()
+                    val downloading = p != null && !ready
+                    currentProgress = p
                     progress.visibility = if (downloading) View.VISIBLE else View.GONE
                     if (downloading) progress.progress = p!!.coerceIn(0, 100)
-                    play.visibility = if (t.isDownloaded || downloading) View.GONE else View.VISIBLE
-                    actions.visibility = if (t.isDownloaded && !downloading) View.VISIBLE else View.GONE
+                    // Playback is always the row tap. Keep overflow available
+                    // for local and online tracks, including active downloads.
+                    play.visibility = View.GONE
+                    actions.visibility = View.VISIBLE
                 }
             }
         }
 
-        // Keep the same action contract as Search:
-        // - downloaded track -> only the 3-dot menu
-        // - non-downloaded track -> only Play
-        // - actively downloading -> neither action (progress is shown)
+        // Universal interaction contract:
+        // - tap row -> play (local file or streaming)
+        // - trailing 3-dot -> actions, including Download for online tracks
         applyActionState(value, false)
     }
 
     private fun applyActionState(value: Track, downloading: Boolean) {
-        play.visibility = if (value.isDownloaded || downloading) View.GONE else View.VISIBLE
-        actions.visibility = if (value.isDownloaded && !downloading) View.VISIBLE else View.GONE
-        if (value.isDownloaded && !downloading) {
-            actions.contentDescription = "Más opciones para ${value.title}"
-        }
+        play.visibility = View.GONE
+        actions.visibility = View.VISIBLE
+        actions.contentDescription = "Más opciones para ${value.title}"
     }
 
     private fun showActionsMenu(anchor: View) {
@@ -498,12 +513,23 @@ internal class NativeTrackHolder(
             menu.add(0, MENU_QUEUE, 0, "Agregar a cola de reproducción")
             menu.add(0, MENU_FAVORITE, 1, if (vm.isFavorite(current.id)) "Quitar de Me gusta" else "Me gusta")
             menu.add(0, MENU_ALBUM, 2, "Agregar a álbum")
-            if (current.isDownloaded) menu.add(0, MENU_DELETE, 3, "Eliminar canción")
+            if (onRemoveFromPlaylist != null) menu.add(0, MENU_REMOVE_FROM_PLAYLIST, 3, "Quitar de esta playlist")
+            when {
+                current.isDownloaded && !current.audioUri.isNullOrBlank() ->
+                    menu.add(0, MENU_DELETE, 4, "Eliminar canción descargada")
+                currentProgress != null ->
+                    menu.add(0, MENU_CANCEL_DOWNLOAD, 4, "Cancelar descarga")
+                else ->
+                    menu.add(0, MENU_DOWNLOAD, 4, "Descargar")
+            }
             setOnMenuItemClickListener { item ->
                 when (item.itemId) {
                     MENU_QUEUE -> vm.addToQueue(current)
                     MENU_FAVORITE -> vm.toggleFavorite(current)
                     MENU_ALBUM -> showAlbumChooser(current)
+                    MENU_REMOVE_FROM_PLAYLIST -> confirmPlaylistRemoval(current)
+                    MENU_DOWNLOAD -> vm.requestDownload(current)
+                    MENU_CANCEL_DOWNLOAD -> vm.cancelDownload(current.id)
                     MENU_DELETE -> confirmTrackDeletion(current)
                 }
                 true
@@ -584,6 +610,16 @@ internal class NativeTrackHolder(
         dialog.show()
     }
 
+    private fun confirmPlaylistRemoval(current: Track) {
+        val remove = onRemoveFromPlaylist ?: return
+        android.app.AlertDialog.Builder(itemView.context)
+            .setTitle("Quitar de la playlist")
+            .setMessage("¿Quieres quitar \"${current.title}\" de esta playlist? El archivo descargado no se borrará del dispositivo.")
+            .setPositiveButton("Quitar") { _, _ -> remove(current) }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
     private fun confirmTrackDeletion(current: Track) {
         android.app.AlertDialog.Builder(itemView.context)
             .setTitle("Eliminar canción")
@@ -605,6 +641,7 @@ internal class NativeTrackHolder(
         progressJob?.cancel()
         progressJob = null
         progressFlow = null
+        currentProgress = null
     }
 
     private companion object {
@@ -612,6 +649,9 @@ internal class NativeTrackHolder(
         const val MENU_FAVORITE = 2
         const val MENU_ALBUM = 3
         const val MENU_DELETE = 4
+        const val MENU_REMOVE_FROM_PLAYLIST = 5
+        const val MENU_DOWNLOAD = 6
+        const val MENU_CANCEL_DOWNLOAD = 7
     }
 }
 
@@ -647,6 +687,19 @@ private class NativeMoreButton(context: Context) : View(context) {
         canvas.drawCircle(cx, cy - gap, radius, paint)
         canvas.drawCircle(cx, cy, radius, paint)
         canvas.drawCircle(cx, cy + gap, radius, paint)
+    }
+}
+
+private fun installTrackPressFeedback(view: View) {
+    view.isClickable = true
+    view.setOnTouchListener { target, event ->
+        when (event.actionMasked) {
+            android.view.MotionEvent.ACTION_DOWN -> target.animate()
+                .scaleX(0.985f).scaleY(0.985f).alpha(0.84f).setDuration(65L).start()
+            android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> target.animate()
+                .scaleX(1f).scaleY(1f).alpha(1f).setDuration(110L).start()
+        }
+        false
     }
 }
 
@@ -811,6 +864,7 @@ internal class PlaylistDetailAdapter(
     private var headerContent: (@Composable () -> Unit)? = null
     private var rowClick: ((Track) -> Unit)? = null
     private var playNew: ((Track) -> Unit)? = null
+    private var removeFromPlaylist: ((Track) -> Unit)? = null
     private var playlists: List<Playlist> = emptyList()
     private var albums: List<Album> = emptyList()
     private var tracksCache: List<Track> = emptyList()
@@ -829,7 +883,15 @@ internal class PlaylistDetailAdapter(
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder =
         if (viewType == TYPE_HEADER) ComposeRowHolder(parent)
-        else NativeTrackHolder(parent.context, vm, hybridDesign, rowClick, playNew)
+        else NativeTrackHolder(
+            parent.context,
+            vm,
+            hybridDesign,
+            onRowClick = { track -> rowClick?.invoke(track) },
+            onPlayNew = { track -> playNew?.invoke(track) },
+            onRemoveFromPlaylist = { track -> removeFromPlaylist?.invoke(track) },
+            allowMissingTrackLongPressRemoval = true
+        )
 
     override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
         if (position == 0) {
@@ -870,6 +932,7 @@ internal class PlaylistDetailAdapter(
         isPlaying: Boolean,
         onRowClick: (Track) -> Unit,
         onPlayNew: (Track) -> Unit,
+        onRemoveFromPlaylist: (Track) -> Unit,
         header: @Composable () -> Unit
     ) {
         // This update runs on every recomposition of the hosting screen. Skip
@@ -884,6 +947,7 @@ internal class PlaylistDetailAdapter(
         this.headerContent = header
         this.rowClick = onRowClick
         this.playNew = onPlayNew
+        this.removeFromPlaylist = onRemoveFromPlaylist
         this.playlists = playlists
         this.albums = albums
         this.selectedTrackId = selectedTrackId

@@ -1,5 +1,8 @@
 # MusicVault para Linux x86_64
 
+La versión 0.9.7 simplifica la importación: Spotify se administra únicamente desde Ajustes, se elimina el formulario manual de playlists porque los enlaces se autodetectan, y la importación de música local se mueve a Ajustes → Biblioteca y almacenamiento mediante selección de una carpeta completa.
+La versión 0.9.7 rediseña por completo Ajustes, elimina el ecualizador y conserva las mejoras de interfaz de 0.9.2: convierte Play/Pausa en un control circular real, simplifica la barra lateral eliminando el encabezado redundante “TU BIBLIOTECA” y el acceso separado “Descargas”, mueve crear colección junto a “TUS COLECCIONES”, elimina textos explicativos persistentes, simplifica Buscar a campo + botón, desactiva la búsqueda remota mientras se escribe, unifica el estilo de botones/listas desplegables/menús y permite saltar con un clic a cualquier punto de la barra de reproducción.
+
 Aplicación de escritorio nativa en español, con Qt 6, libmpv y SQLite. No requiere Android, Java, emulador ni navegador. Esta versión utiliza Python 3 para la lógica y bibliotecas nativas para la interfaz y el audio.
 
 ## Ejecutar desde este repositorio
@@ -14,9 +17,9 @@ Todos los comandos siguientes se ejecutan desde la carpeta `linux/` (`cd linux` 
 El lanzador usa `/usr/bin/python3` para encontrar los paquetes instalados por la distribución, independientemente de pyenv o de un entorno virtual activo. Puedes elegir otro intérprete con `MUSICVAULT_PYTHON=/ruta/python`.
 
 
-La versión 0.8.0 sincroniza la experiencia con Android: onboarding local por géneros/artistas, recomendaciones balanceadas y precargadas, búsqueda separada Canciones/Álbumes con respuestas independientes, creación/importación de playlists con buscador, carátula automática, eliminación directa, caché de álbumes y listas nativas acotadas para evitar tirones.
+La versión 0.9.7 incorpora el modelo de reproducción de Android: streaming inmediato para resultados remotos, caché temporal de 24 h/1 GB reutilizable al descargar, preparación secuencial de las canciones visibles, búsqueda unificada Canciones/Álbumes/Playlists, playlists de YouTube reproducibles e importables sin descarga y menús donde Descargar es siempre una acción explícita. El onboarding ya no pregunta gustos cuando existe música local o descargada: usa la biblioteca como señal inicial para las recomendaciones.
 
-La versión 0.8.0 conserva la distribución inspirada en Spotify de escritorio: barra lateral permanente con playlists, búsqueda superior, accesos rápidos, estantes de portadas y controles inferiores con una barra de progreso amplia. Conserva la paleta carbón, ámbar y marfil, las fuentes originales y la tornamesa HV-01. Se adapta desde 920 × 680 hasta ventanas amplias. La biblioteca muestra únicamente archivos locales disponibles; las descargas fallidas permanecen en Descargas y requieren pulsar Reintentar. Un archivo descargado se reutiliza aunque se reproduzca desde resultados antiguos del catálogo.
+La versión 0.9.7 conserva la distribución inspirada en Spotify de escritorio: barra lateral permanente con playlists, búsqueda superior, accesos rápidos, estantes de portadas y controles inferiores con una barra de progreso amplia. Conserva la paleta carbón, ámbar y marfil, las fuentes originales y la tornamesa HV-01. Se adapta desde 920 × 680 hasta ventanas amplias. La biblioteca muestra únicamente archivos locales disponibles; los estados de descarga y reintento siguen disponibles desde las acciones y avisos correspondientes, sin ocupar una sección separada en la barra lateral. Un archivo descargado se reutiliza aunque se reproduzca desde resultados antiguos del catálogo.
 
 En Debian 12/13 o Ubuntu 24.04/26.04, instala las dependencias si el diagnóstico indica que faltan:
 
@@ -34,7 +37,7 @@ Para actualizar el motor incluido durante el desarrollo: `python3 packaging/fetc
 
 - Tabla con modelo virtual: no crea seis objetos por canción. Las portadas se solicitan para las filas visibles y se conservan hasta 128 miniaturas de 96 píxeles.
 - Solicitudes de portada compartidas, caché de rutas limitada y dos trabajadores dedicados para no ocupar los de búsqueda y descargas.
-- Filtro local con espera de 140 ms y catálogo con 600 ms; las búsquedas anteriores se cancelan al cambiar de consulta o sección.
+- La búsqueda remota solo se ejecuta al pulsar Enter o Buscar; cambiar el texto únicamente cancela trabajos anteriores y prepara el estado local de la interfaz.
 - La selección se conserva al actualizar; cambiar de canción repinta solo las filas implicadas. El progreso de descarga actualiza su elemento sin reconstruir la lista.
 - La animación del vinilo detiene su temporizador cuando está oculto o termina de volver a reposo. Las letras ocultas no se desplazan en segundo plano.
 
@@ -50,21 +53,21 @@ python3 packaging/build.py
 
 Produce:
 
-- `dist/musicvault_0.8.0_amd64.deb`: instala el lanzador, icono y entrada del menú de aplicaciones. Declara las dependencias para que APT pueda resolverlas.
-- `dist/MusicVault-0.8.0-linux-x86_64.tar.gz`: distribución reubicable del código y recursos, con un lanzador `MusicVault`. **Requiere las dependencias del sistema; no es un binario autocontenido ni un AppImage.**
+- `dist/musicvault_0.9.7_amd64.deb`: instala el lanzador, icono y entrada del menú de aplicaciones. Declara las dependencias para que APT pueda resolverlas.
+- `dist/MusicVault-0.9.7-linux-x86_64.tar.gz`: distribución reubicable del código y recursos, con un lanzador `MusicVault`. **Requiere las dependencias del sistema; no es un binario autocontenido ni un AppImage.**
 
 Instalar el paquete Debian/Ubuntu:
 
 ```bash
-sudo apt install ./dist/musicvault_0.8.0_amd64.deb
+sudo apt install ./dist/musicvault_0.9.7_amd64.deb
 musicvault
 ```
 
 Extraer y ejecutar la distribución reubicable:
 
 ```bash
-tar -xzf dist/MusicVault-0.8.0-linux-x86_64.tar.gz
-./MusicVault-0.8.0-linux-x86_64/MusicVault
+tar -xzf dist/MusicVault-0.9.7-linux-x86_64.tar.gz
+./MusicVault-0.9.7-linux-x86_64/MusicVault
 ```
 
 El paquete no incluye ejecutables de audio compilados en este equipo: utiliza las bibliotecas de la distribución de destino. No hay dependencia de una versión de glibc impuesta por un ejecutable compilado aquí.
@@ -76,21 +79,20 @@ El paquete no incluye ejecutables de audio compilados en este equipo: utiliza la
 - Biblioteca, búsqueda local, favoritos, historial de reproducción, playlists y álbumes personalizados: crear, renombrar, añadir, quitar y ordenar canciones.
 - Reproducción local completa; cola editable, anterior/siguiente, seek, aleatorio y repetición de una canción o de toda la cola. La cola se restaura pausada al arrancar.
 - Crossfade de 0–12 segundos con dos instancias reales de libmpv. Pausar durante la transición pausa ambos audios. Las pistas muy cortas y las pendientes de descarga usan transición normal.
-- Ecualizador de cinco bandas, ocho presets, ganancia y amplitud estéreo, con limitador. Los efectos afectan el audio de MusicVault.
 - Temporizador de sueño. Continuación opcional con canciones relacionadas de la biblioteca; prioriza álbum, artista y favoritos.
-- Búsqueda en Deezer con alternativas iTunes y MusicBrainz; búsqueda explícita en YouTube. Álbumes completos de Deezer/iTunes. Historial con autocompletado y caché de 30 minutos; resultados guardados como alternativa sin conexión.
-- Importación de playlists de Spotify mediante el lector de SongMirror integrado: en **Importar música → Playlist de Spotify mediante SongMirror…** pega el enlace, revisa las canciones y desmarca las que no quieras antes de guardarla. No requiere instalar SongMirror, Docker ni una cuenta Premium. Con una cuenta conectada, MusicVault también detecta enlaces de canciones o playlists de Spotify copiados al portapapeles y muestra una opción para importarlos.
+- Búsqueda en Deezer con alternativas iTunes/MusicBrainz y refinamiento de YouTube; pestañas **Canciones | Álbumes | Playlists**. Las playlists de YouTube pueden abrirse, reproducirse por streaming y guardarse en MusicVault sin descargar sus canciones. Historial con autocompletado y caché de resultados.
+- Importación de Spotify mediante detección automática de enlaces copiados. La cuenta se conecta o administra desde **Ajustes → Cuenta**; al copiar una canción o playlist compatible, MusicVault ofrece importarla sin un formulario manual separado.
 - Biblioteca con filtros por artista y álbum, orden por fecha/título/artista/álbum y columnas redimensionables que conservan su ancho.
 - Al descargar un álbum completo se guarda también como álbum en **Álbumes**; cada canción terminada aparece individualmente en **Biblioteca**.
-- Descargas mediante yt-dlp/FFmpeg, progreso individual, cancelación, reintento y recuperación de registros interrumpidos. Las solicitudes simultáneas de una canción comparten el mismo trabajo. Los archivos se validan y publican al terminar; las descargas parciales se limpian al cancelar.
-- Reproducir un resultado remoto descarga el audio completo antes de reproducirlo. Precarga opcional de la siguiente canción y descarga de álbum completo. Deezer/iTunes/MusicBrainz proporcionan metadatos; para esos resultados yt-dlp busca el audio por artista y título. La coincidencia depende del proveedor.
+- Descargas explícitas mediante yt-dlp/FFmpeg, progreso individual, cancelación, reintento y recuperación de registros interrumpidos. Las solicitudes simultáneas de una canción comparten el mismo trabajo y una descarga puede promocionarse desde la caché temporal de streaming sin redescargar el audio. Los archivos se validan y publican al terminar.
+- Reproducir un resultado remoto usa streaming: MusicVault resuelve el audio de YouTube, lo entrega directamente a libmpv y prepara secuencialmente las canciones más probables mientras el usuario mira la pantalla. La caché temporal conserva hasta 1 GB durante 24 h; si después eliges **Descargar**, se reutiliza el audio cacheado cuando está completo en vez de volver a pedirlo. Deezer/iTunes/MusicBrainz siguen aportando metadatos y yt-dlp resuelve la fuente reproducible.
 - Portadas en el reproductor y álbumes del catálogo, con caché en disco. Letras LRCLib y archivos `.lrc`/`.txt` vecinos al audio; letras sincronizadas con desplazamiento y seek al hacer doble clic.
 - Mini reproductor, reproductor ampliado con pantalla completa y estilos vinilo/circular. El círculo es una animación decorativa, no un analizador de frecuencias. El control RPM cambia la animación del disco.
 - Bandeja del sistema cuando el escritorio la ofrece. MPRIS 2 para controles de GNOME/KDE, teclas multimedia y `playerctl`; no requiere un widget móvil.
 
 ## Datos y portabilidad de la biblioteca
 
-Por defecto se guardan en `${XDG_DATA_HOME:-~/.local/share}/musicvault/`: base SQLite, descargas y caché de portadas. Las letras remotas se guardan en la base de datos. La carpeta de descargas se puede cambiar en Ajustes. Los archivos importados permanecen en su ubicación original.
+Por defecto se guardan en `${XDG_DATA_HOME:-~/.local/share}/musicvault/`: base SQLite, descargas, caché de portadas y caché temporal de streaming. Esta última se limita a 1 GB y caduca tras 24 h sin uso; puede limpiarse desde Ajustes. Las letras remotas se guardan en la base de datos. La carpeta de descargas se puede cambiar en Ajustes. Los archivos importados permanecen en su ubicación original.
 
 Para llevar los datos en una carpeta elegida:
 
@@ -102,20 +104,19 @@ Los audios importados y descargados se referencian mediante rutas absolutas. Mov
 
 Las bases Android/iOS y sus URI no se importan automáticamente. Para llevar música de Android, copia los archivos de audio a Linux y usa Importar. El código móvil original se conserva en `../android/app/` e `../ios/`.
 
-### Usar SongMirror con una playlist de Spotify
+### Importar desde Spotify
 
-1. En MusicVault abre **Importar música → Agregar cuenta de Spotify para SongMirror…**.
+1. En MusicVault abre **Ajustes → Cuenta → Spotify → Conectar**.
 2. Pulsa **Iniciar sesión con Spotify** y completa el acceso en el navegador integrado. Una cuenta gratuita funciona.
-3. MusicVault comprueba la sesión y guarda solamente el valor que necesita SongMirror en un archivo privado con permisos `0600`; no forma parte de las copias de la base de datos.
-4. Usa **Importar música → Playlist de Spotify mediante SongMirror…** y pega el enlace.
+3. MusicVault comprueba la sesión y guarda solamente la cookie de sesión necesaria en un archivo privado con permisos `0600`; no forma parte de las copias de la base de datos.
+4. Copia el enlace de una canción o playlist de Spotify; MusicVault lo detectará y ofrecerá importarlo.
 
-El conector de solo lectura está incluido en MusicVault, por lo que no hace falta instalar SongMirror ni mantener un servidor local. El navegador integrado usa un perfil temporal y descarta sus datos al cerrar; MusicVault no lee ni almacena la contraseña. Cada laptop conserva solamente su propia cookie de sesión y el usuario puede eliminarla desde **Importar música → Administrar cuenta de Spotify para SongMirror… → Desconectar**.
+El conector de solo lectura está incluido en MusicVault y no requiere instalar servicios adicionales ni mantener un servidor local. El navegador integrado usa un perfil temporal y descarta sus datos al cerrar; MusicVault no lee ni almacena la contraseña. Cada laptop conserva solamente su propia cookie de sesión y el usuario puede eliminarla desde **Ajustes → Cuenta → Spotify → Administrar → Desconectar**.
 
 ## Atajos
 
 | Atajo | Acción |
 | --- | --- |
-| Ctrl+O | Importar música |
 | Ctrl+F | Buscar |
 | Ctrl+P | Reproducir/pausar |
 | Alt+→ / Alt+← | Siguiente/anterior |
@@ -133,7 +134,7 @@ QT_QPA_PLATFORM=offscreen ./run.sh --smoke-test \
   --data-dir /tmp/musicvault-smoke --screenshot /tmp/musicvault.png
 ```
 
-Las pruebas de audio usan libmpv real con salida `null` y archivos WAV generados para comprobar decodificación, pausa, seek, final de pista, crossfade, ecualizador y cola. Las de red/descarga usan respuestas y procesos controlados: prueban el comportamiento del cliente sin descargar música externa. La prueba MPRIS llama al servicio desde otro proceso en un bus privado. El diagnóstico y la prueba de arranque no acreditan sonido audible en una tarjeta física ni compatibilidad con todas las distribuciones.
+Las pruebas de audio usan libmpv real con salida `null` y archivos WAV generados para comprobar decodificación, pausa, seek, final de pista, crossfade y cola. Las de red/descarga usan respuestas y procesos controlados: prueban el comportamiento del cliente sin descargar música externa. La prueba MPRIS llama al servicio desde otro proceso en un bus privado. El diagnóstico y la prueba de arranque no acreditan sonido audible en una tarjeta física ni compatibilidad con todas las distribuciones.
 
 ## Estructura
 

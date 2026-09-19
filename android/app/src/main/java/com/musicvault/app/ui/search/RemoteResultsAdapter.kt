@@ -22,6 +22,7 @@ import androidx.recyclerview.widget.RecyclerView
 import coil.request.ImageRequest
 import coil.size.Size
 import com.musicvault.app.catalog.CatalogAlbum
+import com.musicvault.app.catalog.CatalogPlaylist
 import com.musicvault.app.catalog.CatalogTrack
 import com.musicvault.app.catalog.CoverImageCache
 import kotlin.math.roundToInt
@@ -37,16 +38,20 @@ sealed interface RemoteResultItem {
     data class TrackItem(val track: CatalogTrack) : RemoteResultItem {
         override val stableId: String = "track:${track.provider}:${track.id}"
     }
+    data class PlaylistItem(val playlist: CatalogPlaylist) : RemoteResultItem {
+        override val stableId: String = "playlist:${playlist.provider}:${playlist.id}"
+    }
 }
 
-enum class MoreAction { QUEUE, ALBUM, DELETE }
+enum class MoreAction { QUEUE, ALBUM, DOWNLOAD, CANCEL_DOWNLOAD, DELETE }
 
 class RemoteResultsAdapter(
     private val onAlbumClick: (CatalogAlbum) -> Unit,
     private val onTrackClick: (CatalogTrack) -> Unit,
     private val onCancelDownload: (String) -> Unit,
     private val onMoreAction: (CatalogTrack, MoreAction) -> Unit,
-    private val onPlayToggle: (CatalogTrack) -> Unit
+    private val onPlayToggle: (CatalogTrack) -> Unit,
+    private val onPlaylistClick: (CatalogPlaylist) -> Unit = {}
 ) : ListAdapter<RemoteResultItem, RecyclerView.ViewHolder>(DIFF) {
 
     private var downloadedIds: Set<String> = emptySet()
@@ -141,12 +146,14 @@ class RemoteResultsAdapter(
         is RemoteResultItem.HeaderItem -> TYPE_HEADER
         is RemoteResultItem.AlbumItem -> TYPE_ALBUM
         is RemoteResultItem.TrackItem -> TYPE_TRACK
+        is RemoteResultItem.PlaylistItem -> TYPE_PLAYLIST
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
         return when (viewType) {
             TYPE_HEADER -> HeaderHolder(parent.context)
             TYPE_ALBUM -> AlbumHolder(parent.context, onAlbumClick)
+            TYPE_PLAYLIST -> PlaylistHolder(parent.context, onPlaylistClick)
             else -> TrackHolder(parent.context, onTrackClick, onCancelDownload, onMoreAction, onPlayToggle, ::showSearchTrackMenu)
         }
     }
@@ -167,6 +174,7 @@ class RemoteResultsAdapter(
         when {
             holder is HeaderHolder && item is RemoteResultItem.HeaderItem -> holder.bind(item.title)
             holder is AlbumHolder && item is RemoteResultItem.AlbumItem -> holder.bind(item.album)
+            holder is PlaylistHolder && item is RemoteResultItem.PlaylistItem -> holder.bind(item.playlist)
             holder is TrackHolder && item is RemoteResultItem.TrackItem -> holder.bind(
                 item.track,
                 downloadedIds,
@@ -212,6 +220,31 @@ class RemoteResultsAdapter(
         }
     }
 
+    private class PlaylistHolder(
+        context: Context,
+        private val onClick: (CatalogPlaylist) -> Unit
+    ) : RecyclerView.ViewHolder(makeRow(context, 72)) {
+        private val image = itemView.findViewWithTag<ImageView>("cover")
+        private val title = itemView.findViewWithTag<TextView>("title")
+        private val subtitle = itemView.findViewWithTag<TextView>("subtitle")
+        private var playlist: CatalogPlaylist? = null
+
+        init {
+            installPressFeedback(itemView)
+            itemView.setOnClickListener { playlist?.let(onClick) }
+        }
+
+        fun bind(value: CatalogPlaylist) {
+            playlist = value
+            title.text = value.title
+            subtitle.text = buildString {
+                append(value.uploaderName.ifBlank { "YouTube" })
+                if (value.trackCount > 0) append(" · ${value.trackCount} elementos")
+            }
+            loadCover(itemView.context, image, value.coverUri, 56)
+        }
+    }
+
     private class TrackHolder(
         context: Context,
         private val onClick: (CatalogTrack) -> Unit,
@@ -230,6 +263,7 @@ class RemoteResultsAdapter(
         private var track: CatalogTrack? = null
 
         init {
+            installPressFeedback(itemView)
             itemView.setOnClickListener { track?.let(onClick) }
             play.setOnClickListener {
                 track?.let { t ->
@@ -276,23 +310,13 @@ class RemoteResultsAdapter(
             progressBar.visibility = if (downloading) View.VISIBLE else View.GONE
             if (downloading) progressBar.progress = (p ?: 0).coerceIn(0, 100)
 
-            // Search results start with only Play visible. During a download the
-            // spinner is the only action. Once the repository reports the exact
-            // persisted local ID, Play is removed permanently and only More remains.
-            if (downloading) {
-                // While a remote track is being downloaded, the action area is
-                // exclusively the animated spinner. Neither Play nor More is
-                // available until the file has actually been persisted.
-                play.visibility = View.GONE
-                more.visibility = View.GONE
-            } else {
-                play.visibility = if (downloaded) View.GONE else View.VISIBLE
-                // Once persisted, the row is opened by tapping the song itself;
-                // keep only the overflow menu to avoid duplicating playback UI.
-                more.visibility = if (downloaded) View.VISIBLE else View.GONE
-                more.setDotsColor(Color.parseColor("#F1EAD9"))
-                play.mode = if (isPlaying && selectedTrackId == localId) StyledPlayButton.Mode.PAUSE else StyledPlayButton.Mode.PLAY
-            }
+            // Row tap is now the universal playback action (local or streaming).
+            // The trailing affordance is always the overflow menu; download is
+            // an explicit action inside that menu instead of a Play button.
+            play.visibility = View.GONE
+            more.visibility = View.VISIBLE
+            more.setDotsColor(Color.parseColor("#F1EAD9"))
+            play.mode = if (isPlaying && selectedTrackId == localId) StyledPlayButton.Mode.PAUSE else StyledPlayButton.Mode.PLAY
             title.setTextColor(if (isPlaying && selectedTrackId == localId) Color.parseColor("#E0A458") else Color.parseColor("#F1EAD9"))
         }
 
@@ -402,8 +426,10 @@ class RemoteResultsAdapter(
         addItem("Agregar a cola de reproducción", MoreAction.QUEUE)
         addItem("Agregar a álbum", MoreAction.ALBUM)
         val localId = "${track.provider}:recording:${track.id}"
-        if (localId in downloadedIds) {
-            addItem("Eliminar canción", MoreAction.DELETE)
+        when {
+            localId in downloadedIds -> addItem("Eliminar canción descargada", MoreAction.DELETE)
+            progress.containsKey(localId) -> addItem("Cancelar descarga", MoreAction.CANCEL_DOWNLOAD)
+            else -> addItem("Descargar", MoreAction.DOWNLOAD)
         }
 
         popup = PopupWindow(container, dp(220), ViewGroup.LayoutParams.WRAP_CONTENT, true).apply {
@@ -449,6 +475,7 @@ class RemoteResultsAdapter(
         private const val TYPE_HEADER = 1
         private const val TYPE_ALBUM = 2
         private const val TYPE_TRACK = 3
+        private const val TYPE_PLAYLIST = 4
         private const val PAYLOAD_STATE = "state"
 
         private val DIFF = object : DiffUtil.ItemCallback<RemoteResultItem>() {
@@ -565,6 +592,19 @@ class RemoteResultsAdapter(
                 "%d:%02d:%02d".format(hours, minutes, seconds)
             } else {
                 "%d:%02d".format(minutes, seconds)
+            }
+        }
+
+        private fun installPressFeedback(view: View) {
+            view.isClickable = true
+            view.setOnTouchListener { target, event ->
+                when (event.actionMasked) {
+                    android.view.MotionEvent.ACTION_DOWN -> target.animate()
+                        .scaleX(0.985f).scaleY(0.985f).alpha(0.82f).setDuration(65L).start()
+                    android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> target.animate()
+                        .scaleX(1f).scaleY(1f).alpha(1f).setDuration(110L).start()
+                }
+                false
             }
         }
 
