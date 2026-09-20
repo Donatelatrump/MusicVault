@@ -41,11 +41,10 @@ class MainActivity : ComponentActivity() {
      */
     private val storagePermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { results ->
-            val anyGranted = results.values.any { granted -> granted }
             val totalRequested = results.size
             val denied = results.values.count { granted -> !granted }
             viewModel.onStoragePermissionResult(
-                granted = anyGranted,
+                granted = totalRequested > 0 && denied == 0,
                 totalRequested = totalRequested,
                 denied = denied
             )

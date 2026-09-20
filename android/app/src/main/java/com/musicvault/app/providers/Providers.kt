@@ -1,5 +1,6 @@
 package com.musicvault.app.providers
 
+import android.annotation.SuppressLint
 import android.content.Context
 import androidx.core.content.FileProvider
 import com.musicvault.app.catalog.CatalogTrack
@@ -39,6 +40,10 @@ data class StreamResolution(
     val mimeType: String
 )
 
+// CacheWriter is an intentionally pinned Media3 integration (see the pinned
+// Media3 version in app/build.gradle.kts). Keep the unstable-API acceptance
+// local to this boundary instead of forcing every Providers caller to opt in.
+@SuppressLint("UnsafeOptInUsageError")
 object Providers {
     private const val UPDATE_PREFS = "musicvault_provider"
     private const val LAST_UPDATE_CHECK = "last_ytdlp_update_check"

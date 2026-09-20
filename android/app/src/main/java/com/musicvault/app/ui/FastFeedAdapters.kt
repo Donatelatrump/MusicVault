@@ -933,7 +933,8 @@ internal class PlaylistDetailAdapter(
         onRowClick: (Track) -> Unit,
         onPlayNew: (Track) -> Unit,
         onRemoveFromPlaylist: (Track) -> Unit,
-        header: @Composable () -> Unit
+        header: @Composable () -> Unit,
+        onListCommitted: (() -> Unit)? = null
     ) {
         // This update runs on every recomposition of the hosting screen. Skip
         // the whole rebuild (and DiffUtil) when nothing the rows render changed.
@@ -961,6 +962,7 @@ internal class PlaylistDetailAdapter(
                     if (oldSelected != null) currentList.indexOfFirst { it.id == oldSelected }.takeIf { it >= 0 }?.let { notifyItemChanged(it + 1, STATE_PAYLOAD) }
                     if (selectedTrackId != null && selectedTrackId != oldSelected) currentList.indexOfFirst { it.id == selectedTrackId }.takeIf { it >= 0 }?.let { notifyItemChanged(it + 1, STATE_PAYLOAD) }
                 }
+                onListCommitted?.invoke()
             }
         } else {
             // Same row set: refresh only the header and the affected rows

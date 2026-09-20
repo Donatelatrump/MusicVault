@@ -573,54 +573,71 @@ fun MusicVaultApp(
                 }
             }
 
-            // Detail screens are true full-content overlays. They must cover the
-            // section header and the underlying Albums/Favorites list as well;
-            // otherwise the persistent section remains visible around the detail.
-            if (state.selectedLocalAlbum != null || state.selectedRemoteAlbum != null || state.selectedPlaylist != null) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .zIndex(20f)
-                        .background(VaultColors.Background)
-                ) {
-                state.selectedLocalAlbum?.let { album ->
-                    LocalAlbumDetail(
-                        album = album,
-                        tracks = state.selectedLocalAlbumTracks,
-                        isPlaying = isPlaying,
-                        selectedTrackId = state.selectedTrack?.id,
-                        playlists = state.playlists,
-                        albums = state.albums,
-                        vm = vm
-                    )
+        }
+        // Detail navigation is a sibling of Scaffold so it can cover the main
+        // navigation. Keep its own mini-player at the bottom, though: otherwise
+        // playback started from a detail screen is hidden until that screen is
+        // closed.
+        if (state.selectedLocalAlbum != null || state.selectedRemoteAlbum != null || state.selectedPlaylist != null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .zIndex(20f)
+                    .background(VaultColors.Background)
+            ) {
+                Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
+                    Box(Modifier.weight(1f).fillMaxWidth()) {
+                        state.selectedLocalAlbum?.let { album ->
+                            LocalAlbumDetail(
+                                album = album,
+                                tracks = state.selectedLocalAlbumTracks,
+                                isPlaying = isPlaying,
+                                selectedTrackId = state.selectedTrack?.id,
+                                playlists = state.playlists,
+                                albums = state.albums,
+                                vm = vm
+                            )
+                        }
+                        state.selectedRemoteAlbum?.let { album ->
+                            RemoteAlbumDetail(
+                                album = album,
+                                tracks = state.remoteAlbumTracks,
+                                albumDownloads = albumDownloads,
+                                isPlaying = isPlaying,
+                                selectedTrackId = state.selectedTrack?.id,
+                                loading = state.isLoadingRemoteAlbum,
+                                localTracks = state.tracks,
+                                playlists = state.playlists,
+                                albums = state.albums,
+                                vm = vm
+                            )
+                        }
+                        state.selectedPlaylist?.let { playlist ->
+                            PlaylistDetail(
+                                playlist = playlist,
+                                tracks = state.selectedPlaylistTracks,
+                                isDownloading = playlist.id in albumDownloads,
+                                isPlaying = isPlaying,
+                                selectedTrackId = state.selectedTrack?.id,
+                                playlists = state.playlists,
+                                albums = state.albums,
+                                vm = vm
+                            )
+                        }
+                    }
+                    state.selectedTrack?.let { track ->
+                        MiniPlayer(
+                            track = track,
+                            isPlaying = isPlaying,
+                            onToggle = vm::togglePlayback,
+                            onOpen = vm::openFullPlayer,
+                            favorite = track.id in favoriteIds,
+                            onFavorite = { vm.toggleFavorite(track) },
+                            hybrid = state.appDesign == APP_DESIGN_HYBRID,
+                            vm = vm
+                        )
+                    }
                 }
-                state.selectedRemoteAlbum?.let { album ->
-                    RemoteAlbumDetail(
-                        album = album,
-                        tracks = state.remoteAlbumTracks,
-                        albumDownloads = albumDownloads,
-                        isPlaying = isPlaying,
-                        selectedTrackId = state.selectedTrack?.id,
-                        loading = state.isLoadingRemoteAlbum,
-                        localTracks = state.tracks,
-                        playlists = state.playlists,
-                        albums = state.albums,
-                        vm = vm
-                    )
-                }
-                state.selectedPlaylist?.let { playlist ->
-                    PlaylistDetail(
-                        playlist = playlist,
-                        tracks = state.selectedPlaylistTracks,
-                        isDownloading = playlist.id in albumDownloads,
-                        isPlaying = isPlaying,
-                        selectedTrackId = state.selectedTrack?.id,
-                        playlists = state.playlists,
-                        albums = state.albums,
-                        vm = vm
-                    )
-                }
-            }
             }
         }
         AnimatedVisibility(
@@ -2700,7 +2717,7 @@ private fun PlaylistDetail(
                 trackCount = tracks.size,
                 isDownloading = isDownloading,
                 pendingDownloads = pendingDownloads,
-                onBack = vm::clearSelection,
+                onBack = vm::closePlaylist,
                 onPlay = { vm.playPlaylist(playlist, shuffle = false) },
                 onShuffle = { vm.playPlaylist(playlist, shuffle = true) },
                 onDownload = { vm.downloadPlaylist(playlist) }
@@ -2711,6 +2728,21 @@ private fun PlaylistDetail(
         modifier = Modifier.fillMaxSize(),
         factory = { ctx ->
             RecyclerView(ctx).apply {
+                // Configure the header before attaching the adapter. Attaching
+                // first lets RecyclerView bind a zero-height ComposeView for one
+                // frame, so the first track briefly appears at the top and then
+                // jumps down when the header finishes composing.
+                adapter.update(
+                    tracks = tracks,
+                    playlists = playlists,
+                    albums = customAlbums,
+                    selectedTrackId = selectedTrackId,
+                    isPlaying = isPlaying,
+                    onRowClick = { vm.playPlaylistTrack(playlist, it) },
+                    onPlayNew = { vm.playPlaylistTrack(playlist, it) },
+                    onRemoveFromPlaylist = { vm.removeTrackFromPlaylist(playlist.id, it.id) },
+                    header = headerContent
+                )
                 layoutManager = LinearLayoutManager(ctx).also {
                     it.isItemPrefetchEnabled = true
                     it.initialPrefetchItemCount = 6
@@ -2740,15 +2772,17 @@ private fun PlaylistDetail(
                 onRowClick = { vm.playPlaylistTrack(playlist, it) },
                 onPlayNew = { vm.playPlaylistTrack(playlist, it) },
                 onRemoveFromPlaylist = { vm.removeTrackFromPlaylist(playlist.id, it.id) },
-                header = headerContent
-            )
-            if (resetScrollOnOpen.value) {
-                resetScrollOnOpen.value = false
-                recyclerView.post {
-                    (recyclerView.layoutManager as? LinearLayoutManager)
-                        ?.scrollToPositionWithOffset(0, 0)
+                header = headerContent,
+                onListCommitted = {
+                    if (resetScrollOnOpen.value) {
+                        resetScrollOnOpen.value = false
+                        recyclerView.post {
+                            (recyclerView.layoutManager as? LinearLayoutManager)
+                                ?.scrollToPositionWithOffset(0, 0)
+                        }
+                    }
                 }
-            }
+            )
         }
     )
 }

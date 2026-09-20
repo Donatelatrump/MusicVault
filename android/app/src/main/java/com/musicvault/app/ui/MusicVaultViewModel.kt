@@ -1214,7 +1214,9 @@ class MusicVaultViewModel(
         _section.value = section
         if (section != AppSection.PLAYLISTS) {
             _selectedPlaylist.value = null
+            _selectedPlaylistTracks.value = emptyList()
             playlistJob?.cancel()
+            playlistJob = null
         }
         if (section != AppSection.LIBRARY && section != AppSection.HOME) {
             closeLocalAlbum()
@@ -2467,10 +2469,18 @@ class MusicVaultViewModel(
         // detail (especially noticeable when opening Favoritos from Álbumes).
         closeLocalAlbum()
         closeRemoteAlbum()
-        _selectedPlaylist.value = playlist
         playlistJob?.cancel()
+        playlistJob = null
+        // Never render a newly selected title with rows retained from the
+        // previously observed playlist while Room prepares its first emission.
+        _selectedPlaylistTracks.value = emptyList()
+        _selectedPlaylist.value = playlist
         playlistJob = viewModelScope.launch {
-            repository.playlistTracks(playlist.id).collect { _selectedPlaylistTracks.value = it }
+            repository.playlistTracks(playlist.id).collect { tracks ->
+                if (_selectedPlaylist.value?.id == playlist.id) {
+                    _selectedPlaylistTracks.value = tracks
+                }
+            }
         }
     }
 
