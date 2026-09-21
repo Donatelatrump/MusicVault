@@ -209,7 +209,7 @@ object Providers {
                 if (direct != null) {
                     val newPipeStarted = SystemClock.elapsedRealtime()
                     val newPipe = try {
-                        NewPipeStreamResolver.resolveAudio(direct!!)
+                        NewPipeStreamResolver.resolveAudio(direct!!, cacheKey)
                     } catch (error: Exception) {
                         currentCoroutineContext().ensureActive()
                         android.util.Log.d(

@@ -5,6 +5,9 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URLEncoder
 import java.net.URL
+import java.text.Normalizer
+import kotlin.math.abs
+import kotlin.math.max
 
 /** One timed line of a synced (LRC) lyric. */
 data class LyricLine(val timeMs: Long, val text: String)
@@ -20,6 +23,7 @@ data class Lyrics(val plain: String?, val synced: List<LyricLine>) {
  */
 object LyricsProvider {
     private val lrcTimestamp = Regex("""\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]""")
+    private val lrcOffset = Regex("""(?im)^\s*\[offset\s*:\s*([+-]?\d+)\s*]\s*$""")
     // Quality gates: LRCLib's exact /api/get endpoint can return degenerate
     // records (single-line troll entries, "[00:00] *Rickrolling*", instrumental
     // placeholders). Accepting them made the player show "complete" lyrics with
@@ -28,8 +32,55 @@ object LyricsProvider {
     private const val MIN_SYNCED_LINES = 5
     private const val MIN_PLAIN_CHARS = 80
 
+    /**
+     * A search result from a substantially different edit (live, remix, radio
+     * cut) can contain perfectly valid LRC timestamps that will never line up
+     * with the audio being played. Keep a generous allowance for video intros
+     * and outro differences, but reject clearly incompatible versions.
+     */
+    private fun durationIsCompatible(localMs: Long, remoteMs: Long): Boolean {
+        if (localMs <= 0L || remoteMs <= 0L) return true
+        val allowance = max(30_000L, localMs * 12L / 100L)
+        return abs(localMs - remoteMs) <= allowance
+    }
+
     private fun isUsable(lyrics: Lyrics): Boolean =
         lyrics.synced.size >= MIN_SYNCED_LINES || (lyrics.plain?.length ?: 0) >= MIN_PLAIN_CHARS
+
+    private fun normalizedTokens(value: String): Set<String> = Normalizer
+        .normalize(value.lowercase(Locale.ROOT), Normalizer.Form.NFD)
+        .replace(Regex("\\p{M}+"), "")
+        .split(Regex("[^a-z0-9]+"))
+        .filterTo(linkedSetOf()) { it.length > 1 }
+
+    private fun metadataMatches(requested: String, candidate: String): Boolean {
+        if (candidate.isBlank()) return true
+        val expected = normalizedTokens(requested)
+        val actual = normalizedTokens(candidate)
+        if (expected.isEmpty() || actual.isEmpty()) return true
+        val overlap = expected.count { it in actual }
+        return overlap.toDouble() / minOf(expected.size, actual.size) >= 0.6
+    }
+
+    /**
+     * Enables timed highlighting only when the timestamps cover a plausible
+     * portion of this exact audio. This is deliberately CPU-only and O(lines):
+     * it adds no request, decoding pass, or perceptible loading time.
+     */
+    internal fun keepOnlyTrustedSync(lyrics: Lyrics, durationMs: Long): Lyrics {
+        if (lyrics.synced.size < MIN_SYNCED_LINES) return lyrics.copy(synced = emptyList())
+        if (durationMs <= 0L) return lyrics
+        val first = lyrics.synced.first().timeMs
+        val last = lyrics.synced.last().timeMs
+        val plausible = first <= minOf(90_000L, durationMs * 40L / 100L) &&
+            last >= durationMs * 45L / 100L &&
+            last <= durationMs + 10_000L &&
+            lyrics.synced.map { it.timeMs }.distinct().size >= MIN_SYNCED_LINES
+        return if (plausible) lyrics else lyrics.copy(
+            plain = lyrics.plain ?: lyrics.synced.joinToString("\n") { it.text },
+            synced = emptyList()
+        )
+    }
 
     fun buildLrc(lyrics: Lyrics): String = when {
         lyrics.synced.isNotEmpty() -> buildString {
@@ -68,7 +119,9 @@ object LyricsProvider {
             }
             getBody(query)
         }.getOrNull()
-        val direct = exact?.let { body -> runCatching { toLyrics(JSONObject(body)) }.getOrNull() }
+        val direct = exact?.let { body ->
+            runCatching { keepOnlyTrustedSync(toLyrics(JSONObject(body)) ?: return@runCatching null, durationMs) }.getOrNull()
+        }
         if (direct != null && isUsable(direct)) return direct
 
         // 2. Search fallback without strict duration constraint, to find official studio lyrics
@@ -84,16 +137,22 @@ object LyricsProvider {
 
         val best = candidates
             .asSequence()
+            .filter { record ->
+                metadataMatches(title, record.optString("trackName")) &&
+                    metadataMatches(artist, record.optString("artistName"))
+            }
             .mapNotNull { record ->
-                val lyrics = runCatching { toLyrics(record) }.getOrNull() ?: return@mapNotNull null
+                val rawLyrics = runCatching { toLyrics(record) }.getOrNull() ?: return@mapNotNull null
+                val lyrics = keepOnlyTrustedSync(rawLyrics, durationMs)
                 val remoteMs = record.optLong("duration", 0L) * 1000L
                 lyrics to remoteMs
             }
             .filter { (lyrics, _) -> isUsable(lyrics) }
+            .filter { (_, remoteMs) -> durationIsCompatible(durationMs, remoteMs) }
             .minByOrNull { (lyrics, remoteMs) ->
                 val syncedPenalty = if (lyrics.synced.size >= MIN_SYNCED_LINES) 0 else 60_000
                 val durationPenalty = if (durationSeconds != null && remoteMs > 0) {
-                    kotlin.math.abs(remoteMs - durationMs)
+                    abs(remoteMs - durationMs)
                 } else 0L
                 syncedPenalty + durationPenalty
             }
@@ -101,7 +160,7 @@ object LyricsProvider {
         // Duration is useful for choosing a candidate, but it cannot establish a
         // vocal offset: different masters frequently have different outros.  The
         // caller aligns local audio with VocalActivityDetector when it has a file.
-        return best?.first ?: candidates.firstOrNull()?.let { toLyrics(it) }
+        return best?.first
     }
 
     private fun toLyrics(record: JSONObject): Lyrics? = runCatching {
@@ -113,6 +172,12 @@ object LyricsProvider {
     /** Parses LRC text: "01:23.45 line" — supports multiple timestamps per line. */
     private fun parseLrc(raw: String): List<LyricLine> {
         val lines = mutableListOf<LyricLine>()
+        // Standard LRC files may declare one global millisecond correction.
+        // Applying it while parsing also covers locally stored lyrics and keeps
+        // every consumer on the same corrected timeline.
+        val globalOffsetMs = lrcOffset.findAll(raw).lastOrNull()
+            ?.groupValues?.getOrNull(1)?.toLongOrNull()
+            ?.coerceIn(-30_000L, 30_000L) ?: 0L
         raw.lineSequence().forEach { line ->
             val matches = lrcTimestamp.findAll(line).toList()
             if (matches.isEmpty()) return@forEach
@@ -128,7 +193,8 @@ object LyricsProvider {
                     2 -> fraction.toLong() * 10L
                     else -> fraction.take(3).toLong()
                 }
-                lines += LyricLine(minutes * 60_000L + seconds * 1000L + fractionMs, text)
+                val timeMs = minutes * 60_000L + seconds * 1000L + fractionMs + globalOffsetMs
+                lines += LyricLine(timeMs.coerceAtLeast(0L), text)
             }
         }
         return lines.sortedBy { it.timeMs }

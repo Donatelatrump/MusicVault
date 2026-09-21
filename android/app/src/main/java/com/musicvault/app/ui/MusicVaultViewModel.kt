@@ -49,6 +49,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.flow.*
 import com.musicvault.app.player.AudioSessionBridge
 
@@ -473,6 +475,60 @@ class MusicVaultViewModel(
     private var lyricsJob: Job? = null
     private val lyricsCache = LinkedHashMap<String, LyricsUiState>()
 
+    private suspend fun fastestLyrics(track: Track, localReference: String?): com.musicvault.app.lyrics.Lyrics? = coroutineScope {
+        val sourceVideoId = track.sourceId?.takeIf { it.length == 11 }
+            ?: Regex("(?:[?&]v=|youtu\\.be/)([A-Za-z0-9_-]{11})").find(track.url.orEmpty())?.groupValues?.get(1)
+        // resolveAudio also indexes captions by the logical track id. This is
+        // essential for Spotify/Deezer entries whose sourceId is not YouTube's
+        // 11-character id even though their audio was matched to YouTube.
+        val captionKey = listOf(track.id, sourceVideoId).firstOrNull(NewPipeStreamResolver::hasCachedYoutubeCaptions)
+        val exactVideoCaptionsAvailable = captionKey != null
+        val youtube = async {
+            runCatching { NewPipeStreamResolver.cachedYoutubeLyrics(captionKey) }.getOrNull()?.let {
+                LyricsProvider.keepOnlyTrustedSync(it, track.durationMs)
+            }
+        }
+        val lrclib = async {
+            runCatching {
+                LyricsProvider.fetch(
+                    artist = track.artistName,
+                    title = track.title,
+                    album = track.albumTitle.takeIf { it.isNotBlank() && !it.equals("Álbum desconocido", ignoreCase = true) },
+                    durationMs = track.durationMs
+                )
+            }.getOrNull()?.let {
+                LyricsProvider.keepOnlyTrustedSync(
+                    VocalActivityDetector.align(appContext, localReference, it),
+                    track.durationMs
+                )
+            }
+        }
+        // Captions from the exact video own its timeline. Do not let a faster
+        // LRCLib response for the studio edit beat them (e.g. Stressed Out's
+        // official video starts singing at 16.585s). LRCLib still runs in
+        // parallel, so a failed caption fetch adds no second serial wait.
+        if (exactVideoCaptionsAvailable) {
+            val exact = youtube.await()
+            if (exact != null && !exact.isEmpty) {
+                lrclib.cancel()
+                return@coroutineScope exact
+            }
+            return@coroutineScope lrclib.await()
+        }
+
+        val first = select<Pair<Boolean, com.musicvault.app.lyrics.Lyrics?>> {
+            youtube.onAwait { true to it }
+            lrclib.onAwait { false to it }
+        }
+        val firstLyrics = first.second
+        if (firstLyrics != null && !firstLyrics.isEmpty) {
+            if (first.first) lrclib.cancel() else youtube.cancel()
+            firstLyrics
+        } else {
+            if (first.first) lrclib.await() else youtube.await()
+        }
+    }
+
     fun loadLyrics(track: Track) {
         if (_lyrics.value.trackId == track.id && (_lyrics.value.loading || _lyrics.value.notFound ||
                 _lyrics.value.plain != null || _lyrics.value.synced.isNotEmpty())
@@ -480,7 +536,9 @@ class MusicVaultViewModel(
         lyricsJob?.cancel()
         lyricsJob = viewModelScope.launch(Dispatchers.IO) {
             val localReference = database.downloadRecordDao().get(track.id)?.path ?: track.audioUri
-            val local = LyricsLocalStore.read(appContext, localReference)
+            val local = LyricsLocalStore.read(appContext, localReference)?.let {
+                LyricsProvider.keepOnlyTrustedSync(it, track.durationMs)
+            }
             val state = when {
                 local != null && !local.isEmpty -> LyricsUiState(
                     trackId = track.id,
@@ -490,15 +548,7 @@ class MusicVaultViewModel(
                 lyricsCache[track.id] != null -> lyricsCache[track.id]!!
                 else -> {
                     _lyrics.value = LyricsUiState(trackId = track.id, loading = true)
-                    val result = runCatching {
-                        LyricsProvider.fetch(
-                            artist = track.artistName,
-                            title = track.title,
-                            album = track.albumTitle.takeIf { it.isNotBlank() && !it.equals("Álbum desconocido", ignoreCase = true) },
-                            durationMs = track.durationMs
-                        )
-                    }.getOrNull()
-                    val aligned = result?.let { VocalActivityDetector.align(appContext, localReference, it) }
+                    val aligned = fastestLyrics(track, localReference)
                     when {
                         aligned == null || aligned.isEmpty -> LyricsUiState(trackId = track.id, notFound = true)
                         else -> LyricsUiState(trackId = track.id, plain = aligned.plain, synced = aligned.synced)
@@ -3046,18 +3096,10 @@ class MusicVaultViewModel(
         val existing = LyricsLocalStore.read(appContext, reference)
         if (existing != null) return
 
-        val result = runCatching {
-            LyricsProvider.fetch(
-                artist = track.artistName,
-                title = track.title,
-                album = track.albumTitle.takeIf { it.isNotBlank() && !it.equals("Álbum desconocido", ignoreCase = true) },
-                durationMs = track.durationMs
-            )
-        }.getOrNull() ?: return
-
-        // Persist the VAD-aligned timestamps once, so downloaded tracks do not
-        // need to be decoded again each time their lyrics sheet is opened.
-        LyricsLocalStore.write(appContext, reference, VocalActivityDetector.align(appContext, reference, result))
+        // The YouTube caption and LRCLib requests race; captions use the exact
+        // video timeline and the first valid result wins without extending wait.
+        val result = fastestLyrics(track, reference) ?: return
+        LyricsLocalStore.write(appContext, reference, result)
     }
 
     private fun displaySource(track: CatalogTrack): String = track.source
