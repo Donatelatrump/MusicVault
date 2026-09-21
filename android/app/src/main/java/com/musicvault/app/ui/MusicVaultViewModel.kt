@@ -24,6 +24,8 @@ import com.musicvault.app.library.LocalAudioScanner
 import com.musicvault.app.lyrics.LyricLine
 import com.musicvault.app.lyrics.LyricsLocalStore
 import com.musicvault.app.lyrics.LyricsProvider
+import com.musicvault.app.lyrics.VocalActivityDetector
+import com.musicvault.app.network.ConnectivityMonitor
 import com.musicvault.app.permissions.StoragePermissions
 import com.musicvault.app.player.AudioEffects
 import com.musicvault.app.player.EqualizerPreset
@@ -134,6 +136,7 @@ class MusicVaultViewModel(
     private val favoritesAlbumId = "playlist:favorites"
     private val catalog = CatalogRepository(MetadataCatalogProvider(), database)
     private val player = PlayerController(appContext)
+    private val connectivityMonitor = ConnectivityMonitor(appContext)
     private val equalizer = AudioEffects()
     private val preferences: SharedPreferences = appContext.getSharedPreferences("musicvault.settings", Context.MODE_PRIVATE)
     private val spotifySession = SpotifySessionStore(appContext)
@@ -382,12 +385,15 @@ class MusicVaultViewModel(
 
     private val localTracks = repository.tracks()
     private val downloaded = repository.downloaded()
+    private val _offlinePlayableIds = MutableStateFlow<Set<String>>(emptySet())
     private val allCatalogAlbums = repository.albums()
     private val cachedCatalogTracks = catalog.cachedTracks()
     private val albums = allCatalogAlbums.map { list -> list.filter { it.id.startsWith("album:custom:") } }
     private val playlists = repository.playlists()
 
     val isPlaying: StateFlow<Boolean> = player.isPlaying
+    val isOnline: StateFlow<Boolean> = connectivityMonitor.isOnline
+    val offlinePlayableIds: StateFlow<Set<String>> = _offlinePlayableIds.asStateFlow()
     val playbackProgress: StateFlow<PlayerController.PlaybackProgress> = player.progress
     val downloadProgress: StateFlow<Map<String, Int>> = _downloadProgress.asStateFlow()
     val playerStyle: StateFlow<String> = _playerStyle.asStateFlow()
@@ -492,9 +498,10 @@ class MusicVaultViewModel(
                             durationMs = track.durationMs
                         )
                     }.getOrNull()
+                    val aligned = result?.let { VocalActivityDetector.align(appContext, localReference, it) }
                     when {
-                        result == null || result.isEmpty -> LyricsUiState(trackId = track.id, notFound = true)
-                        else -> LyricsUiState(trackId = track.id, plain = result.plain, synced = result.synced)
+                        aligned == null || aligned.isEmpty -> LyricsUiState(trackId = track.id, notFound = true)
+                        else -> LyricsUiState(trackId = track.id, plain = aligned.plain, synced = aligned.synced)
                     }
                 }
             }
@@ -990,6 +997,21 @@ class MusicVaultViewModel(
         ContextCompat.registerReceiver(
             appContext, downloadReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED
         )
+
+        viewModelScope.launch {
+            // Recheck on both library and connectivity changes. Files can be
+            // deleted outside MusicVault or a persisted SAF grant can become
+            // unusable while the database still says isDownloaded=true.
+            combine(downloaded, isOnline) { tracks, _ -> tracks }
+                .map { tracks ->
+                    withContext(Dispatchers.IO) {
+                        tracks.asSequence()
+                            .filter { isOfflineAudioReadable(it.audioUri) }
+                            .mapTo(HashSet()) { it.id }
+                    }
+                }
+                .collect { _offlinePlayableIds.value = it }
+        }
 
         viewModelScope.launch(Dispatchers.IO) {
             // Favorites is a permanent user collection backed by the existing playlist tables.
@@ -1702,6 +1724,10 @@ class MusicVaultViewModel(
     }
 
     fun selectTrack(track: Track) {
+        if (!canPlayNow(track)) {
+            showError("Sin conexión. Descarga la canción para escucharla sin Internet.")
+            return
+        }
         // User intent wins over unrelated speculative work. If this exact track
         // is already warming, keep that extraction alive so the tap joins the
         // per-track resolver lock/cache instead of throwing away several seconds
@@ -1908,8 +1934,15 @@ class MusicVaultViewModel(
             // Rebuild only the future window instead of asking Media3 to shuffle a
             // queue that intentionally contains just current + two successors.
             val currentId = player.progress.value.trackId ?: _selectedTrack.value?.id
-            val all = _selectedPlaylistTracks.value
-            val current = all.firstOrNull { it.id == currentId } ?: return
+            val selectedTracks = _selectedPlaylistTracks.value
+            val current = selectedTracks.firstOrNull { it.id == currentId } ?: return
+            val all = if (isOnline.value) {
+                selectedTracks
+            } else {
+                // Keep the item that is already playing, but never rebuild the
+                // future queue with remote-only songs while offline.
+                selectedTracks.filter { it.id == current.id || isAvailableOffline(it) }
+            }
             playlistLookAheadJob?.cancel()
             playlistLookAheadJob = null
             player.trimAfterCurrent()
@@ -1938,9 +1971,14 @@ class MusicVaultViewModel(
                 _errorMessage.value = "Esta playlist está vacía."
                 return@launch
             }
-            val start = if (shuffle && allTracks.size > 1) allTracks.random() else allTracks.first()
+            val playableTracks = if (isOnline.value) allTracks else allTracks.filter(::isAvailableOffline)
+            if (playableTracks.isEmpty()) {
+                showError("Sin conexión. Esta playlist no tiene canciones descargadas.")
+                return@launch
+            }
+            val start = if (shuffle && playableTracks.size > 1) playableTracks.random() else playableTracks.first()
             StreamingCache.markPlaybackRequested(start.id)
-            startManagedPlaylistPlayback(playlist, allTracks, start, shuffle)
+            startManagedPlaylistPlayback(playlist, playableTracks, start, shuffle)
         }
     }
 
@@ -1952,8 +1990,35 @@ class MusicVaultViewModel(
                 _errorMessage.value = "La canción ya no está disponible en esta playlist."
                 return@launch
             }
+            if (!canPlayNow(current)) {
+                showError("Sin conexión. Descarga la canción para escucharla sin Internet.")
+                return@launch
+            }
+            val playableTracks = if (isOnline.value) allTracks else allTracks.filter(::isAvailableOffline)
             StreamingCache.markPlaybackRequested(current.id)
-            startManagedPlaylistPlayback(playlist, allTracks, current, shuffle)
+            startManagedPlaylistPlayback(playlist, playableTracks, current, shuffle)
+        }
+    }
+
+    private fun isAvailableOffline(track: Track): Boolean =
+        track.isDownloaded && track.id in _offlinePlayableIds.value
+
+    fun canPlayNow(track: Track): Boolean = isOnline.value || isAvailableOffline(track)
+
+    private fun isOfflineAudioReadable(value: String?): Boolean {
+        if (value.isNullOrBlank()) return false
+        val uri = runCatching { android.net.Uri.parse(value) }.getOrNull() ?: return false
+        return when (uri.scheme?.lowercase()) {
+            null, "file" -> {
+                val path = uri.path?.takeIf { it.isNotBlank() } ?: value
+                java.io.File(path).let { it.isFile && it.length() > 0L }
+            }
+            "http", "https" -> false
+            else -> runCatching {
+                appContext.contentResolver.openAssetFileDescriptor(uri, "r")?.use { descriptor ->
+                    descriptor.length != 0L
+                } == true
+            }.getOrDefault(false)
         }
     }
 
@@ -2073,6 +2138,10 @@ class MusicVaultViewModel(
     fun isFavorite(trackId: String): Boolean = state.value.favoriteIds.contains(trackId)
 
     fun addToQueue(track: Track) {
+        if (!canPlayNow(track)) {
+            showError("Sin conexión. Descarga la canción antes de agregarla a la cola.")
+            return
+        }
         if (track.isDownloaded && !track.audioUri.isNullOrBlank()) {
             activateExplicitQueueMode()
             pendingQueueEntries += PendingQueueEntry(ready = true, track = track)
@@ -2222,7 +2291,7 @@ class MusicVaultViewModel(
             }
 
             val hasAlbumContext = _selectedLocalAlbum.value != null || _selectedRemoteAlbum.value != null || current.albumId.startsWith("album:custom:")
-            if (hasAlbumContext && isOnline()) {
+            if (hasAlbumContext && isOnline.value) {
                 findAndDownloadRelated(current)
                 return@launch
             }
@@ -2321,7 +2390,7 @@ class MusicVaultViewModel(
 
     private suspend fun findAndDownloadRelated(current: Track, generation: Long = queueGeneration) {
         val localCandidates = state.value.downloaded.filter { it.id != current.id && it.audioUri != null }
-        if (!isOnline()) {
+        if (!isOnline.value) {
             localCandidates.randomOrNull()?.let { appendSmartCandidate(current, it, generation) }
             return
         }
@@ -2341,14 +2410,6 @@ class MusicVaultViewModel(
         } catch (_: Exception) {
             localCandidates.randomOrNull()?.let { appendSmartCandidate(current, it, generation) }
         }
-    }
-
-    private fun isOnline(): Boolean {
-        val cm = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
-            ?: return false
-        val network = cm.activeNetwork ?: return false
-        val capabilities = cm.getNetworkCapabilities(network) ?: return false
-        return capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
 
     fun openLocalAlbum(album: Album) {
@@ -2955,6 +3016,7 @@ class MusicVaultViewModel(
 
     override fun onCleared() {
         runCatching { appContext.unregisterReceiver(downloadReceiver) }
+        connectivityMonitor.close()
         synchronized(downloadLock) {
             // Do NOT cancel the foreground service here. Its purpose is to keep
             // downloads alive when the Activity/ViewModel is recreated or the
@@ -2993,7 +3055,9 @@ class MusicVaultViewModel(
             )
         }.getOrNull() ?: return
 
-        LyricsLocalStore.write(appContext, reference, result)
+        // Persist the VAD-aligned timestamps once, so downloaded tracks do not
+        // need to be decoded again each time their lyrics sheet is opened.
+        LyricsLocalStore.write(appContext, reference, VocalActivityDetector.align(appContext, reference, result))
     }
 
     private fun displaySource(track: CatalogTrack): String = track.source

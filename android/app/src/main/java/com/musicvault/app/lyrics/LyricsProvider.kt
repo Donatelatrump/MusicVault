@@ -58,8 +58,7 @@ object LyricsProvider {
 
     fun fetch(artist: String, title: String, album: String? = null, durationMs: Long = 0L): Lyrics? {
         val durationSeconds = (durationMs / 1000L).takeIf { it > 0 }
-        // Exact lookup first: cheapest endpoint and the best match quality —
-        // but only when the record is not degenerate (see quality gates).
+        // 1. Try exact match query (with exact duration filter if available)
         val exact = runCatching {
             val query = buildString {
                 append("https://lrclib.net/api/get?artist_name=").append(URLEncoder.encode(artist.trim(), "UTF-8"))
@@ -72,9 +71,7 @@ object LyricsProvider {
         val direct = exact?.let { body -> runCatching { toLyrics(JSONObject(body)) }.getOrNull() }
         if (direct != null && isUsable(direct)) return direct
 
-        // Fallback: free-text search, best record wins. Only quality-gated
-        // records compete: synced (≥5 timed lines) beats plain, then the
-        // closest duration to the local track.
+        // 2. Search fallback without strict duration constraint, to find official studio lyrics
         val searchQuery = "https://lrclib.net/api/search?q=" +
             URLEncoder.encode("${title.trim()} ${artist.trim()}".trim(), "UTF-8")
         val candidates = runCatching {
@@ -84,7 +81,8 @@ object LyricsProvider {
                 runCatching { array.getJSONObject(i) }.getOrNull()
             }
         }.getOrNull() ?: emptyList()
-        return candidates
+
+        val best = candidates
             .asSequence()
             .mapNotNull { record ->
                 val lyrics = runCatching { toLyrics(record) }.getOrNull() ?: return@mapNotNull null
@@ -98,7 +96,12 @@ object LyricsProvider {
                     kotlin.math.abs(remoteMs - durationMs)
                 } else 0L
                 syncedPenalty + durationPenalty
-            }?.first
+            }
+
+        // Duration is useful for choosing a candidate, but it cannot establish a
+        // vocal offset: different masters frequently have different outros.  The
+        // caller aligns local audio with VocalActivityDetector when it has a file.
+        return best?.first ?: candidates.firstOrNull()?.let { toLyrics(it) }
     }
 
     private fun toLyrics(record: JSONObject): Lyrics? = runCatching {

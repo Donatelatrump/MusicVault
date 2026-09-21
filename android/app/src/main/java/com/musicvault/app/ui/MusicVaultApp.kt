@@ -266,6 +266,8 @@ fun MusicVaultApp(
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
     val isPlaying by vm.isPlaying.collectAsStateWithLifecycle()
+    val isOnline by vm.isOnline.collectAsStateWithLifecycle()
+    val offlinePlayableIds by vm.offlinePlayableIds.collectAsStateWithLifecycle()
     val albumDownloads by vm.albumDownloads.collectAsStateWithLifecycle()
     val favoriteIds = state.favoriteIds
     val downloadDirLabel by vm.downloadDirLabel.collectAsStateWithLifecycle()
@@ -542,6 +544,8 @@ fun MusicVaultApp(
                                 state = state,
                                 albumDownloads = albumDownloads,
                                 isPlaying = isPlaying,
+                                isOnline = isOnline,
+                                offlinePlayableIds = offlinePlayableIds,
                                 vm = vm,
                                 onInitialVisualReady = {
                                     if (onboardingFinishing && recommendationWarmupReady && !homeVisualReady) {
@@ -618,6 +622,8 @@ fun MusicVaultApp(
                                 tracks = state.selectedPlaylistTracks,
                                 isDownloading = playlist.id in albumDownloads,
                                 isPlaying = isPlaying,
+                                isOnline = isOnline,
+                                offlinePlayableIds = offlinePlayableIds,
                                 selectedTrackId = state.selectedTrack?.id,
                                 playlists = state.playlists,
                                 albums = state.albums,
@@ -1209,6 +1215,8 @@ private fun HomeScreen(
     state: MusicUiState,
     albumDownloads: Set<String>,
     isPlaying: Boolean,
+    isOnline: Boolean,
+    offlinePlayableIds: Set<String>,
     vm: MusicVaultViewModel,
     onInitialVisualReady: () -> Unit = {}
 ) {
@@ -1255,6 +1263,8 @@ private fun HomeScreen(
                     albumDownloads = albumDownloads,
                     selectedTrackId = state.selectedTrack?.id,
                     isPlaying = isPlaying,
+                    isOnline = isOnline,
+                    offlinePlayableIds = offlinePlayableIds,
                     hybridDesign = state.appDesign == APP_DESIGN_HYBRID,
                     onContentCommitted = if (state.recommendedTracks.isNotEmpty() && state.recommendedAlbums.isNotEmpty()) {
                         {
@@ -1298,6 +1308,7 @@ internal fun RecommendationTrackCard(
     onPlay: () -> Unit,
     actions: @Composable () -> Unit,
     isPlaying: Boolean,
+    enabled: Boolean,
     hybrid: Boolean
 ) {
     val progress by progressFlow.collectAsStateWithLifecycle(initialValue = null)
@@ -1314,7 +1325,13 @@ internal fun RecommendationTrackCard(
         Modifier
             .width(cardSize)
             .scale(pressScale)
-            .clickable(interactionSource = pressInteraction, indication = null, onClick = onPlay)
+            .graphicsLayer { alpha = if (enabled) 1f else 0.38f }
+            .clickable(
+                interactionSource = pressInteraction,
+                indication = null,
+                enabled = enabled,
+                onClick = onPlay
+            )
     ) {
         Box(Modifier.size(cardSize)) {
             AsyncImage(
@@ -2694,6 +2711,8 @@ private fun PlaylistDetail(
     tracks: List<Track>,
     isDownloading: Boolean,
     isPlaying: Boolean,
+    isOnline: Boolean,
+    offlinePlayableIds: Set<String>,
     selectedTrackId: String?,
     playlists: List<Playlist>,
     albums: List<Album>,
@@ -2738,6 +2757,8 @@ private fun PlaylistDetail(
                     albums = customAlbums,
                     selectedTrackId = selectedTrackId,
                     isPlaying = isPlaying,
+                    isOnline = isOnline,
+                    offlinePlayableIds = offlinePlayableIds,
                     onRowClick = { vm.playPlaylistTrack(playlist, it) },
                     onPlayNew = { vm.playPlaylistTrack(playlist, it) },
                     onRemoveFromPlaylist = { vm.removeTrackFromPlaylist(playlist.id, it.id) },
@@ -2769,6 +2790,8 @@ private fun PlaylistDetail(
                 albums = customAlbums,
                 selectedTrackId = selectedTrackId,
                 isPlaying = isPlaying,
+                isOnline = isOnline,
+                offlinePlayableIds = offlinePlayableIds,
                 onRowClick = { vm.playPlaylistTrack(playlist, it) },
                 onPlayNew = { vm.playPlaylistTrack(playlist, it) },
                 onRemoveFromPlaylist = { vm.removeTrackFromPlaylist(playlist.id, it.id) },
@@ -2996,11 +3019,6 @@ private fun MiniPlayer(
     }
 }
 
-// Constant lead that compensates the audio output latency: the player's
-// position advances when samples reach the audio sink, ~100ms before the
-// user actually hears them, so synced lyrics must run slightly early.
-private const val LYRICS_LEAD_MS = 100L
-
 /**
  * Extrapolates the controller's position with the frame clock so the synced
  * lyrics follow playback every frame instead of every 500ms ticker update.
@@ -3036,7 +3054,7 @@ private fun rememberLyricPositionState(
             // Real discontinuity (seek, track change, pause): snap to the sample.
             anchorPos = progress.positionMs
             anchorElapsed = progress.sampledAtElapsed
-            state.longValue = (progress.positionMs - LYRICS_LEAD_MS).coerceAtLeast(0L)
+            state.longValue = progress.positionMs.coerceAtLeast(0L)
         } else {
             // Clock noise: keep the extrapolation continuous but gently pull it
             // toward the sampled truth (⅓ per sample) — no visible snap, no
@@ -3057,7 +3075,7 @@ private fun rememberLyricPositionState(
             while (true) {
                 withFrameNanos {
                     val nowElapsed = android.os.SystemClock.elapsedRealtimeNanos()
-                    val next = (anchorPos + (nowElapsed - anchorElapsed) / 1_000_000L - LYRICS_LEAD_MS)
+                    val next = (anchorPos + (nowElapsed - anchorElapsed) / 1_000_000L)
                         .coerceAtLeast(0L)
                     // Monotonic while playing: lyrics never step back, so the
                     // highlight cannot flicker at a stanza boundary.
@@ -3065,9 +3083,8 @@ private fun rememberLyricPositionState(
                 }
             }
         } else {
-            // Pause: freeze. Store the raw position (without the lead) so a
-            // later resume extrapolates from the right anchor.
-            anchorPos = state.longValue + LYRICS_LEAD_MS
+            // Pause: freeze at the exact player position.
+            anchorPos = state.longValue
         }
     }
     return state
@@ -3150,6 +3167,23 @@ private fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean,
         val panelOpen by remember { derivedStateOf { reveal > 0.95f } }
         val expanded by remember { derivedStateOf { reveal > 0.5f } }
         val stageMaxPx = (areaPx - fixedPx - peekPx).coerceAtLeast(0f)
+        // Once the sheet is open, its body belongs to the lyrics list.  Keeping
+        // the sheet drag on the whole Column made every downward lyric scroll
+        // compete with (and usually become) a request to minimize the sheet.
+        // The header remains the deliberate affordance for closing it.
+        val sheetDragModifier = Modifier.draggable(
+            orientation = Orientation.Vertical,
+            state = revealDelta,
+            onDragStopped = { velocity ->
+                val range = (areaPx - fixedPx - peekPx).coerceAtLeast(1f)
+                val target = when {
+                    velocity < -900f -> 1f
+                    velocity > 900f -> 0f
+                    else -> if (reveal > 0.45f) 1f else 0f
+                }
+                revealLyrics(target, -velocity / range)
+            }
+        )
 
         Box(Modifier.fillMaxWidth().weight(1f)) {
             Column(Modifier.fillMaxSize().onSizeChanged { areaPx = it.height.toFloat() }) {
@@ -3399,23 +3433,17 @@ private fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean,
                     layout(placeable.width, h) { placeable.place(0, 0) }
                 }
                 .background(VaultColors.Surface1)
-                .draggable(
-                    orientation = Orientation.Vertical,
-                    state = revealDelta,
-                    onDragStopped = { velocity ->
-                        val range = (areaPx - fixedPx - peekPx).coerceAtLeast(1f)
-                        val target = when {
-                            velocity < -900f -> 1f
-                            velocity > 900f -> 0f
-                            else -> if (reveal > 0.45f) 1f else 0f
-                        }
-                        revealLyrics(target, -velocity / range)
-                    }
-                )
+                // While collapsed, swiping the lyric preview still opens it.
+                // While open, leave the body unclaimed so RecyclerView/
+                // verticalScroll can handle lyric scrolling normally.
+                .then(if (panelOpen) Modifier else sheetDragModifier)
         ) {
             Row(
                 Modifier
                     .fillMaxWidth()
+                    // The grabber is intentionally the only place that can
+                    // minimize an expanded sheet.
+                    .then(if (panelOpen) sheetDragModifier else Modifier)
                     .pointerInput(Unit) {
                         detectTapGestures { revealLyrics(if (reveal > 0.5f) 0f else 1f) }
                     }
@@ -3443,7 +3471,7 @@ private fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean,
                     modifier = Modifier.size(20.dp)
                 )
             }
-            Box(Modifier.fillMaxWidth().weight(1f)) {
+            Box(Modifier.fillMaxWidth().weight(1f).clipToBounds()) {
                 if (panelOpen) {
                     LyricsPanel(
                         lyrics = lyrics,
@@ -4156,12 +4184,11 @@ private fun SyncedLyricsList(lines: List<LyricLine>, positionState: State<Long>,
         derivedStateOf { lines.indexOfLast { it.timeMs <= positionState.value }.takeIf { it >= 0 } }
     }
     val adapter = remember { SyncedLyricsAdapter() }
-    val lastUserTouchMs = remember { longArrayOf(0L) }
-    val lastAutoScrolledIndex = remember { intArrayOf(-1) }
+    val lastAutoScrolledIndex = remember { intArrayOf(Int.MIN_VALUE) }
 
-    Box(modifier.fillMaxSize()) {
+    Box(modifier.fillMaxSize().clipToBounds()) {
         AndroidView(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxSize().clipToBounds(),
             factory = { context ->
                 RecyclerView(context).apply {
                     layoutManager = LinearLayoutManager(context).apply {
@@ -4172,33 +4199,20 @@ private fun SyncedLyricsList(lines: List<LyricLine>, positionState: State<Long>,
                     itemAnimator = null
                     setItemViewCacheSize(16)
                     recycledViewPool.setMaxRecycledViews(0, 20)
-                    setPadding(0, 48, 0, 72)
+                    setPadding(0, 0, 0, 0)
                     clipToPadding = false
+                    clipChildren = true
                     overScrollMode = RecyclerView.OVER_SCROLL_IF_CONTENT_SCROLLS
-                    setOnTouchListener { _, event ->
-                        if (event.actionMasked == android.view.MotionEvent.ACTION_DOWN ||
-                            event.actionMasked == android.view.MotionEvent.ACTION_MOVE
-                        ) {
-                            lastUserTouchMs[0] = android.os.SystemClock.uptimeMillis()
-                        }
-                        false
-                    }
                 }
             },
             update = { rv ->
-                adapter.update(lines, currentLine)
                 val active = currentLine
-                if (active != null && active != lastAutoScrolledIndex[0] &&
-                    android.os.SystemClock.uptimeMillis() - lastUserTouchMs[0] >= 4_000L
-                ) {
-                    lastAutoScrolledIndex[0] = active
-                    rv.post {
-                        (rv.layoutManager as? LinearLayoutManager)?.scrollToPositionWithOffset(
-                            (active - 3).coerceAtLeast(0),
-                            (rv.height * 0.18f).roundToInt()
-                        )
-                    }
+                val anchor = active ?: -1
+                val mustCenter = lines.isNotEmpty() && anchor != lastAutoScrolledIndex[0]
+                if (mustCenter) {
+                    lastAutoScrolledIndex[0] = anchor
                 }
+                adapter.update(lines, active, fullLyrics = true, onCommitted = if (mustCenter) ({ centerLyricPosition(rv, active ?: 0) }) else null)
             }
         )
         Box(
@@ -4215,6 +4229,20 @@ private fun SyncedLyricsList(lines: List<LyricLine>, positionState: State<Long>,
                 .align(Alignment.BottomCenter)
                 .background(Brush.verticalGradient(listOf(Color.Transparent, VaultColors.Surface1)))
         )
+    }
+}
+
+private fun centerLyricPosition(recyclerView: RecyclerView, position: Int) {
+    if (position < 0) return
+    recyclerView.post firstPass@{
+        val layoutManager = recyclerView.layoutManager as? LinearLayoutManager ?: return@firstPass
+        val estimatedHalfRow = (32f * recyclerView.resources.displayMetrics.density).roundToInt()
+        layoutManager.scrollToPositionWithOffset(position, -estimatedHalfRow)
+        recyclerView.post secondPass@{
+            val activeView = layoutManager.findViewByPosition(position) ?: return@secondPass
+            val activeCenter = (activeView.top + activeView.bottom) / 2
+            recyclerView.scrollBy(0, activeCenter - recyclerView.height / 2)
+        }
     }
 }
 

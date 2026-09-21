@@ -42,22 +42,28 @@ internal class SyncedLyricsAdapter : ListAdapter<LyricLine, SyncedLyricsAdapter.
         else onBindViewHolder(holder, position)
     }
 
-    fun update(lines: List<LyricLine>, active: Int?) {
-        if (currentList != lines) {
-            submitList(lines.toList()) {
-                val old = activeIndex
-                activeIndex = active
-                if (itemCount > 0 && old != active) notifyItemRangeChanged(0, itemCount, PAYLOAD_ACTIVE)
+    private var showFullLyrics: Boolean = false
+
+    fun update(lines: List<LyricLine>, active: Int?, fullLyrics: Boolean = false, onCommitted: (() -> Unit)? = null) {
+        showFullLyrics = fullLyrics
+        val visibleLines = if (fullLyrics) lines else (active?.let { lines.drop(it) } ?: lines)
+        val visibleActive = if (fullLyrics) active else (active?.let { 0 })
+        if (currentList != visibleLines) {
+            submitList(visibleLines.toList()) {
+                activeIndex = visibleActive
+                if (itemCount > 0) notifyItemRangeChanged(0, itemCount, PAYLOAD_ACTIVE)
+                onCommitted?.invoke()
             }
             return
         }
-        if (activeIndex != active) {
-            activeIndex = active
+        if (activeIndex != visibleActive) {
+            activeIndex = visibleActive
             if (itemCount > 0) notifyItemRangeChanged(0, itemCount, PAYLOAD_ACTIVE)
         }
+        onCommitted?.invoke()
     }
 
-    internal class Holder(itemView: View) : RecyclerView.ViewHolder(itemView) {
+    internal inner class Holder(itemView: View) : RecyclerView.ViewHolder(itemView) {
         private val text = itemView as TextView
         private var boundPosition = -1
 
@@ -71,21 +77,22 @@ internal class SyncedLyricsAdapter : ListAdapter<LyricLine, SyncedLyricsAdapter.
             boundPosition = position
             val distance = active?.let { abs(position - it) } ?: 4
             val isActive = active == position
-            text.setTextColor(if (isActive) Color.rgb(241, 234, 217) else Color.rgb(179, 169, 146))
+            text.setTextColor(if (isActive) Color.rgb(224, 164, 88) else Color.rgb(179, 169, 146))
             text.textSize = when {
-                isActive -> 29f
-                distance <= 1 -> 24f
-                distance <= 3 -> 21f
-                else -> 18f
+                isActive -> 27f
+                distance <= 1 -> 22f
+                else -> 19f
             }
             text.alpha = when {
                 isActive -> 1f
+                showFullLyrics -> 0.75f
                 distance == 1 -> .72f
                 distance <= 3 -> .48f
                 else -> .26f
             }
             val scale = when {
                 isActive -> 1f
+                showFullLyrics -> 0.96f
                 distance == 1 -> .97f
                 distance <= 3 -> .94f
                 else -> .91f
@@ -96,11 +103,12 @@ internal class SyncedLyricsAdapter : ListAdapter<LyricLine, SyncedLyricsAdapter.
             if (Build.VERSION.SDK_INT >= 31) {
                 val density = text.resources.displayMetrics.density
                 val blurDp = when {
+                    showFullLyrics -> 0f
                     isActive -> 0f
-                    distance == 1 -> .55f
-                    distance == 2 -> 1.0f
-                    distance == 3 -> 1.5f
-                    else -> 2.0f
+                    distance == 1 -> 1.2f
+                    distance == 2 -> 2.1f
+                    distance == 3 -> 3.0f
+                    else -> 3.8f
                 }
                 text.setRenderEffect(
                     if (blurDp <= 0f) null
@@ -124,7 +132,9 @@ private fun makeLyricRow(context: Context): TextView = TextView(context).apply {
     textSize = 21f
     setPadding(dp(context, 16), dp(context, 12), dp(context, 16), dp(context, 12))
     minHeight = dp(context, 58)
-    maxLines = 4
+    // Expanded lyrics must show the complete stanza. Long translations or
+    // narrow screens can legitimately wrap beyond four visual lines.
+    maxLines = Int.MAX_VALUE
     textAlignment = View.TEXT_ALIGNMENT_CENTER
     layoutParams = RecyclerView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
 }

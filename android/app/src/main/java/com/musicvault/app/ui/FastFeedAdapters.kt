@@ -40,8 +40,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.recyclerview.widget.AsyncDifferConfig
+import androidx.recyclerview.widget.AsyncListDiffer
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.ListAdapter
+import androidx.recyclerview.widget.ListUpdateCallback
 import androidx.recyclerview.widget.RecyclerView
 import coil.request.ImageRequest
 import coil.dispose
@@ -113,6 +116,8 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
     private var recommendedAlbumsCache: List<Album> = emptyList()
     private var recommendationsCache: List<Track> = emptyList()
     private var hybridDesign = true
+    private var isOnline = true
+    private var offlinePlayableIds: Set<String> = emptySet()
     private val progressFlows = HashMap<String, Flow<Int?>>()
     private val trackPositionById = HashMap<String, Int>()
 
@@ -158,6 +163,8 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
         albumDownloads: Set<String>,
         selectedTrackId: String?,
         isPlaying: Boolean,
+        isOnline: Boolean,
+        offlinePlayableIds: Set<String>,
         hybridDesign: Boolean,
         onContentCommitted: (() -> Unit)? = null
     ) {
@@ -173,10 +180,13 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
         val auxiliaryDataChanged = this.playlists != playlists || this.customAlbums != customAlbums
         val downloadsChanged = this.albumDownloads != albumDownloads
         val designChanged = this.hybridDesign != hybridDesign
+        val connectivityChanged = this.isOnline != isOnline
+        val offlineAvailabilityChanged = this.offlinePlayableIds != offlinePlayableIds
 
         // This update runs on every recomposition of the hosting screen (playback
         // ticks included). Skip the item rebuild and DiffUtil when nothing changed.
         if (!auxiliaryDataChanged && !recommendationsChanged && !downloadsChanged && !designChanged &&
+            !connectivityChanged && !offlineAvailabilityChanged &&
             oldSelected == selectedTrackId && oldPlaying == isPlaying
         ) {
             // Home may already contain the correct list when onboarding starts
@@ -194,6 +204,8 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
         this.selectedTrackId = selectedTrackId
         this.isPlaying = isPlaying
         this.hybridDesign = hybridDesign
+        this.isOnline = isOnline
+        this.offlinePlayableIds = offlinePlayableIds
         recommendedTracksCache = recommendedTracks
         recommendedAlbumsCache = recommendedAlbums
         recommendationsCache = recommendations
@@ -225,6 +237,9 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
             if (designChanged) currentList.forEachIndexed { index, item ->
                 if (item !is HomeFeedItem.TrackItem) notifyItemChanged(index)
             }
+            if (connectivityChanged || offlineAvailabilityChanged) currentList.forEachIndexed { index, item ->
+                if (item is HomeFeedItem.TrackItem || item is HomeFeedItem.RecommendedTracks) notifyItemChanged(index)
+            }
             notifyPlayerRows(oldSelected, selectedTrackId, oldPlaying, isPlaying)
             onContentCommitted?.invoke()
         }
@@ -248,7 +263,7 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
         when (val item = getItem(position)) {
             HomeFeedItem.Greeting -> (holder as ComposeRowHolder).bind { GreetingContent() }
             HomeFeedItem.RecommendedTracks -> (holder as ComposeRowHolder).bind {
-                RecommendedTracksRow(vm, playlists, customAlbums, selectedTrackId, isPlaying)
+                RecommendedTracksRow(vm, playlists, customAlbums, selectedTrackId, isPlaying, isOnline, offlinePlayableIds)
             }
             HomeFeedItem.RecommendedAlbums -> (holder as ComposeRowHolder).bind {
                 RecommendedAlbumsRow(vm, albumDownloads)
@@ -268,7 +283,9 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
                 playlists,
                 customAlbums,
                 selectedTrackId,
-                isPlaying
+                isPlaying,
+                isOnline,
+                offlinePlayableIds
             )
         }
     }
@@ -292,7 +309,7 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
         }
     }
 
-    @Composable private fun RecommendedTracksRow(vm: MusicVaultViewModel, playlists: List<Playlist>, albums: List<Album>, selectedId: String?, playing: Boolean) {
+    @Composable private fun RecommendedTracksRow(vm: MusicVaultViewModel, playlists: List<Playlist>, albums: List<Album>, selectedId: String?, playing: Boolean, isOnline: Boolean, offlinePlayableIds: Set<String>) {
         val tracks = recommendedTracksCache
         if (tracks.isEmpty()) return
         // clipToBounds: this row's height is measured while its composition is
@@ -315,6 +332,7 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
                         onPlay = { vm.playRecommendation(track) },
                         actions = { TrackActionsMenu(track, playlists, albums, vm, vm.isFavorite(track.id)) },
                         isPlaying = playing && selectedId == track.id,
+                        enabled = isOnline || track.id in offlinePlayableIds,
                         hybrid = hybridDesign
                     )
                 }
@@ -438,12 +456,15 @@ internal class NativeTrackHolder(
     private var progressJob: Job? = null
     private var progressFlow: Flow<Int?>? = null
     private var currentProgress: Int? = null
+    private var playableNow: Boolean = true
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     init {
         installTrackPressFeedback(itemView)
         actions.setOnClickListener { showActionsMenu(it) }
-        itemView.setOnClickListener { track?.let { t -> (onRowClick ?: vm::selectTrack).invoke(t) } }
+        itemView.setOnClickListener {
+            if (playableNow) track?.let { t -> (onRowClick ?: vm::selectTrack).invoke(t) }
+        }
         itemView.setOnLongClickListener {
             val current = track ?: return@setOnLongClickListener false
             if (allowMissingTrackLongPressRemoval && (!current.isDownloaded || current.audioUri.isNullOrBlank())) {
@@ -455,16 +476,21 @@ internal class NativeTrackHolder(
         }
         play.setOnClickListener {
             val t = track ?: return@setOnClickListener
+            if (!playableNow) return@setOnClickListener
             if (t.id == selectedId) vm.togglePlayback()
             else (onPlayNew ?: vm::selectTrack).invoke(t)
         }
     }
 
-    fun bind(value: Track, flow: Flow<Int?>, playlists: List<Playlist>, albums: List<Album>, selectedId: String?, playing: Boolean) {
+    fun bind(value: Track, flow: Flow<Int?>, playlists: List<Playlist>, albums: List<Album>, selectedId: String?, playing: Boolean, isOnline: Boolean = true, offlinePlayableIds: Set<String> = emptySet()) {
         if (track?.id != value.id) currentProgress = null
         track = value
         currentPlaylists = playlists
         this.selectedId = selectedId
+        playableNow = isOnline || value.id in offlinePlayableIds
+        itemView.isEnabled = playableNow
+        itemView.alpha = if (playableNow) 1f else 0.38f
+        itemView.contentDescription = if (playableNow) null else "${value.title}, no disponible sin conexión"
         title.text = value.title
         subtitle.text = "${value.artistName} · ${value.albumTitle}"
         if (!coverBound || boundCoverUrl != value.coverUri) {
@@ -693,6 +719,7 @@ private class NativeMoreButton(context: Context) : View(context) {
 private fun installTrackPressFeedback(view: View) {
     view.isClickable = true
     view.setOnTouchListener { target, event ->
+        if (!target.isEnabled) return@setOnTouchListener false
         when (event.actionMasked) {
             android.view.MotionEvent.ACTION_DOWN -> target.animate()
                 .scaleX(0.985f).scaleY(0.985f).alpha(0.84f).setDuration(65L).start()
@@ -853,7 +880,7 @@ internal class LocalAlbumDetailAdapter(private val vm: MusicVaultViewModel, priv
 internal class PlaylistDetailAdapter(
     private val vm: MusicVaultViewModel,
     private val hybridDesign: Boolean = false
-) : ListAdapter<Track, RecyclerView.ViewHolder>(LocalAlbumTrackDiff) {
+) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
     companion object {
         const val TYPE_HEADER = 40
@@ -870,11 +897,31 @@ internal class PlaylistDetailAdapter(
     private var tracksCache: List<Track> = emptyList()
     private var selectedTrackId: String? = null
     private var isPlaying: Boolean = false
+    private var isOnline: Boolean = true
+    private var offlinePlayableIds: Set<String> = emptySet()
     private val progressFlows = HashMap<String, Flow<Int?>>()
+    // Track rows live after the header at adapter position 0. ListAdapter's
+    // default update callback cannot account for that offset: when Room first
+    // emits a populated playlist it reports an insertion at position 0, which
+    // makes RecyclerView preserve the old header anchor at the end of the list.
+    private val differ = AsyncListDiffer(
+        object : ListUpdateCallback {
+            override fun onInserted(position: Int, count: Int) = notifyItemRangeInserted(position + 1, count)
+            override fun onRemoved(position: Int, count: Int) = notifyItemRangeRemoved(position + 1, count)
+            override fun onMoved(fromPosition: Int, toPosition: Int) =
+                notifyItemMoved(fromPosition + 1, toPosition + 1)
+            override fun onChanged(position: Int, count: Int, payload: Any?) =
+                notifyItemRangeChanged(position + 1, count, payload)
+        },
+        AsyncDifferConfig.Builder(LocalAlbumTrackDiff).build()
+    )
+    private val currentList: List<Track> get() = differ.currentList
 
     init { setHasStableIds(true) }
 
-    override fun getItemCount(): Int = super.getItemCount() + 1
+    override fun getItemCount(): Int = currentList.size + 1
+
+    private fun getItem(position: Int): Track = currentList[position]
 
     override fun getItemId(position: Int): Long =
         if (position == 0) Long.MIN_VALUE + 40 else stableLongId("playlist-detail:${getItem(position - 1).id}")
@@ -904,7 +951,9 @@ internal class PlaylistDetailAdapter(
                 playlists,
                 albums,
                 selectedTrackId,
-                isPlaying
+                isPlaying,
+                isOnline,
+                offlinePlayableIds
             )
         }
     }
@@ -930,6 +979,8 @@ internal class PlaylistDetailAdapter(
         albums: List<Album>,
         selectedTrackId: String?,
         isPlaying: Boolean,
+        isOnline: Boolean,
+        offlinePlayableIds: Set<String>,
         onRowClick: (Track) -> Unit,
         onPlayNew: (Track) -> Unit,
         onRemoveFromPlaylist: (Track) -> Unit,
@@ -942,8 +993,11 @@ internal class PlaylistDetailAdapter(
         val tracksChanged = tracks !== tracksCache && tracks != tracksCache
         val selectionChanged = this.selectedTrackId != selectedTrackId || this.isPlaying != isPlaying
         val auxiliaryChanged = this.playlists != playlists || this.albums != albums
+        val connectivityChanged = this.isOnline != isOnline
+        val offlineAvailabilityChanged = this.offlinePlayableIds != offlinePlayableIds
         val oldSelected = this.selectedTrackId
-        if (!headerChanged && !tracksChanged && !selectionChanged && !auxiliaryChanged) return
+        if (!headerChanged && !tracksChanged && !selectionChanged && !auxiliaryChanged &&
+            !connectivityChanged && !offlineAvailabilityChanged) return
 
         this.headerContent = header
         this.rowClick = onRowClick
@@ -953,15 +1007,18 @@ internal class PlaylistDetailAdapter(
         this.albums = albums
         this.selectedTrackId = selectedTrackId
         this.isPlaying = isPlaying
+        this.isOnline = isOnline
+        this.offlinePlayableIds = offlinePlayableIds
 
         if (tracksChanged) {
             tracksCache = tracks
-            submitList(tracks.toList()) {
+            differ.submitList(tracks.toList()) {
                 if (headerChanged && itemCount > 0) notifyItemChanged(0)
                 if (selectionChanged) {
                     if (oldSelected != null) currentList.indexOfFirst { it.id == oldSelected }.takeIf { it >= 0 }?.let { notifyItemChanged(it + 1, STATE_PAYLOAD) }
                     if (selectedTrackId != null && selectedTrackId != oldSelected) currentList.indexOfFirst { it.id == selectedTrackId }.takeIf { it >= 0 }?.let { notifyItemChanged(it + 1, STATE_PAYLOAD) }
                 }
+                if ((connectivityChanged || offlineAvailabilityChanged) && currentList.isNotEmpty()) notifyItemRangeChanged(1, currentList.size)
                 onListCommitted?.invoke()
             }
         } else {
@@ -972,6 +1029,7 @@ internal class PlaylistDetailAdapter(
                 if (oldSelected != null) currentList.indexOfFirst { it.id == oldSelected }.takeIf { it >= 0 }?.let { notifyItemChanged(it + 1, STATE_PAYLOAD) }
                 if (selectedTrackId != null && selectedTrackId != oldSelected) currentList.indexOfFirst { it.id == selectedTrackId }.takeIf { it >= 0 }?.let { notifyItemChanged(it + 1, STATE_PAYLOAD) }
             }
+            if ((connectivityChanged || offlineAvailabilityChanged) && currentList.isNotEmpty()) notifyItemRangeChanged(1, currentList.size)
         }
     }
 }
