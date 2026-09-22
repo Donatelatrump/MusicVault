@@ -54,4 +54,46 @@ class LyricsProviderTest {
         assertEquals(0, trusted.synced.size)
         assertEquals(lyrics.plain, trusted.plain)
     }
+
+    @Test
+    fun `rejects a timeline with repeated timestamps`() {
+        val lyrics = timed(10_000, 10_000, 10_000, 90_000, 150_000)
+
+        assertEquals(0, LyricsProvider.keepOnlyTrustedSync(lyrics, 180_000).synced.size)
+    }
+
+    @Test
+    fun `rejects lines concentrated in a small part of the song`() {
+        val lyrics = timed(70_000, 72_000, 74_000, 76_000, 85_000)
+
+        assertEquals(0, LyricsProvider.keepOnlyTrustedSync(lyrics, 180_000).synced.size)
+    }
+
+    @Test
+    fun `rejects captions extending well beyond the audio`() {
+        val lyrics = timed(10_000, 40_000, 80_000, 130_000, 186_000)
+
+        assertEquals(0, LyricsProvider.keepOnlyTrustedSync(lyrics, 180_000).synced.size)
+    }
+
+    @Test
+    fun `keeps exact video timeline for short late vocal sections`() {
+        val lyrics = timed(70_000, 72_000, 74_000, 76_000, 85_000)
+
+        assertEquals(
+            5,
+            LyricsProvider.keepOnlyTrustedSync(lyrics, 180_000, exactTimeline = true).synced.size
+        )
+    }
+
+    @Test
+    fun `repairs duplicate cues in exact video captions`() {
+        val lyrics = timed(10_000, 10_000, 30_000, 60_000, 90_000, 120_000)
+
+        assertEquals(
+            listOf(10_000L, 30_000L, 60_000L, 90_000L, 120_000L),
+            LyricsProvider.keepOnlyTrustedSync(lyrics, 180_000, exactTimeline = true)
+                .synced.map { it.timeMs }
+        )
+    }
 }

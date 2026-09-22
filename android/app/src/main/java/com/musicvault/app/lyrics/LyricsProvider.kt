@@ -67,16 +67,44 @@ object LyricsProvider {
      * portion of this exact audio. This is deliberately CPU-only and O(lines):
      * it adds no request, decoding pass, or perceptible loading time.
      */
-    internal fun keepOnlyTrustedSync(lyrics: Lyrics, durationMs: Long): Lyrics {
+    internal fun keepOnlyTrustedSync(
+        lyrics: Lyrics,
+        durationMs: Long,
+        exactTimeline: Boolean = false
+    ): Lyrics {
         if (lyrics.synced.size < MIN_SYNCED_LINES) return lyrics.copy(synced = emptyList())
         if (durationMs <= 0L) return lyrics
-        val first = lyrics.synced.first().timeMs
-        val last = lyrics.synced.last().timeMs
+        // Captions from the exact YouTube video already belong to the playing
+        // audio. Repair harmless duplicate/out-of-range cues instead of applying
+        // LRCLib's stricter cross-version coverage checks and losing follow mode.
+        val cleaned = lyrics.synced
+            .asSequence()
+            .filter { it.timeMs in 0L..(durationMs + 10_000L) }
+            .sortedBy { it.timeMs }
+            .distinctBy { it.timeMs }
+            .toList()
+        if (exactTimeline) {
+            return if (cleaned.size >= MIN_SYNCED_LINES) lyrics.copy(synced = cleaned)
+            else lyrics.copy(
+                plain = lyrics.plain ?: lyrics.synced.joinToString("\n") { it.text },
+                synced = emptyList()
+            )
+        }
+        val times = cleaned.map { it.timeMs }
+        if (times.size < MIN_SYNCED_LINES) return lyrics.copy(synced = emptyList())
+        val first = times.first()
+        val last = times.last()
+        val gaps = times.zipWithNext { before, after -> after - before }
+        val span = last - first
+        val maxAllowedGap = max(90_000L, durationMs * 45L / 100L)
         val plausible = first <= minOf(90_000L, durationMs * 40L / 100L) &&
             last >= durationMs * 45L / 100L &&
-            last <= durationMs + 10_000L &&
-            lyrics.synced.map { it.timeMs }.distinct().size >= MIN_SYNCED_LINES
-        return if (plausible) lyrics else lyrics.copy(
+            last <= durationMs + 5_000L &&
+            times.all { it >= 0L } &&
+            gaps.all { it >= 0L } &&
+            gaps.none { it > maxAllowedGap } &&
+            span >= minOf(45_000L, durationMs * 25L / 100L)
+        return if (plausible) lyrics.copy(synced = cleaned) else lyrics.copy(
             plain = lyrics.plain ?: lyrics.synced.joinToString("\n") { it.text },
             synced = emptyList()
         )

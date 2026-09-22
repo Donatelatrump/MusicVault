@@ -475,6 +475,14 @@ class MusicVaultViewModel(
     private var lyricsJob: Job? = null
     private val lyricsCache = LinkedHashMap<String, LyricsUiState>()
 
+    private fun lyricsCacheKey(track: Track): String {
+        val exactVideoId = NewPipeStreamResolver.cachedYoutubeVideoId(track.id)
+            ?: track.sourceId?.takeIf { it.length == 11 }
+            ?: Regex("(?:[?&]v=|youtu\\.be/)([A-Za-z0-9_-]{11})")
+                .find(track.url.orEmpty())?.groupValues?.get(1)
+        return "${track.id}|${exactVideoId.orEmpty()}"
+    }
+
     private suspend fun fastestLyrics(track: Track, localReference: String?): com.musicvault.app.lyrics.Lyrics? = coroutineScope {
         val sourceVideoId = track.sourceId?.takeIf { it.length == 11 }
             ?: Regex("(?:[?&]v=|youtu\\.be/)([A-Za-z0-9_-]{11})").find(track.url.orEmpty())?.groupValues?.get(1)
@@ -485,7 +493,7 @@ class MusicVaultViewModel(
         val exactVideoCaptionsAvailable = captionKey != null
         val youtube = async {
             runCatching { NewPipeStreamResolver.cachedYoutubeLyrics(captionKey) }.getOrNull()?.let {
-                LyricsProvider.keepOnlyTrustedSync(it, track.durationMs)
+                LyricsProvider.keepOnlyTrustedSync(it, track.durationMs, exactTimeline = true)
             }
         }
         val lrclib = async {
@@ -535,9 +543,12 @@ class MusicVaultViewModel(
         ) return
         lyricsJob?.cancel()
         lyricsJob = viewModelScope.launch(Dispatchers.IO) {
+            val cacheKey = lyricsCacheKey(track)
             val localReference = database.downloadRecordDao().get(track.id)?.path ?: track.audioUri
             val local = LyricsLocalStore.read(appContext, localReference)?.let {
-                LyricsProvider.keepOnlyTrustedSync(it, track.durationMs)
+                // Stored lyrics were validated before persistence and belong to
+                // this exact local audio file; preserve their follow timeline.
+                LyricsProvider.keepOnlyTrustedSync(it, track.durationMs, exactTimeline = true)
             }
             val state = when {
                 local != null && !local.isEmpty -> LyricsUiState(
@@ -545,7 +556,7 @@ class MusicVaultViewModel(
                     plain = local.plain,
                     synced = local.synced
                 )
-                lyricsCache[track.id] != null -> lyricsCache[track.id]!!
+                lyricsCache[cacheKey] != null -> lyricsCache[cacheKey]!!
                 else -> {
                     _lyrics.value = LyricsUiState(trackId = track.id, loading = true)
                     val aligned = fastestLyrics(track, localReference)
@@ -556,7 +567,7 @@ class MusicVaultViewModel(
                 }
             }
             if (lyricsCache.size >= 40) lyricsCache.clear()
-            lyricsCache[track.id] = state
+            lyricsCache[cacheKey] = state
             _lyrics.value = state
         }
     }

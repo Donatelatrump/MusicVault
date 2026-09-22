@@ -4237,7 +4237,8 @@ private fun centerLyricPosition(recyclerView: RecyclerView, position: Int) {
     recyclerView.post firstPass@{
         val layoutManager = recyclerView.layoutManager as? LinearLayoutManager ?: return@firstPass
         val estimatedHalfRow = (32f * recyclerView.resources.displayMetrics.density).roundToInt()
-        layoutManager.scrollToPositionWithOffset(position, -estimatedHalfRow)
+        val centeredOffset = (recyclerView.height / 2 - estimatedHalfRow).coerceAtLeast(0)
+        layoutManager.scrollToPositionWithOffset(position, centeredOffset)
         recyclerView.post secondPass@{
             val activeView = layoutManager.findViewByPosition(position) ?: return@secondPass
             val activeCenter = (activeView.top + activeView.bottom) / 2
