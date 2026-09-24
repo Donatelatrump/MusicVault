@@ -11,7 +11,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 CACHE = ROOT / 'build/downloads'
-STAGE = ROOT / 'dist/MusicVault-Windows-x64'
+STAGE = ROOT / 'dist/MusicVault-Windows-x64-0.9.7'
 SOURCES = {
  'python.zip': ('https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip', None),
  'mpv.7z': ('https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20260903/mpv-dev-x86_64-20260903-git-69e63f425a.7z', 'fac135c68a35b7639e39d72c0c365104edbaebdea39a0dfdd8c36e8c8e80faef'),
@@ -80,9 +80,9 @@ def main():
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     dest.write_bytes(archive.read(item))
     mpv = ROOT / 'build/mpv'
-    seven = shutil.which('7z') or shutil.which('7zz')
+    seven = shutil.which('7z') or shutil.which('7zz') or shutil.which('7zr')
     if not seven:
-        raise RuntimeError('Install 7-Zip on the build machine.')
+        raise RuntimeError('Install 7-Zip or the standalone 7zr extractor on the build machine.')
     subprocess.run([seven, 'x', '-y', str(CACHE / 'mpv.7z'), '-o' + str(mpv)], check=True, stdout=subprocess.DEVNULL)
     for dll in mpv.rglob('*.dll'):
         shutil.copy2(dll, runtime / dll.name)
@@ -92,9 +92,16 @@ def main():
             raise RuntimeError('Missing runtime: ' + required)
     lock_path.write_text(json.dumps(manifest, indent=2) + '\n')
     (STAGE / 'dependencies.lock.json').write_text(lock_path.read_text())
-    archive = shutil.make_archive(str(STAGE), 'zip', STAGE.parent, STAGE.name)
-    digest = hashlib.sha256(Path(archive).read_bytes()).hexdigest()
-    Path(archive + '.sha256').write_text(digest + '  ' + Path(archive).name + '\n')
+    archive = Path(str(STAGE) + '.zip')
+    with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED) as bundle:
+        for path in STAGE.rglob('*'):
+            relative = path.relative_to(STAGE)
+            if 'Data' in relative.parts[:1] or '__pycache__' in relative.parts or path.suffix == '.pyc':
+                continue
+            if path.is_file():
+                bundle.write(path, Path(STAGE.name) / relative)
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    Path(str(archive) + '.sha256').write_text(digest + '  ' + archive.name + '\n')
     print('Portable:', STAGE, '\nZIP:', archive, flush=True)
 
 

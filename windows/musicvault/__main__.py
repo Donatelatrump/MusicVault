@@ -62,6 +62,7 @@ def main():
         print(f"Falta una dependencia: {exc}. Ejecuta el lanzador con --doctor (Diagnostico.cmd desde la carpeta portable) y consulta README.md.", file=sys.stderr)
         return 1
     app = QApplication([sys.argv[0]])
+    app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("MusicVault")
     app.setApplicationVersion(__version__)
     app.setOrganizationName("MusicVault")

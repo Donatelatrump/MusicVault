@@ -35,3 +35,12 @@ No se probó inicio de sesión real en Spotify, descarga real de YouTube, teclas
 - Solo enlaza DLL del sistema Windows: KERNEL32, msvcrt, SHELL32 y USER32.
 - `packaging/check_launcher.py` aprobado bajo Wine: `--version`, `--doctor`, apertura/cierre real de la ventana con captura, directorio de trabajo independiente y `--data-dir` con espacios y acentos.
 - El .exe requiere las carpetas del ZIP portable junto a él; no es un instalador ni un binario que contenga todas las dependencias.
+# Verificación de Windows 0.9.7 — 2026-09-24
+
+- Se incorporaron el streaming, la caché temporal y las playlists de YouTube de Linux 0.9.7, junto con los cambios de búsqueda, importación, Ajustes y controles; se conservaron el runtime portable, las teclas multimedia y la cancelación de procesos de Windows.
+- `compileall` pasó para `musicvault`, el lanzador y el empaquetado.
+- Diez pruebas dirigidas pasaron con Python 3.12 embebido en Windows: reproducción, rutas portables, procesos, resolución de streaming, caché y promoción de audio. Una de ellas comprobó que reproducir una pista remota usa streaming y no inicia una descarga.
+- `packaging/check_windows.py` pasó: Qt/WebEngine, ventana, libmpv con WAV, teclas multimedia, publicación de descarga simulada y cancelación del proceso.
+- El lanzador nativo ejecutó `--smoke-test` con código de salida 0 y generó una captura. El diagnóstico `--doctor` encontró todas las dependencias y la ventana normal quedó abierta con la biblioteca copiada desde la carpeta anterior.
+- Prueba real de YouTube: la búsqueda devolvió una pista, yt-dlp obtuvo una URL de audio HTTPS y libmpv reprodujo ese stream con salida de audio nula; la posición avanzó 7,53 segundos. Esto confirma decodificación y avance, no sonido audible en los altavoces.
+- El ZIP `MusicVault-Windows-x64-0.9.7.zip` se generó sin `Data/`. No se probó una sesión real de Spotify ni el sonido audible en un dispositivo físico; YouTube sigue dependiendo de la disponibilidad del servicio.

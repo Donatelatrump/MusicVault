@@ -28,7 +28,7 @@ class SpotifyLoginDialog(QDialog):
 
     def __init__(self, parent=None, connected=False):
         super().__init__(parent)
-        self.setWindowTitle("Cuenta de Spotify para SongMirror")
+        self.setWindowTitle("Cuenta de Spotify")
         self.resize(660, 360)
         self.setMinimumSize(620, 340)
         self._connected = bool(connected)
@@ -167,7 +167,7 @@ class SpotifyLoginDialog(QDialog):
         self.login_button.setEnabled(True)
         self.login_button.setText("Usar otra cuenta")
         self.status.setText("Cuenta conectada correctamente")
-        self.detail.setText("Ya puedes importar playlists de Spotify mediante SongMirror.")
+        self.detail.setText("La cuenta quedó lista para importar enlaces de Spotify detectados por MusicVault.")
 
     def mark_rejected(self, message):
         self._checking = False

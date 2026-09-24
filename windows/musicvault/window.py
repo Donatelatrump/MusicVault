@@ -1,4 +1,4 @@
-from collections import OrderedDict
+from collections import OrderedDict, Counter
 from dataclasses import replace
 from pathlib import Path
 import json
@@ -6,24 +6,23 @@ import time
 import unicodedata
 
 from PyQt6.QtCore import Qt, QTimer, QUrl, QSize
-from PyQt6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence, QPixmap, QShortcut, QColor
+from PyQt6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence, QPixmap, QShortcut, QColor, QTransform
 from PyQt6.QtWidgets import (
     QApplication, QAbstractItemView, QCheckBox, QComboBox, QCompleter, QDialog,
-    QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QHeaderView,
+    QFileDialog, QFrame, QHBoxLayout, QHeaderView,
     QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
-    QMenu, QMessageBox, QPushButton, QScrollArea, QSlider, QSpinBox,
+    QMenu, QMessageBox, QPushButton, QScrollArea, QSpinBox,
     QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget,
 )
 
 from . import __version__
 from .library import scan
 from .models import Track, clock_text, data_dir
-from .player import PRESETS
 from .services import Catalog, DownloadCancelled, Jobs, cover_file, download, fetch_lyrics
-from .spotify import playlist_url, spotify_url_from_text
-from .songmirror import load_playlists
+from .spotify import spotify_url_from_text
 from .songmirror_spotify import clear_session, save_session, session_configured, validate_session
 from .downloader import explain_download_error
+from .streaming import StreamingService, StreamCancelled
 from .experience import artist_matches, round_robin, taste_signature
 from .experience_ui import OnboardingDialog, StartupOverlay, TrackPickerDialog
 from .widgets import Cover, Record, STYLE, ElidedLabel, icon, load_fonts
@@ -50,17 +49,29 @@ class Window(QMainWindow):
         super().__init__()
         self.db, self.player = db, player
         self.jobs, self.catalog = Jobs(self), Catalog(db)
+        self.streaming = StreamingService(db)
+        self.stream_jobs = Jobs(self)
+        self.stream_jobs.pool.setMaxThreadCount(1)
+        self.warm_jobs = Jobs(self)
+        self.warm_jobs.pool.setMaxThreadCount(1)
         self.route, self.collection, self.remote_album = "Inicio", None, None
         self.local_album = None
         self.shown_tracks, self.remote_tracks, self.remote_albums = [], [], []
+        self.remote_catalog_tracks, self.remote_youtube_tracks = [], []
+        self.remote_playlists, self.remote_playlist = [], None
         self.search_generation = 0
+        self._submitted_search_query = ""
         self.search_job = None
         self.search_tracks_job = None
         self.search_albums_job = None
+        self.search_youtube_job = None
+        self.search_playlists_job = None
         self.album_job = None
+        self.playlist_job = None
         self.search_mode = "tracks"
         self.search_loading_tracks = False
         self.search_loading_albums = False
+        self.search_loading_playlists = False
         self.home_recommendations, self.home_recommendation_albums = [], []
         self.taste_generation = 0
         self._startup_overlay = None
@@ -72,6 +83,12 @@ class Window(QMainWindow):
         self.cover_jobs = Jobs(self)
         self.cover_jobs.pool.setMaxThreadCount(2)
         self.home_signature = None
+        self.stream_prepare_job = None
+        self.stream_prepare_track_id = None
+        self.stream_warm_job = None
+        self.stream_warm_track_id = None
+        self.stream_warm_generation = 0
+        self._spinner_angle = 0
         self.album_render_signature = None
         self.sidebar_signature = None
         self.library_filters_signature = None
@@ -97,6 +114,13 @@ class Window(QMainWindow):
         self.download_refresh_timer.setSingleShot(True)
         self.download_refresh_timer.setInterval(160)
         self.download_refresh_timer.timeout.connect(self.refresh_download_surfaces)
+        self.play_spinner_timer = QTimer(self)
+        self.play_spinner_timer.setInterval(80)
+        self.play_spinner_timer.timeout.connect(self.animate_play_spinner)
+        self.screen_warm_timer = QTimer(self)
+        self.screen_warm_timer.setSingleShot(True)
+        self.screen_warm_timer.setInterval(650)
+        self.screen_warm_timer.timeout.connect(self.warm_visible_streams)
         self._tray()
         self._shortcuts()
         player.track_changed.connect(self.track_changed)
@@ -105,6 +129,7 @@ class Window(QMainWindow):
         player.queue_changed.connect(self.refresh_queue)
         player.error.connect(self.notify)
         player.need_track.connect(self.ensure_playable)
+        player.stream_cached.connect(self.stream_cached)
         self.refresh_sidebar()
         self.show_route("Inicio")
         self.track_changed(player.current)
@@ -178,17 +203,44 @@ class Window(QMainWindow):
             self.tray = QSystemTrayIcon(self.windowIcon(), self)
             self.tray.setToolTip("MusicVault")
             menu = QMenu(self)
-            menu.addAction("Mostrar MusicVault", self.showNormal)
+            menu.addAction("Mostrar MusicVault", self.restore_from_tray)
             menu.addAction("Reproducir / pausar", self.player.toggle)
             menu.addAction("Siguiente", self.player.next)
             menu.addSeparator()
             menu.addAction("Salir", self.quit_app)
             self.tray.setContextMenu(menu)
-            self.tray.activated.connect(lambda reason: self.showNormal() if reason == QSystemTrayIcon.ActivationReason.Trigger else None)
+            self.tray.activated.connect(
+                lambda reason: self.restore_from_tray()
+                if reason == QSystemTrayIcon.ActivationReason.Trigger else None
+            )
             self.tray.show()
 
+    def _hide_auxiliary_windows_for_tray(self):
+        """Hide every MusicVault top-level surface before the main window goes to tray."""
+        app = QApplication.instance()
+        if not app:
+            return
+        for widget in list(app.topLevelWidgets()):
+            if widget is self:
+                continue
+            try:
+                # Popups, menus and dialogs can otherwise survive the main-window
+                # hide operation as tiny orphan windows under Plasma/KWin.
+                widget.hide()
+            except RuntimeError:
+                pass
+
+    def restore_from_tray(self):
+        # Only the real main window is restored. Auxiliary dialogs stay hidden
+        # until the user explicitly opens them again.
+        if self.isMinimized():
+            self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
     def _shortcuts(self):
-        bindings = {"Ctrl+O": self.import_dialog, "Ctrl+F": lambda: (self.show_route("Buscar"), self.search.setFocus()),
+        bindings = {"Ctrl+F": lambda: (self.show_route("Buscar"), self.search.setFocus()),
                     "Ctrl+Q": self.quit_app, "Ctrl+P": self.player.toggle,
                     "Alt+Right": self.player.next, "Alt+Left": self.player.previous,
                     "Ctrl+L": self.open_queue}
@@ -196,6 +248,7 @@ class Window(QMainWindow):
 
     def show_route(self, route):
         self.route, self.collection, self.remote_album = route, None, None
+        self.remote_playlist = None
         self.local_album = None
         for name, widget in self.nav.items():
             active = name == route
@@ -205,7 +258,7 @@ class Window(QMainWindow):
         self.heading.setText(route)
         self.heading.setVisible(route != "Inicio")
         self.home_greeting.setVisible(route == "Inicio")
-        self.description.setVisible(route not in ("Inicio", "Biblioteca", "Favoritos"))
+        self.description.hide()
         self.home_shelf.setVisible(route == "Inicio")
         self.retry_download_button.setVisible(route == "Descargas")
         self.cancel_download_button.setVisible(route == "Descargas")
@@ -213,13 +266,13 @@ class Window(QMainWindow):
         self.library_filters.setVisible(route in ("Biblioteca", "Favoritos"))
         self.list_title.setText("Tu música" if route == "Inicio" else "Canciones")
         self.search_button.setVisible(route == "Buscar")
-        self.search_source.setVisible(route == "Buscar")
         self.search.show()
         self.search.setPlaceholderText("Filtrar tu música" if route in ("Biblioteca", "Favoritos") else "¿Qué quieres escuchar?")
         self.library_badge.setVisible(route != "Buscar" and self.width() >= 1200)
         self.search.blockSignals(True)
         self.search.clear()
         self.search.blockSignals(False)
+        self._submitted_search_query = ""
         self.debounce.stop()
         self.local_debounce.stop()
         if self.search_job:
@@ -228,53 +281,51 @@ class Window(QMainWindow):
             self.search_tracks_job.cancel.set()
         if self.search_albums_job:
             self.search_albums_job.cancel.set()
+        if self.search_youtube_job:
+            self.search_youtube_job.cancel.set()
+        if self.search_playlists_job:
+            self.search_playlists_job.cancel.set()
         if self.album_job:
             self.album_job.cancel.set()
         if hasattr(self, "import_loading"):
             self.import_loading.hide()
         self.search_generation += 1
-        self.remote_tracks, self.remote_albums = [], []
-        self.search_loading_tracks = self.search_loading_albums = False
+        self.remote_tracks, self.remote_albums, self.remote_playlists = [], [], []
+        self.remote_catalog_tracks, self.remote_youtube_tracks = [], []
+        self.search_loading_tracks = self.search_loading_albums = self.search_loading_playlists = False
         self.search_mode = "tracks"
         self.search_tabs.hide()
         self.search_tracks_tab.setChecked(True)
         self.search_albums_tab.setChecked(False)
+        self.search_playlists_tab.setChecked(False)
         self.download_all_button.hide()
+        self.save_remote_playlist_button.hide()
         self.collection_menu_button.hide()
         self.collection_delete_button.hide()
         self.album_section_title.hide()
+        self.playlist_section_title.hide()
+        self.playlist_list.hide()
         self.new_collection_button.setVisible(route == "Álbumes")
         self.rescan_button.setVisible(route == "Biblioteca")
         self.play_all_button.setVisible(route in ("Biblioteca","Favoritos","Buscar"))
         self.album_list.hide()
         self.album_render_signature = None
         if route == "Álbumes":
-            self.description.setText("Playlists, álbumes personalizados y álbumes de tus archivos.")
             self.stack.setCurrentWidget(self.collections_list)
             self.refresh_collections()
         elif route == "Descargas":
-            self.description.setText("Las canciones aparecen en Biblioteca cuando el audio está listo. Selecciona una descarga para reintentar o cancelar.")
             self.stack.setCurrentWidget(self.downloads_list)
             self.refresh_downloads()
         else:
             self.stack.setCurrentWidget(self.track_page)
-            descriptions = {
-                "Inicio": "Vuelve a tus últimas escuchas o descubre tu biblioteca.",
-                "Biblioteca": "Archivos locales bajo tu control. Doble clic para reproducir; clic derecho para organizar.",
-                "Favoritos": "Las canciones que quieres tener siempre a mano.",
-                "Buscar": "Busca en tu biblioteca y en el catálogo musical. La reproducción descarga el audio completo.",
-            }
-            self.description.setText(descriptions.get(route, ""))
             self.refresh_tracks()
             if route == "Inicio":
                 self.render_album_results(self.home_recommendation_albums, title="Álbumes para ti")
-            if route == "Buscar" and self.db.searches():
-                self.notify("Búsquedas recientes: " + " · ".join(self.db.searches()))
 
     def refresh_tracks(self):
         query = self.search.text()
         availability = {}
-        if self.remote_album:
+        if self.remote_album or self.remote_playlist:
             tracks = [self.db.get_track(t.id) or t for t in self.remote_tracks]
         elif self.local_album is not None:
             tracks = [t for key in self.local_album if (t := self.db.get_track(key))]
@@ -382,6 +433,8 @@ class Window(QMainWindow):
             self.render_album_results(self.home_recommendation_albums, title="Álbumes para ti")
         self.apply_search_mode()
         self.table.schedule_covers()
+        if prior_ids != [t.id for t in tracks] and tracks:
+            self.schedule_visible_stream_warm(initial=True)
 
     def load_visible_covers(self):
         sources = {self.shown_tracks[row].cover for row in self.table.visible_rows()}
@@ -472,9 +525,31 @@ class Window(QMainWindow):
                 self.render_home(self.shown_tracks)
 
     def start_taste_experience(self):
-        """Run the two-step local onboarding once, then warm Home behind an opaque overlay."""
+        """Run taste onboarding only for a truly empty library.
+
+        Existing users should never be asked to retake the taste test merely because
+        the desktop settings database predates onboarding. Their downloaded/imported
+        library is a stronger signal and is converted into a small artist seed.
+        """
         complete = bool(self.db.setting("taste_onboarding_complete", False))
         if not complete:
+            existing = self.db.library_tracks()
+            if existing:
+                favorites = self.db.favorites()
+                weighted = Counter()
+                for track in existing:
+                    artist = (track.artist or "").strip()
+                    if not artist or artist.casefold() == "artista desconocido":
+                        continue
+                    weighted[artist] += 3 if track.id in favorites else 1
+                artists = [artist for artist, _count in weighted.most_common(8)]
+                self.db.set_setting("taste_onboarding_complete", True)
+                self.db.set_setting("favorite_genres", self.db.setting("favorite_genres", []) or [])
+                self.db.set_setting("favorite_artists", artists)
+                self._load_taste_cache()
+                if artists:
+                    self._start_taste_refresh(show_overlay=False)
+                return
             dialog = OnboardingDialog(self)
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 return
@@ -624,6 +699,8 @@ class Window(QMainWindow):
             self._startup_overlay = None
 
     def search_changed(self):
+        """Update UI only; remote search runs exclusively on Enter/Search button."""
+        self.debounce.stop()
         if self.route not in ("Buscar", "Biblioteca", "Favoritos"):
             query = self.search.text()
             self.show_route("Buscar")
@@ -631,39 +708,92 @@ class Window(QMainWindow):
             self.search.setText(query)
             self.search.blockSignals(False)
             self.search.setFocus()
-        self.search_generation += 1
-        self.debounce.stop()
-        for job in (self.search_job, self.search_tracks_job, self.search_albums_job):
-            if job:
-                job.cancel.set()
-        if self.remote_album:
-            self.remote_album = None
-            self.heading.setText("Buscar")
-            self.download_all_button.hide()
-        if self.route == "Buscar":
-            self.remote_tracks, self.remote_albums = [], []
-            self.search_loading_tracks = self.search_loading_albums = False
-            self.album_list.clear()
-            self.album_list.hide()
-            self.album_section_title.hide()
-            self.search_mode = "tracks"
-            self.search_tracks_tab.setChecked(True)
-            self.search_albums_tab.setChecked(False)
-            query = self.search.text().strip()
-            self.search_tabs.setVisible(len(query) >= 2)
-            if len(query) >= 2:
-                self.debounce.start()
-        self.local_debounce.start()
-        self.apply_search_mode()
+        if self.route in ("Biblioteca", "Favoritos"):
+            self.local_debounce.start()
+            return
+        if self.route != "Buscar":
+            return
+        if not self.search.text().strip():
+            self.search_generation += 1
+            self.screen_warm_timer.stop()
+            self.cancel_stream_warm()
+            for job in (self.search_job, self.search_tracks_job, self.search_youtube_job,
+                        self.search_albums_job, self.search_playlists_job):
+                if job:
+                    job.cancel.set()
+            self._submitted_search_query = ""
+            self.remote_tracks, self.remote_albums, self.remote_playlists = [], [], []
+            self.remote_catalog_tracks, self.remote_youtube_tracks = [], []
+            self.search_loading_tracks = self.search_loading_albums = self.search_loading_playlists = False
+            self.search_tabs.hide()
+            self.album_list.clear(); self.album_list.hide()
+            self.playlist_list.clear(); self.playlist_list.hide()
+            self.refresh_tracks()
+            self.apply_search_mode()
+            return
+        # Do not launch a new search while typing. If the user starts editing a
+        # submitted query, stop only the stale background work; visible results
+        # stay in place until Enter/Search explicitly commits the new query.
+        if self.search.text().strip() != self._submitted_search_query:
+            self.search_generation += 1
+            self.screen_warm_timer.stop()
+            self.cancel_stream_warm()
+            for job in (self.search_job, self.search_tracks_job, self.search_youtube_job,
+                        self.search_albums_job, self.search_playlists_job):
+                if job:
+                    job.cancel.set()
+            self.search_loading_tracks = self.search_loading_albums = self.search_loading_playlists = False
+        self.search_tabs.setVisible(bool(self.remote_tracks or self.remote_albums or self.remote_playlists))
+
+    def update_search_tab_labels(self):
+        self.search_tracks_tab.setText(f"Canciones ({len(self.remote_tracks)})" if self.remote_tracks else "Canciones")
+        self.search_albums_tab.setText(f"Álbumes ({len(self.remote_albums)})" if self.remote_albums else "Álbumes")
+        self.search_playlists_tab.setText(f"Playlists ({len(self.remote_playlists)})" if self.remote_playlists else "Playlists")
+
+    @staticmethod
+    def _youtube_first_query(query):
+        terms = ("asmr", "podcast", "audiolibro", "audiobook", "entrevista", "interview",
+                 "charla", "conferencia", "mix", "lofi", "lo-fi", "live set", "dj set")
+        lowered = query.casefold()
+        return any(term in lowered for term in terms)
+
+    @staticmethod
+    def _track_signature(track):
+        def clean(value):
+            return "".join(ch for ch in unicodedata.normalize("NFKD", (value or "").casefold())
+                           if ch.isalnum() and not unicodedata.combining(ch))
+        return clean(track.title), clean(track.artist)
+
+    def merge_remote_search_tracks(self, query):
+        ordered = ((self.remote_youtube_tracks + self.remote_catalog_tracks)
+                   if self._youtube_first_query(query)
+                   else (self.remote_catalog_tracks + self.remote_youtube_tracks))
+        result, seen_ids, seen_names = [], set(), set()
+        for track in ordered:
+            signature = self._track_signature(track)
+            if track.id in seen_ids or signature in seen_names:
+                continue
+            result.append(track)
+            seen_ids.add(track.id)
+            seen_names.add(signature)
+            if len(result) >= 60:
+                break
+        self.remote_tracks = result
+        self.update_search_tab_labels()
+        self.refresh_tracks()
+        self.schedule_visible_stream_warm()
 
     def set_search_mode(self, mode):
-        if mode not in ("tracks", "albums"):
+        if mode not in ("tracks", "albums", "playlists"):
             return
         if mode == "albums" and not self.search_albums_tab.isEnabled():
             mode = "tracks"
         self.search_mode = mode
         self.search_tracks_tab.setChecked(mode == "tracks")
         self.search_albums_tab.setChecked(mode == "albums")
+        self.search_playlists_tab.setChecked(mode == "playlists")
+        if mode == "playlists" and not self.remote_playlists and not self.search_loading_playlists:
+            self.start_playlist_search()
         self.apply_search_mode()
 
     def apply_search_mode(self):
@@ -671,10 +801,12 @@ class Window(QMainWindow):
             return
         query = self.search.text().strip()
         active = len(query) >= 2
-        if self.remote_album:
+        if self.remote_album or self.remote_playlist:
             self.search_tabs.hide()
             self.album_list.hide()
+            self.playlist_list.hide()
             self.album_section_title.hide()
+            self.playlist_section_title.hide()
             self.table.setVisible(bool(self.shown_tracks))
             self.list_title.setVisible(bool(self.shown_tracks))
             self.play_all_button.setVisible(bool(self.shown_tracks))
@@ -685,6 +817,8 @@ class Window(QMainWindow):
             self.table.hide()
             self.list_title.hide()
             self.play_all_button.hide()
+            self.playlist_list.hide()
+            self.playlist_section_title.hide()
             self.album_section_title.setText("Álbumes")
             self.album_section_title.setVisible(active)
             self.album_list.setVisible(bool(self.remote_albums))
@@ -693,9 +827,25 @@ class Window(QMainWindow):
                 self.empty_title.setText("Buscando álbumes…" if self.search_loading_albums else "No encontramos álbumes")
                 self.empty.setText("Prueba con el nombre exacto del artista o del álbum." if not self.search_loading_albums else "Consultando el catálogo sin bloquear las canciones.")
                 self.empty_import.hide()
+        elif self.search_mode == "playlists":
+            self.table.hide()
+            self.list_title.hide()
+            self.play_all_button.hide()
+            self.album_list.hide()
+            self.album_section_title.hide()
+            self.playlist_section_title.setText("Playlists de YouTube")
+            self.playlist_section_title.setVisible(active)
+            self.playlist_list.setVisible(bool(self.remote_playlists))
+            self.empty_panel.setVisible(active and not self.remote_playlists)
+            if active and not self.remote_playlists:
+                self.empty_title.setText("Buscando playlists…" if self.search_loading_playlists else "No encontramos playlists")
+                self.empty.setText("Prueba con otro nombre o pega una URL de playlist de YouTube." if not self.search_loading_playlists else "Consultando YouTube sin bloquear canciones ni álbumes.")
+                self.empty_import.hide()
         else:
             self.album_list.hide()
             self.album_section_title.hide()
+            self.playlist_list.hide()
+            self.playlist_section_title.hide()
             self.table.setVisible(bool(self.shown_tracks))
             self.list_title.setVisible(bool(self.shown_tracks))
             self.play_all_button.setVisible(True)
@@ -703,7 +853,7 @@ class Window(QMainWindow):
             self.empty_panel.setVisible(active and not self.shown_tracks)
             if active and not self.shown_tracks:
                 self.empty_title.setText("Buscando canciones…" if self.search_loading_tracks else "No encontramos canciones")
-                self.empty.setText("Prueba con otro artista, título o álbum." if not self.search_loading_tracks else "Deezer responde primero; otros proveedores solo se usan si hacen falta.")
+                self.empty.setText("Prueba con otro artista, título o álbum." if not self.search_loading_tracks else "Deezer aparece primero y YouTube refina los resultados en segundo plano.")
                 self.empty_import.hide()
 
     def render_album_results(self, albums, title="Álbumes"):
@@ -743,7 +893,63 @@ class Window(QMainWindow):
             self.album_list.setVisible(bool(albums))
         elif self.route == "Buscar":
             self.album_section_title.setText(title)
+            self.update_search_tab_labels()
             self.apply_search_mode()
+
+    def render_playlist_results(self, playlists):
+        self.playlist_list.clear()
+        for playlist in playlists:
+            count = int(playlist.get("count") or 0)
+            suffix = f" · {count} elementos" if count else ""
+            item = QListWidgetItem(f"{playlist.get('title', '')}\n{playlist.get('artist', 'YouTube')}{suffix}")
+            item.setData(Qt.ItemDataRole.UserRole, playlist)
+            item.setSizeHint(self.playlist_list.gridSize())
+            item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+            item.setIcon(icon("queue", "#B3A992", 96))
+            self.playlist_list.addItem(item)
+
+            def set_cover(path, item=item):
+                pixmap = QPixmap(path) if path else QPixmap()
+                if not pixmap.isNull():
+                    complete = pixmap.scaled(148, 148, Qt.AspectRatioMode.KeepAspectRatio,
+                                             Qt.TransformationMode.SmoothTransformation)
+                    item.setIcon(QIcon(complete))
+                self.playlist_list.viewport().update()
+
+            self.load_cover(playlist.get("cover", ""), set_cover)
+        self.update_search_tab_labels()
+        self.apply_search_mode()
+
+    def start_playlist_search(self):
+        if self.route != "Buscar":
+            return
+        query = self.search.text().strip()
+        if len(query) < 2:
+            return
+        if self.search_playlists_job:
+            self.search_playlists_job.cancel.set()
+        generation = self.search_generation
+        self.search_loading_playlists = True
+        self.apply_search_mode()
+
+        def ready(playlists):
+            if generation != self.search_generation or self.route != "Buscar":
+                return
+            self.search_loading_playlists = False
+            self.remote_playlists = list(playlists)
+            self.render_playlist_results(self.remote_playlists)
+
+        def failed(message):
+            if generation != self.search_generation or self.route != "Buscar":
+                return
+            self.search_loading_playlists = False
+            self.remote_playlists = []
+            self.render_playlist_results([])
+            self.notify(message)
+
+        self.search_playlists_job = self.jobs.submit(
+            lambda cancel, progress: self.catalog.search_playlists(query, cancel), ready, failed,
+        )
 
     def submit_search(self):
         self.debounce.stop()
@@ -754,38 +960,50 @@ class Window(QMainWindow):
         query = self.search.text().strip()
         if len(query) < 2:
             return
+        self.search.clearFocus()
         self.search_generation += 1
         generation = self.search_generation
-        for job in (self.search_job, self.search_tracks_job, self.search_albums_job):
+        self.screen_warm_timer.stop()
+        self.cancel_stream_warm()
+        for job in (self.search_job, self.search_tracks_job, self.search_youtube_job,
+                    self.search_albums_job, self.search_playlists_job):
             if job:
                 job.cancel.set()
+        self._submitted_search_query = query
         self.db.add_search(query)
         self.search_history.model().setStringList(self.db.searches())
         self.search_tabs.show()
-        source = "youtube" if self.search_source.currentIndex() == 1 else "catalog"
-        self.search_albums_tab.setEnabled(source != "youtube")
-        if source == "youtube" and self.search_mode == "albums":
-            self.set_search_mode("tracks")
+        self.search_albums_tab.setEnabled(True)
         self.search_loading_tracks = True
-        self.search_loading_albums = source != "youtube"
-        self.remote_tracks, self.remote_albums = [], []
+        self.search_loading_albums = True
+        self.search_loading_playlists = False
+        self.remote_tracks, self.remote_albums, self.remote_playlists = [], [], []
+        self.remote_catalog_tracks, self.remote_youtube_tracks = [], []
         self.render_album_results([], title="Álbumes")
+        self.render_playlist_results([])
         self.refresh_tracks()
-        self.notify("Buscando canciones y álbumes…")
+        pending = {"catalog", "youtube"}
+        self._search_pending_track_sources = pending
 
-        def tracks_ready(rows):
+        def publish_tracks(kind, rows):
             if generation != self.search_generation or self.route != "Buscar":
                 return
-            self.search_loading_tracks = False
-            self.remote_tracks = [Track.from_dict(t) for t in rows]
-            self.refresh_tracks()
-            self.notify(f"{len(self.remote_tracks)} canciones encontradas.")
+            tracks = [Track.from_dict(t) for t in rows]
+            if kind == "catalog":
+                self.remote_catalog_tracks = tracks
+            else:
+                self.remote_youtube_tracks = tracks
+            self._search_pending_track_sources.discard(kind)
+            self.search_loading_tracks = bool(self._search_pending_track_sources)
+            self.merge_remote_search_tracks(query)
 
-        def tracks_error(error):
-            if generation == self.search_generation and self.route == "Buscar":
-                self.search_loading_tracks = False
-                self.remote_tracks = []
-                self.refresh_tracks()
+        def tracks_error(kind, error):
+            if generation != self.search_generation or self.route != "Buscar":
+                return
+            self._search_pending_track_sources.discard(kind)
+            self.search_loading_tracks = bool(self._search_pending_track_sources)
+            self.merge_remote_search_tracks(query)
+            if not self.remote_tracks and not self.search_loading_tracks:
                 self.notify(error)
 
         def albums_ready(albums):
@@ -800,21 +1018,23 @@ class Window(QMainWindow):
                 self.search_loading_albums = False
                 self.remote_albums = []
                 self.render_album_results([], title="Álbumes")
-                self.notify(error)
+                if not self.remote_tracks:
+                    self.notify(error)
 
         self.search_tracks_job = self.jobs.submit(
-            lambda cancel, progress: self.catalog.search_tracks(query, source, cancel),
-            tracks_ready, tracks_error,
+            lambda cancel, progress: self.catalog.search_tracks(query, "catalog", cancel),
+            lambda rows: publish_tracks("catalog", rows), lambda error: tracks_error("catalog", error),
         )
-        if source != "youtube":
-            self.search_albums_job = self.jobs.submit(
-                lambda cancel, progress: self.catalog.search_albums(query, cancel),
-                albums_ready, albums_error,
-            )
-        else:
-            self.search_loading_albums = False
-            self.remote_albums = []
-            self.render_album_results([], title="Álbumes")
+        self.search_albums_job = self.jobs.submit(
+            lambda cancel, progress: self.catalog.search_albums(query, cancel),
+            albums_ready, albums_error,
+        )
+        self.search_youtube_job = self.jobs.submit(
+            lambda cancel, progress: self.catalog.search_tracks(query, "youtube", cancel),
+            lambda rows: publish_tracks("youtube", rows), lambda error: tracks_error("youtube", error),
+        )
+        if self.search_mode == "playlists":
+            self.start_playlist_search()
 
     def import_spotify_playlist(self, url):
         self.search_generation += 1
@@ -822,13 +1042,13 @@ class Window(QMainWindow):
         if self.search_job:
             self.search_job.cancel.set()
         self.import_loading.show()
-        self.notify("Leyendo playlist de Spotify mediante SongMirror…")
+        self.notify("Leyendo playlist de Spotify…")
 
         def ready(playlist):
             self.import_loading.hide()
             if generation != self.search_generation or self.route != "Buscar":
                 return
-            tracks = self.choose_playlist_tracks(playlist, "SongMirror")
+            tracks = self.choose_playlist_tracks(playlist, "Spotify")
             if tracks is None:
                 self.notify("Importación de playlist cancelada.")
                 return
@@ -840,7 +1060,7 @@ class Window(QMainWindow):
             amount = f"{len(tracks)} canciones seleccionadas"
             if playlist.total > len(playlist.tracks):
                 amount += f" de {playlist.total} expuestas por Spotify"
-            answer = QMessageBox.question(self, "Playlist de Spotify mediante SongMirror",
+            answer = QMessageBox.question(self, "Playlist de Spotify",
                 f"{playlist.title}\n\n{amount}.\n\n¿{verb} esta playlist en MusicVault?")
             if answer != QMessageBox.StandardButton.Yes:
                 return
@@ -856,11 +1076,11 @@ class Window(QMainWindow):
             self.search.clear()
             self.search.blockSignals(False)
             self.heading.setText(playlist.title)
-            self.description.setText("Playlist de Spotify importada mediante SongMirror. Las canciones se resuelven con tu proveedor al reproducir o descargar.")
+            self.description.hide()
             self.download_all_button.setText("Descargar playlist")
             self.download_all_button.setVisible(bool(tracks))
             self.render_tracks(self.remote_tracks)
-            self.notify(f"{len(tracks)} canciones importadas mediante SongMirror.")
+            self.notify(f"{len(tracks)} canciones importadas desde Spotify.")
 
         def error(message):
             self.import_loading.hide()
@@ -895,9 +1115,7 @@ class Window(QMainWindow):
             self.search.setText(track.title)
             self.search.blockSignals(False)
             self.heading.setText("Canción de Spotify")
-            self.description.setText(
-                "Canción importada desde Spotify. Reprodúcela o pulsa Descargar canción para guardar el audio."
-            )
+            self.description.hide()
             self.download_all_button.setText("Descargar canción")
             self.download_all_button.show()
             self.render_tracks([track])
@@ -916,73 +1134,6 @@ class Window(QMainWindow):
         self.search_job = self.jobs.submit(
             lambda cancel, progress: self.catalog.spotify_track(url), ready, error,
         )
-
-    def import_songmirror_file(self, path):
-        self.search_generation += 1
-        generation = self.search_generation
-        if self.search_job:
-            self.search_job.cancel.set()
-        self.import_loading.setToolTip("Leyendo exportación de SongMirror…")
-        self.import_loading.setAccessibleName("Cargando exportación de SongMirror")
-        self.import_loading.show()
-        self.notify("Leyendo exportación de SongMirror…")
-
-        def ready(playlists):
-            self.import_loading.hide()
-            self.import_loading.setToolTip("Leyendo la playlist de Spotify mediante SongMirror…")
-            self.import_loading.setAccessibleName("Cargando playlist desde SongMirror")
-            if generation != self.search_generation or self.route != "Buscar":
-                return
-            selected = playlists[0]
-            if len(playlists) > 1:
-                names = [f"{playlist.title} · {len(playlist.tracks)} canciones" for playlist in playlists]
-                choice, accepted = QInputDialog.getItem(self, "Elegir playlist de SongMirror",
-                                                        "El archivo contiene varias playlists:", names, 0, False)
-                if not accepted:
-                    return
-                selected = playlists[names.index(choice)]
-            tracks = self.choose_playlist_tracks(selected, "SongMirror")
-            if tracks is None:
-                self.notify("Importación de playlist cancelada.")
-                return
-            if not tracks:
-                QMessageBox.information(self, "Playlist vacía", "Selecciona al menos una canción para importarla.")
-                return
-            existing = self.db.collection_by_source("songmirror", selected.id)
-            verb = "Actualizar" if existing else "Agregar"
-            answer = QMessageBox.question(self, "Playlist de SongMirror",
-                f"{selected.title}\n\n{len(tracks)} canciones seleccionadas.\n\n¿{verb} esta playlist en MusicVault?")
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-            key = existing["id"] if existing else self.db.create_collection(selected.title, "playlist", "songmirror", selected.id,
-                selected.url, selected.cover)
-            self.db.replace_collection(key, selected.title, tracks, "songmirror", selected.id, selected.url, selected.cover)
-            self.refresh_sidebar()
-            self.remote_tracks = list(tracks)
-            self.collection = key
-            self.search.blockSignals(True)
-            self.search.clear()
-            self.search.blockSignals(False)
-            self.heading.setText(selected.title)
-            self.description.setText("Playlist importada desde una exportación de SongMirror. Las canciones se resuelven con tu proveedor al reproducir o descargar.")
-            self.download_all_button.setText("Descargar playlist")
-            self.download_all_button.setVisible(True)
-            self.render_tracks(self.remote_tracks)
-            self.notify(f"{len(tracks)} canciones importadas desde SongMirror.")
-
-        def error(message):
-            self.import_loading.hide()
-            self.import_loading.setToolTip("Leyendo la playlist de Spotify mediante SongMirror…")
-            self.import_loading.setAccessibleName("Cargando playlist desde SongMirror")
-            if generation != self.search_generation:
-                return
-            self.message_text.setText(str(message))
-            self.message_details.hide()
-            self.retry_action = lambda: self.import_songmirror_file(path)
-            self.message_bar.show()
-            self.notify(message)
-
-        self.search_job = self.jobs.submit(lambda cancel, progress: load_playlists(path), ready, error)
 
     def choose_playlist_tracks(self, playlist, provider):
         """Fast searchable review used by Spotify/SongMirror imports."""
@@ -1021,10 +1172,13 @@ class Window(QMainWindow):
         menu.addAction("Quitar de favoritos" if track.id in self.db.favorites() else "Añadir a favoritos",
                        lambda: self.favorite(track))
         menu.addAction("Añadir a colección…", lambda: self.add_to_collection(selected))
-        if any(not t.path for t in selected):
-            menu.addAction("Descargar", lambda: [self.start_download(t) for t in selected if not t.path])
-        if track.path:
-            menu.addAction("Mostrar carpeta", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(track.path).parent))))
+        resolved_selected = [self.db.resolve_track(t) for t in selected]
+        missing = [t for t in resolved_selected if not (t.path and Path(t.path).is_file())]
+        if missing:
+            menu.addAction("Descargar", lambda items=missing: [self.start_download(t) for t in items])
+        resolved_track = self.db.resolve_track(track)
+        if resolved_track.path and Path(resolved_track.path).is_file():
+            menu.addAction("Mostrar carpeta", lambda p=resolved_track.path: QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(p).parent))))
         if self.collection:
             menu.addAction("Quitar de esta colección", lambda: self.remove_members(selected))
             menu.addAction("Subir en colección", lambda: self.move_member(row, -1))
@@ -1127,8 +1281,11 @@ class Window(QMainWindow):
         self.collection_delete_button.setToolTip("Eliminar playlist" if collection_kind == "playlist" else "Eliminar colección")
         self.download_all_button.setText("Descargar álbum" if collection_kind == "album" else "Descargar playlist")
         self.download_all_button.setVisible(bool(collection_kind))
-        self.description.setText("Doble clic para escuchar. Organiza las canciones desde el menú contextual.")
+        self.save_remote_playlist_button.hide()
+        self.description.hide()
         self.render_tracks([Track.from_dict(t) for t in data["local"]] if "local" in data else self.db.tracks(collection=self.collection))
+        self.main_scroll.verticalScrollBar().setValue(0)
+        self.schedule_visible_stream_warm(initial=True)
 
     def collection_list_menu(self, position):
         item = self.collections_list.itemAt(position)
@@ -1190,6 +1347,59 @@ class Window(QMainWindow):
             self.db.reorder_members(self.collection, ids)
             self.refresh_tracks()
 
+    def open_playlist_item(self, item):
+        playlist = item.data(Qt.ItemDataRole.UserRole)
+        if self.playlist_job:
+            self.playlist_job.cancel.set()
+        self.search_generation += 1
+        generation = self.search_generation
+        self.notify("Cargando playlist de YouTube…")
+
+        def ready(tracks):
+            if generation != self.search_generation:
+                return
+            self.remote_playlist, self.remote_album, self.collection = playlist, None, None
+            self.remote_tracks = list(tracks)
+            self.search_mode = "tracks"
+            self.search_tabs.hide()
+            self.album_section_title.hide()
+            self.playlist_section_title.hide()
+            self.heading.setText(playlist.get("title", "Playlist"))
+            self.description.setText(playlist.get("artist", "YouTube"))
+            self.description.setVisible(bool(playlist.get("artist")))
+            self.album_list.hide()
+            self.playlist_list.hide()
+            self.download_all_button.setText("Descargar playlist")
+            self.download_all_button.setVisible(bool(tracks))
+            self.save_remote_playlist_button.setVisible(bool(tracks))
+            self.render_tracks(self.remote_tracks)
+            self.main_scroll.verticalScrollBar().setValue(0)
+            self.schedule_visible_stream_warm(initial=True)
+            self.notify(f"{len(tracks)} elementos cargados. Reproducir usa streaming; descargar es opcional.")
+
+        self.playlist_job = self.jobs.submit(
+            lambda cancel, progress: self.catalog.playlist_tracks(playlist, cancel), ready, self.notify,
+        )
+
+    def save_remote_playlist(self, _checked=False, silent=False):
+        if not self.remote_playlist or not self.remote_tracks:
+            return None
+        playlist = self.remote_playlist
+        existing = self.db.collection_by_source("youtube", playlist.get("id", ""), kind="playlist")
+        key = existing["id"] if existing else self.db.create_collection(
+            playlist.get("title", "Playlist de YouTube"), "playlist", "youtube", playlist.get("id", ""),
+            playlist.get("url", ""), playlist.get("cover", ""),
+        )
+        self.db.replace_collection(
+            key, playlist.get("title", "Playlist de YouTube"), self.remote_tracks,
+            "youtube", playlist.get("id", ""), playlist.get("url", ""), playlist.get("cover", ""),
+        )
+        self.collection = key
+        self.refresh_sidebar()
+        if not silent:
+            self.notify(f"Playlist agregada a MusicVault: {len(self.remote_tracks)} canciones, sin descargarlas.")
+        return key
+
     def open_album_item(self, item):
         album = item.data(Qt.ItemDataRole.UserRole)
         if self.album_job:
@@ -1201,21 +1411,27 @@ class Window(QMainWindow):
         def ready(tracks):
             if generation != self.search_generation:
                 return
-            self.remote_album, self.collection = album, None
+            self.remote_album, self.remote_playlist, self.collection = album, None, None
             self.remote_tracks = tracks
             self.search_mode = "tracks"
             self.search_tabs.hide()
             self.album_section_title.hide()
             self.heading.setText(album["title"])
             self.description.setText(album["artist"])
+            self.description.setVisible(bool(album.get("artist")))
             self.album_list.hide()
             self.download_all_button.setText("Descargar álbum")
             self.download_all_button.show()
+            self.save_remote_playlist_button.hide()
             self.render_tracks(tracks)
+            self.main_scroll.verticalScrollBar().setValue(0)
+            self.schedule_visible_stream_warm(initial=True)
 
         self.album_job = self.jobs.submit(lambda cancel, progress: self.catalog.album_tracks(album), ready, self.notify)
 
     def download_all(self):
+        if self.remote_playlist:
+            self.save_remote_playlist(silent=True)
         if self.remote_album:
             album = self.remote_album
             existing = self.db.collection_by_source(album["source"], album["id"], kind="album")
@@ -1242,22 +1458,6 @@ class Window(QMainWindow):
         else:
             self.notify("Todas las canciones ya están disponibles en tu biblioteca.")
 
-    def import_dialog(self):
-        menu = QMenu(self)
-        menu.addAction("Archivos de audio…", self.import_files)
-        menu.addAction("Carpeta de música…", self.import_folder)
-        menu.addSeparator()
-        account_text = ("Administrar cuenta de Spotify para SongMirror…" if session_configured()
-                        else "Agregar cuenta de Spotify para SongMirror…")
-        spotify_account = menu.addAction(account_text, self.spotify_account_dialog)
-        spotify_account.setIcon(icon("user", "#E0A458", 18))
-        spotify = menu.addAction("Playlist de Spotify mediante SongMirror…", self.import_spotify_dialog)
-        spotify.setIcon(icon("search", "#E0A458", 18))
-        trigger = self.sender()
-        position = (trigger.mapToGlobal(trigger.rect().bottomLeft()) if isinstance(trigger, QWidget)
-                    else self.mapToGlobal(self.rect().center()))
-        menu.exec(position)
-
     def spotify_account_dialog(self):
         try:
             from .spotify_login import SpotifyLoginDialog
@@ -1279,7 +1479,7 @@ class Window(QMainWindow):
                     dialog.mark_rejected(f"No se pudo guardar la sesión: {exc}")
                     return
                 dialog.mark_connected()
-                self.notify("Spotify quedó conectado para importar playlists.")
+                self.notify("Spotify quedó conectado.")
                 self.check_spotify_clipboard(force=True)
 
             def rejected(message):
@@ -1296,50 +1496,11 @@ class Window(QMainWindow):
             clear_session()
             self._clipboard_spotify = None
             self.hide_spotify_clipboard_prompt()
-            self.notify("Se eliminó la sesión local de Spotify.")
+            self.notify("Se desconectó Spotify.")
 
         dialog.session_captured.connect(captured)
         dialog.disconnect_requested.connect(remove_account)
         dialog.exec()
-
-    def import_spotify_dialog(self):
-        url, ok = QInputDialog.getText(self, "Playlist de Spotify mediante SongMirror", "Pega el enlace de la playlist de Spotify:")
-        if not ok or not url.strip():
-            return
-        try:
-            _, canonical = playlist_url(url)
-        except ValueError as exc:
-            QMessageBox.warning(self, "Enlace no válido", str(exc))
-            return
-        # Aunque se inicie desde Biblioteca, Buscar muestra las pistas recién
-        # importadas y conserva la playlist en la barra lateral.
-        self.show_route("Buscar")
-        self.search.blockSignals(True)
-        self.search.setText(canonical)
-        self.search.blockSignals(False)
-        self.import_spotify_playlist(canonical)
-
-    def import_songmirror_dialog(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Importar exportación de SongMirror", str(Path.home()),
-            "Exportaciones de SongMirror (*.json *.xml);;JSON (*.json);;XML (*.xml);;Todos los archivos (*)")
-        if not path:
-            return
-        self.show_route("Buscar")
-        self.import_songmirror_file(path)
-
-    def import_files(self):
-        paths, _ = QFileDialog.getOpenFileNames(self, "Importar música", str(Path.home()),
-            "Audio (*.mp3 *.flac *.ogg *.opus *.m4a *.aac *.wav *.aiff *.wma *.ape *.wv);;Todos los archivos (*)")
-        if paths:
-            self.import_paths(paths)
-
-    def import_folder(self):
-        path = QFileDialog.getExistingDirectory(self, "Elegir carpeta de música", str(Path.home()))
-        if path:
-            roots = self.db.setting("library_roots", [])
-            if path not in roots:
-                self.db.set_setting("library_roots", roots + [path])
-            self.import_paths([path])
 
     def import_paths(self, paths, play=False, explicit=True):
         self.notify("Leyendo archivos de audio…")
@@ -1374,21 +1535,172 @@ class Window(QMainWindow):
         self.import_paths([url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()])
         event.acceptProposedAction()
 
+    def cancel_stream_warm(self, keep_track_id=None):
+        self.stream_warm_generation += 1
+        if self.stream_warm_job and self.stream_warm_track_id != keep_track_id:
+            self.stream_warm_job.cancel.set()
+            self.stream_warm_job = None
+            self.stream_warm_track_id = None
+
+    def schedule_visible_stream_warm(self, *_args, initial=False):
+        if self.route not in ("Inicio", "Buscar") and not (self.remote_album or self.remote_playlist or self.collection):
+            return
+        if not self.shown_tracks:
+            return
+        self.screen_warm_timer.setInterval(650 if initial else 420)
+        self.screen_warm_timer.start()
+
+    def warm_visible_streams(self):
+        if not self.shown_tracks or self._quitting:
+            return
+        rows = list(self.table.visible_rows())
+        if not rows:
+            rows = list(range(min(4, len(self.shown_tracks))))
+        candidates = []
+        for row in rows:
+            if not 0 <= row < len(self.shown_tracks):
+                continue
+            track = self.db.resolve_track(self.shown_tracks[row])
+            if track.source == "local" or (track.path and Path(track.path).is_file()) or self.streaming.cached_media(track, refresh=False):
+                continue
+            if track.id not in {item.id for item in candidates}:
+                candidates.append(track)
+            if len(candidates) >= 4:
+                break
+        if not candidates:
+            return
+        self.cancel_stream_warm()
+        generation = self.stream_warm_generation
+        self.stream_warm_track_id = candidates[0].id
+
+        def work(cancel, report):
+            ready = []
+            # Phase 1: fully resolve the most likely row.
+            first = candidates[0]
+            report(("warming", first.id))
+            try:
+                url = self.streaming.resolve(first, cancel)
+                ready.append((first, url))
+                report(("ready", first, url))
+            except StreamCancelled:
+                return ready
+            except Exception:
+                pass
+            # Phase 2: cheap/stable match for rows 2-4.
+            for track in candidates[1:4]:
+                if cancel.is_set():
+                    return ready
+                report(("warming", track.id))
+                try:
+                    self.streaming.match(track, cancel)
+                except StreamCancelled:
+                    return ready
+                except Exception:
+                    continue
+            # Phase 3: fully resolve rows 2-3 using the cached match.
+            for track in candidates[1:3]:
+                if cancel.is_set():
+                    return ready
+                report(("warming", track.id))
+                try:
+                    url = self.streaming.resolve(track, cancel)
+                    ready.append((track, url))
+                    report(("ready", track, url))
+                except StreamCancelled:
+                    return ready
+                except Exception:
+                    continue
+            return ready
+
+        def progress(payload):
+            if generation != self.stream_warm_generation:
+                return
+            if not isinstance(payload, tuple) or not payload:
+                return
+            if payload[0] == "warming":
+                self.stream_warm_track_id = payload[1]
+            elif payload[0] == "ready":
+                track, url = payload[1], payload[2]
+                self.player.prepare_stream(track, url)
+
+        def finished():
+            if generation == self.stream_warm_generation:
+                self.stream_warm_job = None
+                self.stream_warm_track_id = None
+
+        self.stream_warm_job = self.warm_jobs.submit(work, progress=progress, finished=finished)
+
+    def prewarm_stream(self, track):
+        resolved = self.db.resolve_track(track)
+        if resolved.source == "local" or (resolved.path and Path(resolved.path).is_file()):
+            return
+        if self.streaming.cached_media(resolved, refresh=False) or self.player.prepared_stream(resolved):
+            return
+        self.cancel_stream_warm(keep_track_id=resolved.id)
+        if self.stream_warm_job and self.stream_warm_track_id == resolved.id:
+            return
+        self.stream_warm_track_id = resolved.id
+        generation = self.stream_warm_generation
+
+        def work(cancel, report):
+            return self.streaming.resolve(resolved, cancel)
+
+        def ready(url):
+            if generation == self.stream_warm_generation:
+                self.player.prepare_stream(resolved, url)
+
+        def finished():
+            if generation == self.stream_warm_generation:
+                self.stream_warm_job = None
+                self.stream_warm_track_id = None
+
+        self.stream_warm_job = self.warm_jobs.submit(work, ready, lambda _error: None, finished=finished)
+
+    def stream_cached(self, track, path):
+        # Streaming cache is an implementation detail: keep it invisible in the UI.
+        # A later explicit Download action can promote this cached media without
+        # fetching the same bytes again.
+        self.streaming.mark_cached(track, path)
+
     def ensure_playable(self, track):
         expected = self.player.index
         request = self.player.request_generation
-
-        def ready(result):
-            if (self.player.current and self.player.current.id == result.id and self.player.index == expected
-                    and self.player.request_generation == request):
-                self.player.play_index(expected)
-
-        record = self.db.download_record(track.id)
-        if record and record["status"] in ("error", "cancelled", "interrupted"):
-            self.notify("La descarga anterior no se completó. Puedes reintentar desde el aviso.")
-            self.show_download_error(track, ready)
+        cached = self.streaming.cached_media(track)
+        if cached:
+            self.player.play_resolved(track, cached, expected_index=expected, request=request)
             return
-        self.start_download(track, ready)
+
+        # If this exact track is being warmed, keep that work alive. Unrelated
+        # speculative work is canceled so foreground playback gets priority.
+        self.cancel_stream_warm(keep_track_id=track.id)
+        if self.stream_prepare_job:
+            self.stream_prepare_job.cancel.set()
+        self.stream_prepare_track_id = track.id
+
+        def work(cancel, progress):
+            url = self.streaming.resolve(track, cancel)
+            return url
+
+        def ready(url):
+            self.stream_prepare_job = None
+            self.stream_prepare_track_id = None
+            if not (self.player.current and self.player.current.id == track.id
+                    and self.player.index == expected and self.player.request_generation == request):
+                return
+            self.player.prepare_stream(track, url)
+            record_path = self.streaming.record_path(track)
+            self.player.play_resolved(track, url, record_path=record_path,
+                                      expected_index=expected, request=request)
+            self.schedule_visible_stream_warm(initial=True)
+
+        def failed(message):
+            self.stream_prepare_job = None
+            self.stream_prepare_track_id = None
+            if self.player.current and self.player.current.id == track.id:
+                self.player.preparation_failed(track)
+                self.notify(f"No se pudo preparar «{track.title}» para streaming. {message}")
+
+        self.stream_prepare_job = self.stream_jobs.submit(work, ready, failed)
 
     def start_download(self, track, callback=None, prepared=False, defer_refresh=False, silent=False):
         if not prepared:
@@ -1427,7 +1739,12 @@ class Window(QMainWindow):
 
         def work(cancel, report):
             try:
-                result = download(track, destination, cancel, report)
+                try:
+                    result = self.streaming.promote_cached(track, destination, cancel, report)
+                except StreamCancelled:
+                    raise DownloadCancelled()
+                if result is None:
+                    result = download(track, destination, cancel, report)
                 # Publish the durable record before signaling the UI, including during shutdown.
                 self.db.save_track(result)
                 self.db.set_download(result, "complete", 100)
@@ -1547,8 +1864,27 @@ class Window(QMainWindow):
         modes = ["off", "all", "one"]
         self.player.set_repeat(modes[(modes.index(self.player.repeat) + 1) % 3])
 
+    def animate_play_spinner(self):
+        self._spinner_angle = (self._spinner_angle + 30) % 360
+        base = icon("refresh", "#191207", 22).pixmap(22, 22)
+        spun = base.transformed(QTransform().rotate(self._spinner_angle), Qt.TransformationMode.SmoothTransformation)
+        self.play_button.setIcon(QIcon(spun))
+        if self.player_dialog:
+            full = icon("refresh", "#191207", 30).pixmap(30, 30)
+            self.full_play.setIcon(QIcon(full.transformed(QTransform().rotate(self._spinner_angle), Qt.TransformationMode.SmoothTransformation)))
+
     def playback_changed(self):
-        self.play_button.setIcon(icon("pause" if self.player.playing else "play","#191207"))
+        if self.player.preparing:
+            if not self.play_spinner_timer.isActive():
+                self.play_spinner_timer.start()
+            self.animate_play_spinner()
+            self.play_button.setToolTip("Preparando streaming…")
+            self.play_button.setEnabled(False)
+        else:
+            self.play_spinner_timer.stop()
+            self.play_button.setEnabled(True)
+            self.play_button.setToolTip("Reproducir o pausar")
+            self.play_button.setIcon(icon("pause" if self.player.playing else "play","#191207"))
         self.shuffle_button.setChecked(self.player.shuffle)
         self.repeat_button.setToolTip("Repetir: " + {"off": "no", "all": "todo", "one": "una"}[self.player.repeat])
         self.shuffle_button.setIcon(icon("shuffle","#E0A458" if self.player.shuffle else "#7E7666"))
@@ -1558,7 +1894,9 @@ class Window(QMainWindow):
         self.volume.setValue(round(self.player.volume))
         self.volume.blockSignals(False)
         if self.player_dialog:
-            self.full_play.setIcon(icon("pause" if self.player.playing else "play","#191207",34))
+            if not self.player.preparing:
+                self.full_play.setIcon(icon("pause" if self.player.playing else "play","#191207",34))
+            self.full_play.setEnabled(not self.player.preparing)
             self.full_shuffle.setIcon(self.shuffle_button.icon())
             self.full_repeat.setIcon(self.repeat_button.icon())
 
@@ -1628,13 +1966,14 @@ class Window(QMainWindow):
         if self.player_dialog:
             self.update_full_player()
         self.refresh_queue()
-        # Prefetch one successor so remote album playback can continue after the current file.
+        # Warm one successor without turning playback into a permanent download.
         if self.db.setting("prefetch", True) and self.player.playing:
             index = self.player.next_index(automatic=True)
             if index is not None:
                 successor = self.player.queue[index]
-                if successor.source != "local" and not successor.path:
-                    self.start_download(successor)
+                resolved = self.db.resolve_track(successor)
+                if resolved.source != "local" and not (resolved.path and Path(resolved.path).is_file()):
+                    self.prewarm_stream(resolved)
 
     def apply_current_cover(self, track_id, path):
         if self.player.current and self.player.current.id == track_id:
@@ -1726,23 +2065,86 @@ class Window(QMainWindow):
 
     def settings(self):
         dialog = QDialog(self)
+        dialog.setObjectName("settingsDialog")
         dialog.setWindowTitle("Ajustes de MusicVault")
-        dialog.resize(670, 720)
-        layout = QVBoxLayout(dialog)
+        dialog.resize(760, 700)
+        dialog.setMinimumSize(640, 560)
+
+        root = QVBoxLayout(dialog)
+        root.setContentsMargins(22, 18, 22, 18)
+        root.setSpacing(14)
+
+        header = QVBoxLayout()
+        header.setSpacing(0)
+        title = label("Ajustes", "settingsTitle")
+        header.addWidget(title)
+        root.addLayout(header)
+
         scroll = QScrollArea()
+        scroll.setObjectName("settingsScroll")
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         page = QWidget()
-        form = QFormLayout(page)
-        form.setSpacing(16)
-        form.addRow(label("Tu forma de escuchar", "heading"))
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 4, 8, 6)
+        page_layout.setSpacing(14)
+
+        def section(title_text):
+            card = QFrame()
+            card.setObjectName("settingsCard")
+            box = QVBoxLayout(card)
+            box.setContentsMargins(18, 16, 18, 16)
+            box.setSpacing(0)
+            heading = label(title_text, "settingsSectionTitle")
+            box.addWidget(heading)
+            box.addSpacing(10)
+            page_layout.addWidget(card)
+            return box
+
+        def divider(box):
+            line = QFrame()
+            line.setObjectName("settingsDivider")
+            line.setFixedHeight(1)
+            box.addWidget(line)
+
+        def setting_row(box, name, control=None, value_text=None, description=None):
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 8, 0, 8)
+            row.setSpacing(18)
+            text_box = QVBoxLayout()
+            text_box.setSpacing(2)
+            name_label = label(name, "settingsLabel")
+            text_box.addWidget(name_label)
+            if description:
+                desc = label(description, "settingsDescription")
+                desc.setWordWrap(True)
+                text_box.addWidget(desc)
+            row.addLayout(text_box, 1)
+            if value_text is not None:
+                value = label(value_text, "settingsValue")
+                value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                row.addWidget(value)
+            if control is not None:
+                row.addWidget(control, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            box.addLayout(row)
+            return row
+
+        # Reproducción
+        playback = section("Reproducción")
         crossfade = QSpinBox()
         crossfade.setRange(0, 12)
         crossfade.setSuffix(" s")
+        crossfade.setFixedWidth(118)
         crossfade.setValue(self.player.crossfade)
-        crossfade.valueChanged.connect(lambda value: (setattr(self.player, "crossfade", value), self.db.set_setting("crossfade", value)))
-        form.addRow("Crossfade", crossfade)
+        crossfade.valueChanged.connect(
+            lambda value: (setattr(self.player, "crossfade", value), self.db.set_setting("crossfade", value))
+        )
+        setting_row(playback, "Crossfade", crossfade)
+        divider(playback)
+
         style = QComboBox()
         style.addItems(["Vinilo", "Circular"])
+        style.setFixedWidth(150)
         style.setCurrentIndex(0 if self.db.setting("player_style", "vinyl") == "vinyl" else 1)
 
         def set_style(index):
@@ -1753,145 +2155,207 @@ class Window(QMainWindow):
                 self.record.update()
 
         style.currentIndexChanged.connect(set_style)
-        form.addRow("Estilo del reproductor", style)
+        setting_row(playback, "Estilo del reproductor", style)
+        divider(playback)
+
         sleep = QSpinBox()
         sleep.setRange(0, 240)
-        sleep.setSuffix(" min (0 = apagado)")
+        sleep.setSuffix(" min")
+        sleep.setSpecialValueText("Apagado")
+        sleep.setFixedWidth(140)
         if self.player.sleep_deadline:
             sleep.setValue(max(1, round((self.player.sleep_deadline - time.monotonic()) / 60)))
         sleep.valueChanged.connect(self.player.set_sleep)
-        form.addRow("Temporizador de sueño", sleep)
-        preset = QComboBox()
-        preset.addItems(["Personalizado"] + list(PRESETS))
-        form.addRow("Ecualizador", preset)
-        bands = []
-        band_row = QHBoxLayout()
-        current = self.db.setting("equalizer", [0] * 5)
-        for index, frequency in enumerate(["60 Hz", "230 Hz", "910 Hz", "3.6 kHz", "14 kHz"]):
-            column = QVBoxLayout()
-            slider = QSlider(Qt.Orientation.Vertical)
-            slider.setRange(-150, 150)
-            slider.setValue(round(current[index] * 10))
-            slider.setMinimumHeight(120)
-            slider.setAccessibleName("Ecualizador " + frequency)
-            column.addWidget(slider, alignment=Qt.AlignmentFlag.AlignHCenter)
-            value_label = label(f"{current[index]:g} dB", "muted")
-            column.addWidget(value_label)
-            column.addWidget(label(frequency))
-            slider.valueChanged.connect(lambda value, display=value_label: display.setText(f"{value / 10:g} dB"))
-            bands.append(slider)
-            band_row.addLayout(column)
-        form.addRow(band_row)
-        loudness = QSpinBox()
-        loudness.setRange(0, 12)
-        loudness.setSuffix(" dB")
-        loudness.setValue(round(self.db.setting("loudness", 0)))
-        stereo = QDoubleSpinBox()
-        stereo.setRange(0, 2)
-        stereo.setSingleStep(0.1)
-        stereo.setValue(self.db.setting("stereo", 1))
+        setting_row(playback, "Temporizador de sueño", sleep)
+        divider(playback)
 
-        def apply_eq():
-            try:
-                self.player.apply_equalizer([s.value() / 10 for s in bands], loudness.value(), stereo.value())
-            except RuntimeError as exc:
-                self.notify(f"No se pudo aplicar el ecualizador: {exc}")
+        prefetch = QCheckBox()
+        prefetch.setObjectName("settingsSwitch")
+        prefetch.setChecked(self.db.setting("prefetch", True))
+        prefetch.toggled.connect(lambda value: self.db.set_setting("prefetch", value))
+        setting_row(playback, "Preparar siguiente canción", prefetch)
+        divider(playback)
 
-        eq_timer = QTimer(dialog)
-        eq_timer.setSingleShot(True)
-        eq_timer.setInterval(100)
-        eq_timer.timeout.connect(apply_eq)
-        for slider in bands:
-            slider.valueChanged.connect(lambda value: eq_timer.start())
-        loudness.valueChanged.connect(apply_eq)
-        stereo.valueChanged.connect(apply_eq)
+        continue_playing = QCheckBox()
+        continue_playing.setObjectName("settingsSwitch")
+        continue_playing.setChecked(self.db.setting("auto_continue", False))
+        continue_playing.toggled.connect(lambda value: self.db.set_setting("auto_continue", value))
+        setting_row(playback, "Continuar con música relacionada", continue_playing)
 
-        def set_preset(name):
-            if name in PRESETS:
-                for slider, value in zip(bands, PRESETS[name]):
-                    slider.setValue(round(value * 10))
-                apply_eq()
-
-        preset.currentTextChanged.connect(set_preset)
-        form.addRow("Ganancia adicional", loudness)
-        form.addRow("Amplitud estéreo (1 = original)", stereo)
+        # Cuenta
+        account = section("Cuenta")
         spotify_status = label(
-            "Cuenta conectada en este equipo" if session_configured() else "Spotify no está conectado",
-            "muted",
+            "Conectado" if session_configured() else "No conectado",
+            "settingsValue",
         )
-        spotify_actions = QHBoxLayout()
-        connect_spotify_button = QPushButton(
-            "Administrar cuenta" if session_configured() else "Iniciar sesión con Spotify"
-        )
-        connect_spotify_button.setObjectName("primary")
-        spotify_actions.addWidget(connect_spotify_button)
-        spotify_actions.addStretch()
+        spotify_button = QPushButton("Administrar" if session_configured() else "Conectar")
+        spotify_button.setObjectName("settingsAction")
+        spotify_button.setMinimumWidth(116)
 
         def connect_spotify():
             self.spotify_account_dialog()
             connected = session_configured()
-            spotify_status.setText(
-                "Cuenta conectada en este equipo" if connected else "Spotify no está conectado"
-            )
-            connect_spotify_button.setText(
-                "Administrar cuenta" if connected else "Iniciar sesión con Spotify"
-            )
+            spotify_status.setText("Conectado" if connected else "No conectado")
+            spotify_button.setText("Administrar" if connected else "Conectar")
 
-        connect_spotify_button.clicked.connect(connect_spotify)
-        form.addRow("Spotify", spotify_actions)
-        form.addRow(spotify_status)
-        songmirror_help = label(
-            "El inicio de sesión se abre dentro de MusicVault. El navegador es temporal y solo la sesión necesaria para SongMirror se guarda en un archivo local, nunca en la base de datos.",
-            "muted",
-        )
-        songmirror_help.setWordWrap(True)
-        form.addRow(songmirror_help)
-        folder = label(self.db.setting("download_folder", str(data_dir() / "downloads")), "muted")
-        folder.setWordWrap(True)
+        spotify_button.clicked.connect(connect_spotify)
+        account_row = QHBoxLayout()
+        account_row.setContentsMargins(0, 8, 0, 8)
+        account_row.setSpacing(12)
+        account_row.addWidget(label("Spotify", "settingsLabel"), 1)
+        account_row.addWidget(spotify_status)
+        account_row.addWidget(spotify_button)
+        account.addLayout(account_row)
+
+        # Biblioteca y almacenamiento
+        storage = section("Biblioteca y almacenamiento")
+        folder_path = self.db.setting("download_folder", str(data_dir() / "downloads"))
+        folder_value = label(Path(folder_path).name or folder_path, "settingsValue")
+        folder_value.setToolTip(folder_path)
+        folder_button = QPushButton("Cambiar")
+        folder_button.setObjectName("settingsAction")
 
         def choose_folder():
-            path = QFileDialog.getExistingDirectory(dialog, "Carpeta de descargas", folder.text())
+            path = QFileDialog.getExistingDirectory(dialog, "Carpeta de descargas", self.db.setting("download_folder", folder_path))
             if path:
                 self.db.set_setting("download_folder", path)
-                folder.setText(path)
+                folder_value.setText(Path(path).name or path)
+                folder_value.setToolTip(path)
+                path_hint.setText(path)
 
-        form.addRow("Descargas", folder)
-        form.addRow(button("Cambiar carpeta de descargas", choose_folder))
+        folder_button.clicked.connect(choose_folder)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 8, 0, 8)
+        row.setSpacing(12)
+        text_box = QVBoxLayout()
+        text_box.setSpacing(2)
+        text_box.addWidget(label("Carpeta de descargas", "settingsLabel"))
+        path_hint = label(folder_path, "settingsDescription")
+        path_hint.setWordWrap(True)
+        text_box.addWidget(path_hint)
+        row.addLayout(text_box, 1)
+        row.addWidget(folder_value)
+        row.addWidget(folder_button)
+        storage.addLayout(row)
+        divider(storage)
+
         roots = QListWidget()
-        roots.setMaximumHeight(100)
+        roots.setObjectName("settingsRoots")
+        roots.setMaximumHeight(112)
         roots.addItems(self.db.setting("library_roots", []))
-        form.addRow("Carpetas de biblioteca", roots)
+        roots.setVisible(roots.count() > 0)
+        roots_title = label("Carpetas escaneadas", "settingsLabel")
+        storage.addWidget(roots_title)
+        if roots.count() > 0:
+            storage.addSpacing(6)
+        storage.addWidget(roots)
+        remove_root = QPushButton("Dejar de escanear carpeta seleccionada")
+        remove_root.setObjectName("settingsGhost")
+        remove_root.setEnabled(roots.count() > 0)
 
         def forget_root():
             item = roots.takeItem(roots.currentRow())
             if item:
                 self.db.set_setting("library_roots", [roots.item(i).text() for i in range(roots.count())])
+                roots.setVisible(roots.count() > 0)
+                remove_root.setEnabled(roots.count() > 0)
 
-        form.addRow(button("Dejar de escanear carpeta seleccionada", forget_root))
-        auto = QCheckBox("Actualizar las carpetas cada 5 minutos")
+        remove_root.clicked.connect(forget_root)
+        storage.addSpacing(8)
+        storage.addWidget(remove_root, 0, Qt.AlignmentFlag.AlignLeft)
+        divider(storage)
+
+        import_library_button = QPushButton("Importar carpeta")
+        import_library_button.setObjectName("settingsAction")
+
+        def import_library_folder():
+            current_roots = self.db.setting("library_roots", [])
+            start_dir = current_roots[0] if current_roots else str(Path.home())
+            path = QFileDialog.getExistingDirectory(dialog, "Importar carpeta de música", start_dir)
+            if not path:
+                return
+            roots_now = self.db.setting("library_roots", [])
+            if path not in roots_now:
+                roots_now = roots_now + [path]
+                self.db.set_setting("library_roots", roots_now)
+                roots.addItem(path)
+            roots.setVisible(roots.count() > 0)
+            remove_root.setEnabled(roots.count() > 0)
+            self.import_paths([path])
+
+        import_library_button.clicked.connect(import_library_folder)
+        setting_row(storage, "Música local", import_library_button)
+        divider(storage)
+
+        auto = QCheckBox()
+        auto.setObjectName("settingsSwitch")
         auto.setChecked(self.db.setting("auto_scan", True))
-        auto.toggled.connect(lambda value: (self.db.set_setting("auto_scan", value), self.auto_scan.start() if value else self.auto_scan.stop()))
-        form.addRow(auto)
+        auto.toggled.connect(
+            lambda value: (self.db.set_setting("auto_scan", value), self.auto_scan.start() if value else self.auto_scan.stop())
+        )
+        setting_row(storage, "Actualizar biblioteca automáticamente", auto)
+        divider(storage)
+
         minimum = QSpinBox()
         minimum.setRange(0, 600)
         minimum.setSuffix(" s")
+        minimum.setSpecialValueText("Sin mínimo")
+        minimum.setFixedWidth(140)
         minimum.setValue(self.db.setting("minimum_duration", 0))
         minimum.valueChanged.connect(lambda value: self.db.set_setting("minimum_duration", value))
-        form.addRow("Duración mínima al escanear", minimum)
-        prefetch = QCheckBox("Descargar por adelantado la siguiente canción de la cola")
-        prefetch.setChecked(self.db.setting("prefetch", True))
-        prefetch.toggled.connect(lambda value: self.db.set_setting("prefetch", value))
-        form.addRow(prefetch)
-        continue_playing = QCheckBox("Continuar con música relacionada de mi biblioteca al terminar la cola")
-        continue_playing.setChecked(self.db.setting("auto_continue", False))
-        continue_playing.toggled.connect(lambda value: self.db.set_setting("auto_continue", value))
-        form.addRow(continue_playing)
-        tray = QCheckBox("Seguir reproduciendo en la bandeja al cerrar la ventana")
+        setting_row(storage, "Duración mínima al escanear", minimum)
+
+        # Caché y datos
+        data = section("Caché y datos")
+        cache_status = label("", "settingsValue")
+
+        def refresh_stream_cache_status():
+            used = self.streaming.cache_usage()
+            if used >= 1024 ** 3:
+                text = f"{used / 1024 ** 3:.2f} GB"
+            else:
+                text = f"{used / 1024 ** 2:.0f} MB"
+            cache_status.setText(text)
+
+        def clear_stream_cache():
+            self.streaming.clear_cache()
+            refresh_stream_cache_status()
+            self.notify("Caché temporal de streaming borrada.")
+
+        refresh_stream_cache_status()
+        clear_cache = QPushButton("Limpiar")
+        clear_cache.setObjectName("settingsAction")
+        clear_cache.clicked.connect(clear_stream_cache)
+        cache_row = QHBoxLayout()
+        cache_row.setContentsMargins(0, 8, 0, 8)
+        cache_row.setSpacing(12)
+        cache_text = QVBoxLayout()
+        cache_text.setSpacing(2)
+        cache_text.addWidget(label("Caché de streaming", "settingsLabel"))
+        cache_text.addWidget(label("Máximo 1 GB · caduca tras 24 h sin uso", "settingsDescription"))
+        cache_row.addLayout(cache_text, 1)
+        cache_row.addWidget(cache_status)
+        cache_row.addWidget(clear_cache)
+        data.addLayout(cache_row)
+        divider(data)
+
+        clear_search = QPushButton("Borrar búsquedas recientes")
+        clear_search.setObjectName("settingsGhost")
+        clear_search.clicked.connect(lambda: (self.db.clear_searches(), self.notify("Historial de búsqueda borrado.")))
+        data.addWidget(clear_search, 0, Qt.AlignmentFlag.AlignLeft)
+
+        # Aplicación
+        app_section = section("Aplicación")
+        tray = QCheckBox()
+        tray.setObjectName("settingsSwitch")
         tray.setChecked(self.db.setting("close_to_tray", True))
         tray.setEnabled(self.tray is not None)
         tray.toggled.connect(lambda value: self.db.set_setting("close_to_tray", value))
-        form.addRow(tray)
-        form.addRow(button("Borrar búsquedas recientes y caché de búsqueda", lambda: (self.db.clear_searches(), self.notify("Historial de búsqueda borrado."))))
+        setting_row(app_section, "Seguir reproduciendo al cerrar", tray)
+        divider(app_section)
+
+        backup_button = QPushButton("Exportar copia de biblioteca…")
+        backup_button.setObjectName("settingsAction")
 
         def backup():
             path, _ = QFileDialog.getSaveFileName(dialog, "Guardar copia de biblioteca", "MusicVault.sqlite3", "SQLite (*.sqlite3)")
@@ -1904,13 +2368,31 @@ class Window(QMainWindow):
                 except Exception as exc:
                     self.notify(str(exc))
 
-        form.addRow(button("Exportar copia de biblioteca…", backup))
-        about = label(f"MusicVault {__version__} · Windows x64\nQt 6 · libmpv · SQLite · yt-dlp · FFmpeg", "muted")
-        about.setWordWrap(True)
-        form.addRow(about)
+        backup_button.clicked.connect(backup)
+        setting_row(app_section, "Copia de seguridad", backup_button)
+
+        # Acerca de
+        about_card = section("Acerca de")
+        about_row = QHBoxLayout()
+        about_row.setContentsMargins(0, 8, 0, 8)
+        about_row.addWidget(label("MusicVault", "settingsLabel"), 1)
+        about_row.addWidget(label(f"{__version__} · Windows x64", "settingsValue"))
+        about_card.addLayout(about_row)
+        about_meta = label("Qt 6 · libmpv · SQLite · yt-dlp · FFmpeg", "settingsDescription")
+        about_card.addWidget(about_meta)
+
+        page_layout.addStretch()
         scroll.setWidget(page)
-        layout.addWidget(scroll, 1)
-        layout.addWidget(button("Listo", dialog.accept, True))
+        root.addWidget(scroll, 1)
+
+        footer = QHBoxLayout()
+        footer.addStretch()
+        done = QPushButton("Listo")
+        done.setObjectName("primary")
+        done.setMinimumWidth(110)
+        done.clicked.connect(dialog.accept)
+        footer.addWidget(done)
+        root.addLayout(footer)
         dialog.exec()
 
     def quit_app(self):
@@ -1918,21 +2400,49 @@ class Window(QMainWindow):
         self.close()
 
     def closeEvent(self, event):
-        if not self._quitting and self.tray and self.db.setting("close_to_tray", True):
-            self.hide()
+        # Normal X: keep playback alive in the system tray when the setting is
+        # enabled. Explicit "Salir" / Ctrl+Q performs the full shutdown path.
+        close_to_tray = bool(self.db.setting("close_to_tray", True))
+        if not self._quitting and close_to_tray and self.tray is not None:
             event.ignore()
+            self._hide_auxiliary_windows_for_tray()
+            # Hide asynchronously after Qt finishes dispatching the native close
+            # event. This avoids a tiny KWin/Plasma shell being left behind.
+            QTimer.singleShot(0, self.hide)
             return
+
+        self._quitting = True
+        app = QApplication.instance()
+
+        # Full exit: close every auxiliary top-level window first so no Qt
+        # surface can keep the process/window manager entry alive.
+        if app:
+            for widget in list(app.topLevelWidgets()):
+                if widget is self:
+                    continue
+                try:
+                    widget.hide()
+                    widget.close()
+                except RuntimeError:
+                    pass
+
         self.auto_scan.stop()
         self.debounce.stop()
         self.local_debounce.stop()
         self.table.cover_timer.stop()
         if self.tray:
             self.tray.hide()
+            self.tray.setContextMenu(None)
+            self.tray = None
         for key in list(self.download_jobs):
             self.cancel_download(key)
+        self.cancel_stream_warm()
+        if self.stream_prepare_job:
+            self.stream_prepare_job.cancel.set()
+        self.stream_jobs.close()
+        self.warm_jobs.close()
         self.jobs.close()
         self.cover_jobs.close()
-        # Finish cancellation bookkeeping even if no more queued Qt signals are dispatched.
         for key in self.download_jobs:
             track = self.db.get_track(key)
             record = next((r for r in self.db.downloads() if r["track_id"] == key), None)
@@ -1940,6 +2450,8 @@ class Window(QMainWindow):
                 self.db.set_download(track, "cancelled")
         if self.mpris:
             self.mpris.close()
+            self.mpris = None
         self.player.close()
         event.accept()
-        QApplication.instance().quit()
+        if app:
+            app.quit()

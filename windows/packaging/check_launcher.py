@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-EXE = ROOT / 'dist/MusicVault-Windows-x64/MusicVault.exe'
+EXE = ROOT / 'dist/MusicVault-Windows-x64-0.9.7/MusicVault.exe'
 WINE = '/opt/wine-staging/bin/wine'
 environment = dict(os.environ, WINEPREFIX='/tmp/musicvault-windows-wine', WINEDEBUG='-all')
 

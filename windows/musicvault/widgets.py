@@ -2,9 +2,9 @@ from functools import lru_cache
 from pathlib import Path
 import math
 
-from PyQt6.QtCore import Qt, QRectF, QTimer, QPointF, QSize
+from PyQt6.QtCore import Qt, QRectF, QTimer, QPointF, QSize, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap, QFont, QFontDatabase, QIcon, QPainterPath
-from PyQt6.QtWidgets import QLabel, QWidget, QStyledItemDelegate, QStyle
+from PyQt6.QtWidgets import QLabel, QWidget, QStyledItemDelegate, QStyle, QSlider
 
 
 def load_fonts():
@@ -104,6 +104,27 @@ def icon(name, color="#F1EAD9", size=24):
 STYLE = """
 QWidget { background: transparent; color: #F1EAD9; font-family: 'Inter'; font-size: 13px; }
 QMainWindow, QDialog { background: #0F0E0D; }
+QDialog#settingsDialog { background: #12110F; }
+QLabel#settingsTitle { font-family: 'Space Grotesk'; font-size: 25px; font-weight: 700; color: #F1EAD9; }
+QLabel#settingsSubtitle { color: #8F877A; font-size: 12px; }
+QLabel#settingsSectionTitle { font-family: 'Space Grotesk'; font-size: 16px; font-weight: 650; color: #E8DFCF; }
+QLabel#settingsLabel { color: #F1EAD9; font-weight: 600; }
+QLabel#settingsValue { color: #BDB3A3; font-size: 12px; }
+QLabel#settingsDescription { color: #827A6F; font-size: 11px; }
+QFrame#settingsCard { background: #1A1816; border: 1px solid #302A24; border-radius: 12px; }
+QFrame#settingsDivider { background: #2A2621; border: none; }
+QScrollArea#settingsScroll { background: transparent; border: none; }
+QListWidget#settingsRoots { background: #141311; border: 1px solid #2E2924; border-radius: 8px; padding: 3px; }
+QListWidget#settingsRoots::item { padding: 7px 9px; border-radius: 5px; color: #BDB3A3; }
+QListWidget#settingsRoots::item:selected { background: #3A2E1D; color: #F1EAD9; }
+QPushButton#settingsAction { background: #25211D; border: 1px solid #42382E; border-radius: 8px; padding: 7px 13px; min-height: 16px; }
+QPushButton#settingsAction:hover { background: #302920; border-color: #785A38; }
+QPushButton#settingsGhost { background: transparent; border: none; color: #B8AD9D; padding: 6px 0; text-align: left; }
+QPushButton#settingsGhost:hover { color: #E0A458; background: transparent; border: none; }
+QCheckBox#settingsSwitch { spacing: 0; }
+QCheckBox#settingsSwitch::indicator { width: 18px; height: 18px; border: 1px solid #51483D; border-radius: 5px; background: #211E1A; }
+QCheckBox#settingsSwitch::indicator:hover { border-color: #8A673D; }
+QCheckBox#settingsSwitch::indicator:checked { background: #E0A458; border-color: #E0A458; }
 QLabel { background: transparent; }
 QLabel#eyebrow { color: #E0A458; font-family: 'IBM Plex Mono'; font-size: 11px; letter-spacing: 1px; }
 QLabel#heading { font-family: 'Space Grotesk'; font-size: 34px; font-weight: 700; letter-spacing: -0.5px; }
@@ -134,28 +155,56 @@ QLineEdit#globalSearch:focus { background: #302B25; border: 1px solid #E0A458; }
 QProgressBar#spotifyLoading { background: #3A332B; border: none; border-radius: 3px; }
 QProgressBar#spotifyLoading::chunk { background: #E0A458; border-radius: 3px; }
 
-QFrame#transport { background: #0F0E0D; border: none; border-top: 1px solid #28221C; }
-QPushButton { background: #28231d; border: 1px solid #3b332a; border-radius: 7px; padding: 9px 14px; }
-QPushButton:hover { background: #3a3023; border-color: #b97f35; }
-QPushButton:pressed { background: #534029; }
-QPushButton:checked { background: #3a2e1d; color: #e0a458; border-color: #74522d; }
-QPushButton:disabled { color: #746c61; border-color: #29251f; }
-QPushButton#primary { background: #e0a458; color: #19130b; border: none; font-weight: 700; }
+QFrame#transport { background: #12110F; border: none; border-top: 1px solid #2C241D; }
+QFrame#transport QLabel#mono { color: #8A816F; }
+QFrame#transport QPushButton#icon { padding: 6px; }
+QFrame#transport QSlider::groove:horizontal { height: 4px; background: #413628; border-radius: 2px; }
+QFrame#transport QSlider::sub-page:horizontal { background: #C9964D; border-radius: 2px; }
+QFrame#transport QSlider::handle:horizontal { width: 12px; margin: -4px 0; border-radius: 6px; background: #F2C27A; }
+QFrame#transport QSlider::handle:horizontal:hover { width: 14px; margin: -5px 0; border-radius: 7px; background: #FFD79F; }
+QPushButton { background: #28231D; border: 1px solid #40372D; border-radius: 9px; padding: 9px 15px; min-height: 18px; font-weight: 600; }
+QPushButton:hover { background: #342B22; border-color: #8A673D; }
+QPushButton:pressed { background: #463623; border-color: #B7803E; }
+QPushButton:focus { border-color: #E0A458; }
+QPushButton:checked { background: #3A2E1D; color: #E0A458; border-color: #74522D; }
+QPushButton:disabled { color: #746C61; background: #1B1916; border-color: #29251F; }
+QPushButton#primary { background: #E0A458; color: #19130B; border: 1px solid #E0A458; font-weight: 700; }
+QPushButton#primary:hover { background: #E9B66F; border-color: #E9B66F; }
+QPushButton#primary:pressed { background: #C98D45; border-color: #C98D45; }
 QPushButton#nav { padding: 10px 12px; border: none; background: transparent; color: #B3A992; text-align: left; border-radius: 5px; font-weight: 650; }
 QPushButton#nav:hover { background: #292420; color: #F1EAD9; }
 QPushButton#nav:checked { background: #382D20; color: #F1EAD9; border: none; }
 QPushButton#icon { background: transparent; border: none; padding: 8px; border-radius: 20px; }
 QPushButton#icon:hover { background: #292420; }
-QPushButton#playCircle { background: #E0A458; border: none; border-radius: 19px; padding: 0; }
-QFrame#transport QPushButton#playCircle { background: #E0A458; border: none; border-radius: 19px; }
+QPushButton#playCircle { background: #E0A458; border: none; border-radius: 21px; padding: 0; }
+QPushButton#playCircle:hover { background: #E9B66F; }
+QPushButton#playCircle:pressed { background: #C98D45; }
+QPushButton#playCircle:disabled { background: #B8894E; border: none; border-radius: 21px; padding: 0; }
+QFrame#transport QPushButton#playCircle { background: #E0A458; border: none; border-radius: 21px; padding: 0; }
 QPushButton#fullPlay { background: #E0A458; border: none; border-radius: 32px; padding: 0; }
+QPushButton#fullPlay:hover { background: #E9B66F; }
+QPushButton#fullPlay:pressed { background: #C98D45; }
+QPushButton#fullPlay:disabled { background: #B8894E; border: none; border-radius: 32px; padding: 0; }
 QPushButton#chip { background: #1E1B18; border: 1px solid #322C25; border-radius: 17px; padding: 7px 16px; }
 QPushButton#chip:checked { background: #3A2E1D; color: #E0A458; border-color: #E0A458; }
-QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox { background: #211e1a; border: 1px solid #40382d; border-radius: 6px; padding: 9px; selection-background-color: #8c622e; }
-QLineEdit:focus { border-color: #e0a458; }
+QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox { background: #211E1A; border: 1px solid #40382D; border-radius: 9px; padding: 9px 12px; selection-background-color: #8C622E; }
+QLineEdit:hover, QSpinBox:hover, QDoubleSpinBox:hover, QComboBox:hover { border-color: #65513B; }
+QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus { border-color: #E0A458; background: #27231E; }
+QComboBox { padding-right: 34px; min-height: 18px; }
+QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right; width: 30px; border: none; background: transparent; }
+QComboBox::down-arrow { width: 10px; height: 10px; }
+QComboBox QAbstractItemView { background: #1C1916; color: #F1EAD9; border: 1px solid #4A3D30; border-radius: 8px; padding: 5px; outline: 0; selection-background-color: #3A2E1D; selection-color: #F1EAD9; }
+QComboBox QAbstractItemView::item { min-height: 30px; padding: 5px 10px; border-radius: 6px; }
+QListView#searchCompleter { background: #1C1916; color: #F1EAD9; border: 1px solid #4A3D30; border-radius: 8px; padding: 5px; outline: 0; }
+QListView#searchCompleter::item { min-height: 28px; padding: 5px 10px; border-radius: 6px; }
+QListView#searchCompleter::item:selected { background: #3A2E1D; color: #F1EAD9; }
+QSpinBox, QDoubleSpinBox { padding-right: 30px; }
+QSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { width: 24px; border: none; background: #29241F; }
+QSpinBox::up-button:hover, QSpinBox::down-button:hover, QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover { background: #3A3025; }
 QTableView, QListWidget, QListView, QTextBrowser { background: transparent; border: none; alternate-background-color: #121110; }
-QTableView::item, QListWidget::item, QListView::item { padding: 8px; border: none; }
-QTableView::item:selected, QListWidget::item:selected, QListView::item:selected { background: #493520; color: #ffe2b9; }
+QTableView::item, QListWidget::item, QListView::item { padding: 8px; border: none; border-radius: 6px; }
+QListWidget::item:hover, QListView::item:hover { background: #29241F; }
+QTableView::item:selected, QListWidget::item:selected, QListView::item:selected { background: #493520; color: #FFE2B9; }
 QHeaderView::section { background: transparent; color: #B3A992; border: none; border-right: 1px solid #2F2923; border-bottom: 1px solid #3A332B; padding: 8px 6px; font-size: 11px; font-weight: 500; }
 QFrame#filterBar { background: #1D1A17; border: 1px solid #382F26; border-radius: 8px; }
 QFrame#searchTabs { background: #1A1715; border: 1px solid #382F26; border-radius: 9px; }
@@ -164,12 +213,14 @@ QFrame#searchTabs QPushButton:checked { background: #3A2E1D; color: #F1EAD9; }
 QTableView::item:hover { background: #2C2721; }
 QSlider::groove:horizontal { height: 5px; background: #4a3c2b; border-radius: 2px; }
 QSlider::sub-page:horizontal { background: #e0a458; border-radius: 2px; }
-QSlider::handle:horizontal { width: 13px; margin: -5px 0; border-radius: 6px; background: #f6c98d; }
+QSlider::handle:horizontal { width: 13px; margin: -5px 0; border-radius: 6px; background: #F6C98D; }
+QSlider::handle:horizontal:hover { width: 15px; margin: -6px 0; border-radius: 7px; background: #FFE0B3; }
 QSlider::groove:vertical { width: 5px; background: #4a3c2b; }
 QSlider::handle:vertical { height: 14px; margin: 0 -5px; border-radius: 6px; background: #e0a458; }
-QMenu { background: #26211b; border: 1px solid #5c4730; padding: 6px; }
-QMenu::item { padding: 8px 22px; }
-QMenu::item:selected { background: #4e3921; }
+QMenu { background: #211D19; border: 1px solid #4A3C2E; padding: 6px; }
+QMenu::item { padding: 8px 22px; border-radius: 6px; }
+QMenu::item:selected { background: #3A2E1D; color: #F1EAD9; }
+QMenu::separator { height: 1px; background: #3A332B; margin: 5px 8px; }
 /* Spotify usa desplazamiento directo; las barras no forman parte de la UI. */
 QScrollBar:vertical, QScrollBar:horizontal { background: transparent; width: 0px; height: 0px; margin: 0; }
 QScrollBar::handle:vertical, QScrollBar::handle:horizontal { background: transparent; }
@@ -193,6 +244,52 @@ class ElidedLabel(QLabel):
         painter.setPen(self.palette().color(self.foregroundRole()))
         painter.drawText(self.contentsRect(), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                          self.fontMetrics().elidedText(self.text(), Qt.TextElideMode.ElideRight, self.contentsRect().width()))
+
+
+class SeekSlider(QSlider):
+    """Slider that jumps exactly to the clicked point and still supports dragging."""
+    seekRequested = pyqtSignal(int)
+
+    def _value_at(self, position):
+        if self.orientation() == Qt.Orientation.Horizontal:
+            span = max(1.0, float(self.width()))
+            ratio = max(0.0, min(1.0, float(position.x()) / span))
+        else:
+            span = max(1.0, float(self.height()))
+            ratio = 1.0 - max(0.0, min(1.0, float(position.y()) / span))
+        if self.invertedAppearance():
+            ratio = 1.0 - ratio
+        return self.minimum() + round(ratio * (self.maximum() - self.minimum()))
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.setSliderDown(True)
+            value = self._value_at(event.position())
+            self.setValue(value)
+            self.sliderMoved.emit(value)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self.isSliderDown():
+            value = self._value_at(event.position())
+            self.setValue(value)
+            self.sliderMoved.emit(value)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.isSliderDown():
+            value = self._value_at(event.position())
+            self.setValue(value)
+            self.setSliderDown(False)
+            self.sliderReleased.emit()
+            self.seekRequested.emit(value)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class TrackDelegate(QStyledItemDelegate):
