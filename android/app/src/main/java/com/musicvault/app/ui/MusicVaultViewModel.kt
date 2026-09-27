@@ -141,6 +141,7 @@ class MusicVaultViewModel(
     private val connectivityMonitor = ConnectivityMonitor(appContext)
     private val equalizer = AudioEffects()
     private val preferences: SharedPreferences = appContext.getSharedPreferences("musicvault.settings", Context.MODE_PRIVATE)
+    private val homeRecommendationSnapshot = HomeRecommendationCache.load(preferences)
     private val spotifySession = SpotifySessionStore(appContext)
     private val spotifyClient = SpotifySongMirrorClient()
 
@@ -872,7 +873,7 @@ class MusicVaultViewModel(
     // download progress updates. The expensive work runs off the main thread.
     private val recommendations: StateFlow<Pair<List<Track>, List<Album>>> = combine(
         localTracks, allCatalogAlbums, favoriteIds, recentSearches, cachedCatalogTracks,
-        relatedCatalog, onboardingCatalogAlbums, _preferencias
+        relatedCatalog, onboardingCatalogAlbums, _preferencias, _estadoInicialCargado
     ) { v ->
         val tracks = (v[0] as? List<*>)?.filterIsInstance<Track>() ?: emptyList()
         val catalogAlbums = (v[1] as? List<*>)?.filterIsInstance<Album>() ?: emptyList()
@@ -882,6 +883,19 @@ class MusicVaultViewModel(
         val related = (v[5] as? List<*>)?.filterIsInstance<CatalogTrack>() ?: emptyList()
         val warmAlbums = (v[6] as? List<*>)?.filterIsInstance<Album>() ?: emptyList()
         val prefs = v[7] as? PrefModel ?: PrefModel()
+        val initialPreferencesLoaded = v[8] as? Boolean ?: false
+        val profileKey = HomeRecommendationCache.profileKey(prefs.generosFavoritos, prefs.artistasFavoritos)
+
+        // Paint the last persisted Home immediately while Room/catalog flows are
+        // still warming up. The profile guard prevents showing another taste profile.
+        if (!initialPreferencesLoaded) {
+            val cached = homeRecommendationSnapshot
+            val persistedProfile = HomeRecommendationCache.persistedProfileKey(preferences)
+            if (cached != null && cached.profileKey == persistedProfile) {
+                return@combine HomeRecommendationCache.forToday(cached)
+            }
+            return@combine emptyList<Track>() to emptyList()
+        }
 
         // User profile: artists/albums already in the vault plus explicit
         // first-run preferences. This makes onboarding affect Home immediately
@@ -1009,7 +1023,16 @@ class MusicVaultViewModel(
         scoredAlbums.forEach { candidate ->
             if (balancedAlbums.size < 12 && usedAlbumIds.add(candidate.first.id)) balancedAlbums += candidate
         }
-        tracksList to balancedAlbums.take(12).map { it.first }
+        val albumsList = balancedAlbums.take(12).map { it.first }
+        val matchingCache = homeRecommendationSnapshot?.takeIf { it.profileKey == profileKey }
+        val visibleTracks = tracksList.ifEmpty { matchingCache?.tracks.orEmpty() }
+        val visibleAlbums = albumsList.ifEmpty { matchingCache?.albums.orEmpty() }
+        if (tracksList.isNotEmpty() || albumsList.isNotEmpty()) {
+            HomeRecommendationCache.save(preferences, profileKey, visibleTracks, visibleAlbums)
+        }
+        HomeRecommendationCache.forToday(
+            HomeRecommendationCache.Snapshot(profileKey, visibleTracks, visibleAlbums)
+        )
     }.flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList<Track>() to emptyList())
 
