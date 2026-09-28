@@ -184,7 +184,7 @@ class MusicPlaybackService : MediaSessionService() {
                 // duration > 0 excludes C.TIME_UNSET: with an unknown duration
                 // "remaining" is garbage and the crossfade can never trigger,
                 // so poll slowly instead of busy-looping at 100ms.
-                if (crossfadeSeconds > 0 && player.hasNextMediaItem() && player.duration > 0L) {
+                if (crossfadeSeconds > 0 && player.repeatMode != Player.REPEAT_MODE_ONE && player.hasNextMediaItem() && player.duration > 0L) {
                     val remaining = player.duration - player.currentPosition
                     val crossfadeWindowMs = crossfadeSeconds * 1000L
 
@@ -217,6 +217,7 @@ class MusicPlaybackService : MediaSessionService() {
     private fun maybeCrossfade() {
         val seconds = settings.getInt("crossfade_seconds", 5).coerceIn(0, 12)
         if (seconds <= 0 || crossfadeJob?.isActive == true) return
+        if (player.repeatMode == Player.REPEAT_MODE_ONE) return
         if (!player.isPlaying || player.duration <= 0L || !player.hasNextMediaItem()) return
         val remaining = player.duration - player.currentPosition
         if (remaining > seconds * 1000L) return

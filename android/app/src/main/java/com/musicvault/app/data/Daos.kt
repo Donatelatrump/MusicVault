@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface TrackDao {
+    @Query("SELECT * FROM tracks WHERE userRemoved = 0") suspend fun exportAll(): List<TrackEntity>
     @Query("SELECT * FROM tracks WHERE userRemoved = 0 ORDER BY title") fun observeAll(): Flow<List<TrackEntity>>
     @Query("SELECT COUNT(*) FROM tracks") suspend fun count(): Int
     @Query("""SELECT t.* FROM tracks t INNER JOIN tracks_fts f ON f.trackId=t.id
@@ -30,6 +31,7 @@ interface TrackDao {
 
 @Dao
 interface AlbumDao {
+    @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertIfAbsent(item: AlbumEntity)
     @Query("SELECT * FROM albums ORDER BY title") fun observeAll(): Flow<List<AlbumEntity>>
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertAll(items: List<AlbumEntity>)
     @Query("SELECT * FROM albums WHERE id = :id LIMIT 1") suspend fun get(id: String): AlbumEntity?
@@ -48,6 +50,9 @@ interface AlbumTrackDao {
 
 @Dao
 interface PlaylistDao {
+    @Query("SELECT * FROM playlists ORDER BY title") suspend fun exportAll(): List<PlaylistEntity>
+    @Query("SELECT * FROM playlist_tracks ORDER BY playlistId, position") suspend fun exportLinks(): List<PlaylistTrackEntity>
+    @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertIfAbsent(item: PlaylistEntity)
     @Query("SELECT COALESCE(MAX(position), -1) + 1 FROM playlist_tracks WHERE playlistId=:playlistId") suspend fun nextPosition(playlistId: String): Int
     @Query("SELECT trackId FROM playlist_tracks WHERE playlistId=:playlistId") suspend fun trackIds(playlistId: String): List<String>
     @Query("SELECT * FROM playlists ORDER BY title") fun observeAll(): Flow<List<PlaylistEntity>>
@@ -75,6 +80,7 @@ interface HistoryDao {
 
 @Dao
 interface FavoriteDao {
+    @Query("SELECT * FROM favorites") suspend fun exportAll(): List<FavoriteEntity>
     @Query("SELECT * FROM favorites ORDER BY createdAt DESC") fun observeAll(): Flow<List<FavoriteEntity>>
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun add(item: FavoriteEntity)
     @Delete suspend fun remove(item: FavoriteEntity)

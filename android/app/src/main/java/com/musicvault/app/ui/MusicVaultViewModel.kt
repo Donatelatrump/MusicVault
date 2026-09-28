@@ -34,7 +34,8 @@ import com.musicvault.app.player.StreamingCache
 import com.musicvault.app.providers.ProviderResult
 import com.musicvault.app.providers.Providers
 import com.musicvault.app.providers.NewPipeStreamResolver
-import com.musicvault.app.download.DownloadForegroundService
+import com.musicvault.app.download.DownloadEvents
+import com.musicvault.app.download.DownloadQueue
 import com.musicvault.app.spotify.SpotifyLink
 import com.musicvault.app.spotify.SpotifyLinkKind
 import com.musicvault.app.spotify.SpotifyLinks
@@ -211,26 +212,20 @@ class MusicVaultViewModel(
     private val favoriteIds = repository.favorites()
     private val recentSearches = repository.recentSearches(12)
     private val downloadLock = Any()
-    private val downloadJobs = mutableMapOf<String, Job>()
     private val downloadWaiters = mutableMapOf<String, MutableList<suspend (ProviderResult?) -> Unit>>()
-    // Bulk playlist downloads deliberately suppress per-attempt provider errors.
-    // A large import can transiently fail on an individual YouTube request and
-    // immediately recover on retry; surfacing every intermediate failure makes
-    // the UI look broken even when the batch ultimately succeeds.
-    private val quietDownloadIds = mutableSetOf<String>()
     private var errorAutoClearJob: Job? = null
 
     private val downloadReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             when (intent.action) {
-                DownloadForegroundService.ACTION_PROGRESS -> {
-                    val id = intent.getStringExtra(DownloadForegroundService.EXTRA_ID) ?: return
-                    val progress = intent.getIntExtra(DownloadForegroundService.EXTRA_PROGRESS, 0)
+                DownloadEvents.ACTION_PROGRESS -> {
+                    val id = intent.getStringExtra(DownloadEvents.EXTRA_ID) ?: return
+                    val progress = intent.getIntExtra(DownloadEvents.EXTRA_PROGRESS, 0)
                     if (_downloadProgress.value.containsKey(id)) {
                         _downloadProgress.value = _downloadProgress.value + (id to progress)
                     }
                 }
-                DownloadForegroundService.ACTION_RESULT -> {
+                DownloadEvents.ACTION_RESULT -> {
                     handleDownloadServiceResult(intent)
                 }
             }
@@ -281,9 +276,6 @@ class MusicVaultViewModel(
         const val STREAM_SCROLL_IDLE_WARMUP_MS = 420L
         const val STREAM_WARM_WINDOW_SIZE = 4
         const val STREAM_WARM_FULL_RESOLVE_COUNT = 3
-        const val BULK_DOWNLOAD_CONCURRENCY = 2
-        const val BULK_DOWNLOAD_MAX_ATTEMPTS = 3
-        const val BULK_DOWNLOAD_RETRY_BASE_DELAY_MS = 1_200L
     }
 
     fun detectarEstadoInicial() {
@@ -484,59 +476,8 @@ class MusicVaultViewModel(
         return "${track.id}|${exactVideoId.orEmpty()}"
     }
 
-    private suspend fun fastestLyrics(track: Track, localReference: String?): com.musicvault.app.lyrics.Lyrics? = coroutineScope {
-        val sourceVideoId = track.sourceId?.takeIf { it.length == 11 }
-            ?: Regex("(?:[?&]v=|youtu\\.be/)([A-Za-z0-9_-]{11})").find(track.url.orEmpty())?.groupValues?.get(1)
-        // resolveAudio also indexes captions by the logical track id. This is
-        // essential for Spotify/Deezer entries whose sourceId is not YouTube's
-        // 11-character id even though their audio was matched to YouTube.
-        val captionKey = listOf(track.id, sourceVideoId).firstOrNull(NewPipeStreamResolver::hasCachedYoutubeCaptions)
-        val exactVideoCaptionsAvailable = captionKey != null
-        val youtube = async {
-            runCatching { NewPipeStreamResolver.cachedYoutubeLyrics(captionKey) }.getOrNull()?.let {
-                LyricsProvider.keepOnlyTrustedSync(it, track.durationMs, exactTimeline = true)
-            }
-        }
-        val lrclib = async {
-            runCatching {
-                LyricsProvider.fetch(
-                    artist = track.artistName,
-                    title = track.title,
-                    album = track.albumTitle.takeIf { it.isNotBlank() && !it.equals("Álbum desconocido", ignoreCase = true) },
-                    durationMs = track.durationMs
-                )
-            }.getOrNull()?.let {
-                LyricsProvider.keepOnlyTrustedSync(
-                    VocalActivityDetector.align(appContext, localReference, it),
-                    track.durationMs
-                )
-            }
-        }
-        // Captions from the exact video own its timeline. Do not let a faster
-        // LRCLib response for the studio edit beat them (e.g. Stressed Out's
-        // official video starts singing at 16.585s). LRCLib still runs in
-        // parallel, so a failed caption fetch adds no second serial wait.
-        if (exactVideoCaptionsAvailable) {
-            val exact = youtube.await()
-            if (exact != null && !exact.isEmpty) {
-                lrclib.cancel()
-                return@coroutineScope exact
-            }
-            return@coroutineScope lrclib.await()
-        }
-
-        val first = select<Pair<Boolean, com.musicvault.app.lyrics.Lyrics?>> {
-            youtube.onAwait { true to it }
-            lrclib.onAwait { false to it }
-        }
-        val firstLyrics = first.second
-        if (firstLyrics != null && !firstLyrics.isEmpty) {
-            if (first.first) lrclib.cancel() else youtube.cancel()
-            firstLyrics
-        } else {
-            if (first.first) lrclib.await() else youtube.await()
-        }
-    }
+    private suspend fun fastestLyrics(track: Track, localReference: String?) =
+        com.musicvault.app.lyrics.DownloadLyrics.fetch(appContext, track, localReference)
 
     fun loadLyrics(track: Track) {
         if (_lyrics.value.trackId == track.id && (_lyrics.value.loading || _lyrics.value.notFound ||
@@ -1075,12 +1016,22 @@ class MusicVaultViewModel(
 
     init {
         val filter = IntentFilter().apply {
-            addAction(DownloadForegroundService.ACTION_PROGRESS)
-            addAction(DownloadForegroundService.ACTION_RESULT)
+            addAction(DownloadEvents.ACTION_PROGRESS)
+            addAction(DownloadEvents.ACTION_RESULT)
         }
         ContextCompat.registerReceiver(
             appContext, downloadReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED
         )
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { DownloadQueue.reconcile(appContext) }
+                .onFailure { android.util.Log.e("MusicVaultDownload", "Queue recovery failed", it) }
+        }
+        viewModelScope.launch {
+            database.downloadQueueDao().observeAll().collect { rows ->
+                _downloadProgress.value = rows.filter { DownloadQueue.isActive(it.state) }
+                    .associate { it.id to it.progress }
+            }
+        }
 
         viewModelScope.launch {
             // Recheck on both library and connectivity changes. Files can be
@@ -1943,12 +1894,12 @@ class MusicVaultViewModel(
             try {
                 val albumTracks = catalog.tracksForAlbum(catalogAlbum, 50)
                 if (albumTracks.isEmpty()) return@launch
-                albumTracks.map { track ->
-                    async { awaitRemoteDownload(track) }
-                }.awaitAll()
+                DownloadQueue.enqueueAll(appContext, albumTracks.map { catalogTrackForStreaming(it) to it.url })
+                showProvider("${albumTracks.size} canciones añadidas a Descargas.")
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
-            } catch (_: Exception) {
+            } catch (error: Exception) {
+                showError("No se pudo encolar el álbum: ${error.message.orEmpty()}")
             } finally {
                 withContext(Dispatchers.Main.immediate) { _albumDownloads.value = _albumDownloads.value - albumKey }
             }
@@ -1962,12 +1913,12 @@ class MusicVaultViewModel(
             try {
                 val albumTracks = if (tracks.isNotEmpty()) tracks else catalog.tracksForAlbum(album, 50)
                 if (albumTracks.isEmpty()) return@launch
-                albumTracks.map { track ->
-                    async { awaitRemoteDownload(track) }
-                }.awaitAll()
+                DownloadQueue.enqueueAll(appContext, albumTracks.map { catalogTrackForStreaming(it) to it.url })
+                showProvider("${albumTracks.size} canciones añadidas a Descargas.")
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
-            } catch (_: Exception) {
+            } catch (error: Exception) {
+                showError("No se pudo encolar el álbum: ${error.message.orEmpty()}")
             } finally {
                 withContext(Dispatchers.Main.immediate) { _albumDownloads.value = _albumDownloads.value - albumKey }
             }
@@ -2702,15 +2653,7 @@ class MusicVaultViewModel(
     }
 
     fun requestDownload(track: Track) {
-        requestDownloadInternal(track.id, track.title, track.artistName, sourceUrlFor(track)) { result ->
-            if (result is ProviderResult.Success) {
-                repository.setDownloaded(track, result.audioUri)
-                persistDownloadedLyrics(
-                    track = track,
-                    localReference = result.localPath ?: result.audioUri
-                )
-            }
-        }
+        requestDownloadInternal(track, sourceUrlFor(track)) { }
     }
 
     fun downloadPlaylist(playlist: Playlist) {
@@ -2726,23 +2669,9 @@ class MusicVaultViewModel(
                     return@launch
                 }
 
-                // Do not launch hundreds of foreground-service requests at once.
-                // Large Spotify imports are intentionally processed in small
-                // batches; each song receives transient retries before being
-                // left pending for a later manual retry.
-                var completed = 0
-                pending.chunked(BULK_DOWNLOAD_CONCURRENCY).forEach { batch ->
-                    completed += batch.map { track ->
-                        async { awaitTrackDownloadWithRetry(track) }
-                    }.awaitAll().count { it }
-                }
-
-                val failed = pending.size - completed
-                when {
-                    failed == 0 -> showProvider("$completed canciones descargadas de ${playlist.title}.")
-                    completed > 0 -> showProvider("$completed descargadas; $failed quedaron pendientes. Puedes tocar Descargar otra vez para reintentarlas.")
-                    else -> showError("No se pudo completar la descarga. ${pending.size} canciones quedaron pendientes para reintentar.")
-                }
+                // Persist every request before execution; WorkManager owns recovery.
+                DownloadQueue.enqueueAll(appContext, pending.map { it to sourceUrlFor(it) })
+                showProvider("${pending.size} canciones en la cola. Consulta su estado en Ajustes → Descargas.")
             } catch (e: CancellationException) {
                 throw e
             } catch (failure: Exception) {
@@ -2753,51 +2682,9 @@ class MusicVaultViewModel(
         }
     }
 
-    private suspend fun awaitTrackDownloadWithRetry(track: Track): Boolean {
-        synchronized(downloadLock) { quietDownloadIds += track.id }
-        return try {
-            repeat(BULK_DOWNLOAD_MAX_ATTEMPTS) { attempt ->
-                when (val result = awaitTrackDownloadResult(track)) {
-                    is ProviderResult.Success -> if (result.audioUri.isNotBlank()) return true
-                    is ProviderResult.Unavailable -> return false
-                    is ProviderResult.Error, null -> Unit
-                }
-                if (attempt < BULK_DOWNLOAD_MAX_ATTEMPTS - 1) {
-                    delay(BULK_DOWNLOAD_RETRY_BASE_DELAY_MS * (attempt + 1L))
-                }
-            }
-            false
-        } finally {
-            synchronized(downloadLock) { quietDownloadIds -= track.id }
-        }
-    }
-
-    private suspend fun awaitTrackDownloadResult(track: Track): ProviderResult? =
-        kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
-            requestDownloadInternal(track.id, track.title, track.artistName, sourceUrlFor(track)) { result ->
-                if (result is ProviderResult.Success && result.audioUri.isNotBlank()) {
-                    repository.setDownloaded(track, result.audioUri)
-                    persistDownloadedLyrics(
-                        track = track,
-                        localReference = result.localPath ?: result.audioUri
-                    )
-                }
-                if (continuation.isActive) continuation.resume(result)
-            }
-        }
 
     fun requestRemoteDownload(track: CatalogTrack) = requestRemoteDownload(track, autoPlay = false)
 
-    private suspend fun awaitRemoteDownload(track: CatalogTrack): Track? =
-        kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
-            requestRemoteDownload(
-                track = track,
-                autoPlay = false,
-                onFinished = { ready ->
-                    if (continuation.isActive) continuation.resume(ready)
-                }
-            )
-        }
 
     private fun requestRemoteDownload(
         track: CatalogTrack,
@@ -2816,7 +2703,7 @@ class MusicVaultViewModel(
             }
             return
         }
-        requestDownloadInternal(id, track.title, track.artistName, track.url) { result ->
+        requestDownloadInternal(catalogTrackForStreaming(track), track.url) { result ->
             if (result is ProviderResult.Success) {
                 val entity = TrackEntity(id, track.title, track.artistName,
                     track.albumId?.let { "${track.provider}:release:$it" } ?: "unknown",
@@ -2824,7 +2711,6 @@ class MusicVaultViewModel(
                     source = track.source ?: displaySource(track),
                     sourceId = track.sourceId ?: track.id
                 )
-                database.trackDao().upsertAll(listOf(entity))
                 track.albumId?.let { albumId -> database.albumDao().upsertAll(listOf(AlbumEntity(
                     "${track.provider}:release:$albumId", track.albumTitle ?: "Álbum desconocido", track.artistId, track.artistName, 0, track.coverUri))) }
                 val local = Track(
@@ -2832,10 +2718,6 @@ class MusicVaultViewModel(
                     track.durationMs, result.audioUri, true, track.coverUri,
                     source = track.source ?: displaySource(track),
                     sourceId = track.sourceId ?: track.id
-                )
-                persistDownloadedLyrics(
-                    track = local,
-                    localReference = result.localPath ?: result.audioUri
                 )
                 onReady?.invoke(local)
                 onFinished?.invoke(local)
@@ -2927,12 +2809,11 @@ class MusicVaultViewModel(
     }
 
     private fun requestDownloadInternal(
-        id: String,
-        name: String,
-        author: String,
+        track: Track,
         sourceUrl: String? = null,
         onSuccess: suspend (ProviderResult?) -> Unit
     ) {
+        val id = track.id
         if (!StoragePermissions.canWriteLegacy(appContext)) {
             val reason = StoragePermissions.explainWhyCannotWrite(appContext)
                 ?: "Sin permiso de almacenamiento."
@@ -2949,50 +2830,39 @@ class MusicVaultViewModel(
         }
         if (!shouldStart) return
 
-        // Create the lifecycle handle before starting the service. This closes
-        // the tiny race where a very fast failure could broadcast its result
-        // before downloadJobs had been populated.
-        val job = viewModelScope.launch {
-            kotlinx.coroutines.awaitCancellation()
-        }
-        synchronized(downloadLock) { downloadJobs[id] = job }
-
-        val intent = Intent(DownloadForegroundService.ACTION_DOWNLOAD).apply {
-            putExtra(DownloadForegroundService.EXTRA_ID, id)
-            putExtra(DownloadForegroundService.EXTRA_NAME, name)
-            putExtra(DownloadForegroundService.EXTRA_AUTHOR, author)
-            putExtra(DownloadForegroundService.EXTRA_SOURCE_URL, sourceUrl)
-        }
-        try {
-            DownloadForegroundService.start(appContext, intent)
-        } catch (_: Exception) {
-            synchronized(downloadLock) {
-                downloadWaiters.remove(id)
-                downloadJobs.remove(id)?.cancel()
+        viewModelScope.launch {
+            try {
+                DownloadQueue.enqueue(appContext, track, sourceUrl)
+            } catch (error: Exception) {
+                synchronized(downloadLock) {
+                    downloadWaiters.remove(id)
+                }
+                _downloadProgress.value = _downloadProgress.value - id
+                showError("No se pudo añadir la descarga. Inténtalo de nuevo.")
+                onSuccess(null)
+                android.util.Log.e("MusicVaultDownload", "Queue request failed", error)
             }
-            _downloadProgress.value = _downloadProgress.value - id
-            viewModelScope.launch { onSuccess(null) }
         }
     }
 
     private fun handleDownloadServiceResult(intent: Intent) {
-        val id = intent.getStringExtra(DownloadForegroundService.EXTRA_ID) ?: return
-        val status = intent.getStringExtra(DownloadForegroundService.EXTRA_STATUS) ?: return
+        val id = intent.getStringExtra(DownloadEvents.EXTRA_ID) ?: return
+        val status = intent.getStringExtra(DownloadEvents.EXTRA_STATUS) ?: return
         val result: ProviderResult = when (status) {
-            DownloadForegroundService.STATUS_SUCCESS -> ProviderResult.Success(
-                audioUri = intent.getStringExtra(DownloadForegroundService.EXTRA_AUDIO_URI).orEmpty(),
-                fileName = intent.getStringExtra(DownloadForegroundService.EXTRA_FILE_NAME).orEmpty(),
-                mimeType = intent.getStringExtra(DownloadForegroundService.EXTRA_MIME),
-                localPath = intent.getStringExtra(DownloadForegroundService.EXTRA_LOCAL_PATH)
+            DownloadEvents.STATUS_SUCCESS -> ProviderResult.Success(
+                audioUri = intent.getStringExtra(DownloadEvents.EXTRA_AUDIO_URI).orEmpty(),
+                fileName = intent.getStringExtra(DownloadEvents.EXTRA_FILE_NAME).orEmpty(),
+                mimeType = intent.getStringExtra(DownloadEvents.EXTRA_MIME),
+                localPath = intent.getStringExtra(DownloadEvents.EXTRA_LOCAL_PATH)
             )
-            DownloadForegroundService.STATUS_UNAVAILABLE -> ProviderResult.Unavailable(
-                intent.getStringExtra(DownloadForegroundService.EXTRA_MESSAGE) ?: "El audio no está disponible."
+            DownloadEvents.STATUS_UNAVAILABLE -> ProviderResult.Unavailable(
+                intent.getStringExtra(DownloadEvents.EXTRA_MESSAGE) ?: "El audio no está disponible."
             )
-            DownloadForegroundService.STATUS_CANCELLED -> ProviderResult.Error(
-                intent.getStringExtra(DownloadForegroundService.EXTRA_MESSAGE) ?: "Descarga cancelada"
+            DownloadEvents.STATUS_CANCELLED -> ProviderResult.Error(
+                intent.getStringExtra(DownloadEvents.EXTRA_MESSAGE) ?: "Descarga cancelada"
             )
             else -> ProviderResult.Error(
-                intent.getStringExtra(DownloadForegroundService.EXTRA_MESSAGE)
+                intent.getStringExtra(DownloadEvents.EXTRA_MESSAGE)
                     ?: "La descarga terminó con un error desconocido."
             )
         }
@@ -3002,10 +2872,11 @@ class MusicVaultViewModel(
         }
 
         val waiters = synchronized(downloadLock) { downloadWaiters.remove(id).orEmpty().toList() }
-        val quietFailure = synchronized(downloadLock) { id in quietDownloadIds }
         viewModelScope.launch(Dispatchers.IO) {
             waiters.forEach { callback -> runCatching { callback(result) } }
-            if (!quietFailure) {
+            // Bulk/recovered errors remain in the persistent queue, without
+            // showing a separate overlay for every failed playlist entry.
+            if (waiters.isNotEmpty()) {
                 when (result) {
                     is ProviderResult.Unavailable -> showError(result.reason)
                     is ProviderResult.Error -> showError(result.message)
@@ -3013,13 +2884,11 @@ class MusicVaultViewModel(
                 }
             }
             _downloadProgress.value = _downloadProgress.value - id
-            synchronized(downloadLock) { downloadJobs.remove(id) }
         }
     }
 
     fun cancelDownload(id: String) {
-        synchronized(downloadLock) { downloadJobs.remove(id)?.cancel() }
-        DownloadForegroundService.cancel(appContext, id)
+        viewModelScope.launch { DownloadQueue.cancel(appContext, id) }
         _downloadProgress.value = _downloadProgress.value - id
     }
 
@@ -3102,11 +2971,7 @@ class MusicVaultViewModel(
         runCatching { appContext.unregisterReceiver(downloadReceiver) }
         connectivityMonitor.close()
         synchronized(downloadLock) {
-            // Do NOT cancel the foreground service here. Its purpose is to keep
-            // downloads alive when the Activity/ViewModel is recreated or the
-            // user leaves the UI.
-            downloadJobs.values.forEach { it.cancel() }
-            downloadJobs.clear()
+            // WorkManager owns downloads independently of this screen.
             downloadWaiters.clear()
         }
         searchJob?.cancel(); playlistJob?.cancel(); albumJob?.cancel(); remoteAlbumJob?.cancel(); historyJob?.cancel()
@@ -3123,17 +2988,6 @@ class MusicVaultViewModel(
             }
             throw IllegalArgumentException("Unknown ViewModel: ${modelClass.name}")
         }
-    }
-
-    private suspend fun persistDownloadedLyrics(track: Track, localReference: String?) {
-        val reference = localReference?.takeIf { it.isNotBlank() } ?: return
-        val existing = LyricsLocalStore.read(appContext, reference)
-        if (existing != null) return
-
-        // The YouTube caption and LRCLib requests race; captions use the exact
-        // video timeline and the first valid result wins without extending wait.
-        val result = fastestLyrics(track, reference) ?: return
-        LyricsLocalStore.write(appContext, reference, result)
     }
 
     private fun displaySource(track: CatalogTrack): String = track.source

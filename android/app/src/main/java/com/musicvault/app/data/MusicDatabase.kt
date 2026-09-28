@@ -19,12 +19,14 @@ import androidx.room.RoomDatabase
         SearchHistoryEntity::class,
         DownloadRecordEntity::class,
         CatalogSearchCacheEntity::class,
-        UserPreferences::class
+        UserPreferences::class,
+        DownloadQueueEntity::class
     ],
-    version = 18,
+    version = 19,
     exportSchema = false
 )
 abstract class MusicDatabase : RoomDatabase() {
+    abstract fun downloadQueueDao(): DownloadQueueDao
     abstract fun trackDao(): TrackDao
     abstract fun albumDao(): AlbumDao
     abstract fun albumTrackDao(): AlbumTrackDao
@@ -37,6 +39,19 @@ abstract class MusicDatabase : RoomDatabase() {
     abstract fun userPreferencesDao(): UserPreferencesDao
 
     companion object {
+        val MIGRATION_18_19 = object : androidx.room.migration.Migration(18, 19) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("""CREATE TABLE IF NOT EXISTS download_queue (
+                    id TEXT NOT NULL PRIMARY KEY, generation TEXT NOT NULL,
+                    track_id TEXT NOT NULL, track_title TEXT NOT NULL, track_artistName TEXT NOT NULL,
+                    track_albumId TEXT NOT NULL, track_albumTitle TEXT NOT NULL, track_durationMs INTEGER NOT NULL,
+                    track_audioUri TEXT, track_isDownloaded INTEGER NOT NULL, track_coverUri TEXT,
+                    track_source TEXT, track_sourceId TEXT, track_userRemoved INTEGER NOT NULL,
+                    sourceUrl TEXT, quality TEXT NOT NULL, wifiOnly INTEGER NOT NULL,
+                    state TEXT NOT NULL, progress INTEGER NOT NULL, attempts INTEGER NOT NULL,
+                    error TEXT, updatedAt INTEGER NOT NULL)""")
+            }
+        }
         val MIGRATION_1_2 = object : androidx.room.migration.Migration(1, 2) {
             override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE tracks ADD COLUMN coverUri TEXT")
@@ -251,7 +266,7 @@ abstract class MusicDatabase : RoomDatabase() {
                 )
                 .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14)
                 // ✅ Performance optimizations for Room
-                .addMigrations(MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18)
+                .addMigrations(MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19)
                 .addCallback(object : RoomDatabase.Callback() {
                     override fun onOpen(db: androidx.sqlite.db.SupportSQLiteDatabase) {
                         createFtsTriggers(db)

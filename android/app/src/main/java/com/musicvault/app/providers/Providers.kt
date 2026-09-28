@@ -5,6 +5,7 @@ import android.content.Context
 import androidx.core.content.FileProvider
 import com.musicvault.app.catalog.CatalogTrack
 import com.musicvault.app.player.StreamingCache
+import com.musicvault.app.download.DownloadQuality
 import androidx.media3.datasource.cache.CacheWriter
 import com.yausername.ffmpeg.FFmpeg
 import com.yausername.youtubedl_android.YoutubeDL
@@ -116,7 +117,9 @@ object Providers {
                 // Streaming/search only need yt-dlp. FFmpeg is intentionally not
                 // initialized here: its native startup cost must never sit on the
                 // first-play critical path.
-                runCatching { ensureYoutubeInitialized(app) }
+                runCatching { ensureYoutubeInitialized(app) }.onFailure { error ->
+                    android.util.Log.e("MusicVaultDownload", "yt-dlp initialization failed", error)
+                }
                 runCatching { synchronized(updateLock) { updateYtDlpIfNeeded(app) } }
             }
         }
@@ -482,20 +485,24 @@ object Providers {
         author: String,
         onProgress: (Int) -> Unit = {},
         requestId: String? = null,
-        sourceUrl: String? = null
+        sourceUrl: String? = null,
+        quality: DownloadQuality = DownloadQuality.BEST,
+        cacheKey: String? = requestId
     ): ProviderResult = downloadSlots.withPermit {
         withContext(Dispatchers.IO) {
             val context = appContext
                 ?: return@withContext ProviderResult.Error("El proveedor no ha sido inicializado")
 
             try {
+                currentCoroutineContext().ensureActive()
                 requestId?.let { cancelledRequests.remove(it) }
 
                 // Reuse the streaming buffer before starting a traditional
                 // yt-dlp file download. A complete cache is promoted directly.
                 // If it is partial, CacheWriter fills only the missing ranges,
                 // then the same cached bytes are materialized as the offline file.
-                requestId?.let { cachedId ->
+                if (quality.reuseStreamingCache) requestId?.let { taskId ->
+                    val cachedId = cacheKey ?: taskId
                     promoteCompleteStreamCache(context, cachedId, name, onProgress)?.let {
                         return@withContext it
                     }
@@ -506,7 +513,7 @@ object Providers {
                             sourceUrl = sourceUrl,
                             cacheKey = cachedId
                         )
-                        if (cancelledRequests.remove(cachedId)) {
+                        if (cancelledRequests.remove(taskId)) {
                             return@withContext ProviderResult.Error("Descarga cancelada")
                         }
                         if (stream != null) {
@@ -529,7 +536,7 @@ object Providers {
                                     }
                                 }
                             )
-                            activeCacheWriters[cachedId] = writer
+                            activeCacheWriters[taskId] = writer
                             try {
                                 writer.cache()
                             } catch (_: Exception) {
@@ -537,9 +544,9 @@ object Providers {
                                 // the cache. Unless the user cancelled, fall back
                                 // to the existing yt-dlp downloader below.
                             } finally {
-                                activeCacheWriters.remove(cachedId, writer)
+                                activeCacheWriters.remove(taskId, writer)
                             }
-                            if (cancelledRequests.remove(cachedId)) {
+                            if (cancelledRequests.remove(taskId)) {
                                 return@withContext ProviderResult.Error("Descarga cancelada")
                             }
                             promoteCompleteStreamCache(context, cachedId, name, onProgress)?.let {
@@ -548,6 +555,7 @@ object Providers {
                         }
                     }
                 }
+                currentCoroutineContext().ensureActive()
                 ensureYoutubeInitialized(context)
                 val ytDlpVersion = runCatching { YoutubeDL.getInstance().versionName(context) }.getOrNull()
 
@@ -582,7 +590,7 @@ object Providers {
                 // CPU phase and preserves the source audio without an extra
                 // lossy conversion. Media3 can play the common m4a/opus/webm
                 // audio containers directly.
-                request.addOption("-f", "bestaudio/best")
+                request.addOption("-f", quality.format)
                 request.addOption("--no-mtime")
                 request.addOption("-N", "8")
                 request.addOption("-o", outputTemplate)
@@ -697,6 +705,7 @@ object Providers {
                 if (requestId != null && cancelledRequests.remove(requestId)) {
                     return@withContext ProviderResult.Error("Descarga cancelada")
                 }
+                android.util.Log.e("MusicVaultDownload", "Download failed", e)
                 val version = runCatching { YoutubeDL.getInstance().versionName(context) }.getOrNull()
                 val suffix = version?.let { " (yt-dlp $it)" }.orEmpty()
                 val detail = e.message?.trim().takeIf { !it.isNullOrBlank() }

@@ -26,6 +26,7 @@ import java.util.concurrent.Executors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import android.util.Log
+import com.musicvault.app.download.DownloadPreferences
 
 /**
  * Temporary streaming cache shared by every ExoPlayer instance in the app.
@@ -46,6 +47,7 @@ object StreamingCache {
     private const val MIME_PREFIX = "mime:"
 
     @Volatile private var cache: SimpleCache? = null
+    private var evictor: AdjustableCacheEvictor? = null
     @Volatile private var lastCleanupAt: Long = 0L
     @Volatile private var httpFactory: HttpDataSource.Factory? = null
     @Volatile private var cronetActive: Boolean = false
@@ -105,15 +107,32 @@ object StreamingCache {
             cache?.let { return it }
             val app = context.applicationContext
             val dir = File(app.cacheDir, "streaming_audio").apply { mkdirs() }
+            val policy = AdjustableCacheEvictor(DownloadPreferences.cacheMb(app) * 1024L * 1024L)
             val created = SimpleCache(
                 dir,
-                LeastRecentlyUsedCacheEvictor(MAX_BYTES),
+                policy,
                 StandaloneDatabaseProvider(app)
             )
+            evictor = policy
             cache = created
             cleanupExpired(app, created)
             return created
         }
+    }
+
+    fun resize(context: Context, megabytes: Int) {
+        require(megabytes in DownloadPreferences.cacheSizes)
+        DownloadPreferences.prefs(context).edit().putInt(DownloadPreferences.CACHE_MB, megabytes).apply()
+        val current = get(context)
+        evictor?.resize(current, megabytes * 1024L * 1024L)
+    }
+
+    fun usedBytes(context: Context): Long = get(context).cacheSpace
+
+    /** Only evicts streaming spans; never touches the download directory or SAF. */
+    fun clearStreamingCache(context: Context) {
+        val current = get(context)
+        synchronized(current) { current.keys.toList().forEach(current::removeResource) }
     }
 
     private fun networkFactory(context: Context): HttpDataSource.Factory {

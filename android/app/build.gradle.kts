@@ -13,8 +13,10 @@ android {
         applicationId = "com.musicvault.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 19
-        versionName = "0.5.8"
+        versionCode = 20
+        versionName = "0.5.9"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        testProguardFiles("test-proguard-rules.pro")
 
     }
 
@@ -33,6 +35,9 @@ android {
     // ✅ Configuraciones de build optimizadas
     buildTypes {
         release {
+            if (providers.gradleProperty("musicvault.localReleaseSigning").orNull == "true") {
+                signingConfig = signingConfigs.getByName("debug")
+            }
             isMinifyEnabled = true              // ✅ Minificación de código
             isShrinkResources = true           // ✅ Eliminación de recursos no usados  
             proguardFiles(
@@ -54,6 +59,8 @@ android {
             matchingFallbacks += listOf("release")
         }
     }
+
+    testBuildType = providers.gradleProperty("musicvault.testBuildType").orElse("debug").get()
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -109,6 +116,9 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-core")
     // Baseline profile installer: ships the hand-authored startup profile in
@@ -119,6 +129,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-service:2.8.7")
+    implementation("androidx.work:work-runtime-ktx:2.10.0")
     implementation("androidx.navigation:navigation-compose:2.8.5")
 
     implementation("androidx.room:room-runtime:2.7.0")
@@ -151,4 +162,18 @@ dependencies {
     // youtube-dl android
     implementation("io.github.junkfood02.youtubedl-android:library:0.18.1")
     implementation("io.github.junkfood02.youtubedl-android:ffmpeg:0.18.1")
+}
+
+tasks.register("verifyReleaseDownloadRules") {
+    group = "verification"
+    description = "Checks that R8 preserves ZIP constructors needed to initialize yt-dlp."
+    dependsOn("minifyReleaseWithR8")
+    doLast {
+        val seeds = layout.buildDirectory.file("outputs/mapping/release/seeds.txt").get().asFile.readText()
+        listOf("AsiExtraField", "JarMarker", "X7875_NewUnix", "X5455_ExtendedTimestamp", "Zip64ExtendedInformationExtraField").forEach { name ->
+            check(seeds.contains("org.apache.commons.compress.archivers.zip.$name: $name()")) {
+                "R8 removed the reflective ZIP constructor $name; release downloads can fail."
+            }
+        }
+    }
 }

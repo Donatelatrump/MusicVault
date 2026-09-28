@@ -16,9 +16,20 @@
 -keep class org.mozilla.javascript.** { *; }
 -keep class org.mozilla.classfile.ClassFileWriter
 -dontwarn org.mozilla.javascript.tools.**
+# Rhino bundles optional Java SE scripting, bean introspection, and Dynalink
+# integrations that are unavailable on Android. They are not used by the
+# extractor's Android runtime.
+-dontwarn java.beans.**
+-dontwarn javax.script.**
+-dontwarn jdk.dynalink.**
 -keep class org.schabi.newpipe.extractor.** { *; }
 
 # Preserve yt-dlp android classes
+# ExtraFieldUtils registers ZIP extra fields through Class.newInstance().
+# Keep their public no-arg constructors for yt-dlp's Python ZIP extraction.
+-keep class * implements org.apache.commons.compress.archivers.zip.ZipExtraField {
+    public <init>();
+}
 -keep class com.yausername.youtubedl_android.** { *; }
 -dontwarn com.yausername.youtubedl_android.**
 

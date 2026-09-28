@@ -40,9 +40,9 @@
         </provider>
 
         <service
-            android:name=".download.DownloadForegroundService"
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
             android:exported="false"
-            android:stopWithTask="false"
+            tools:node="merge"
             android:foregroundServiceType="dataSync" />
 
         <service
