@@ -83,7 +83,18 @@ class DeezerCatalogProvider : CatalogProvider {
     }
 
     override suspend fun albumTracks(albumId: String, limit: Int): List<CatalogTrack> {
+        return parseAlbumTracks(albumId, getAlbumJson(albumId), limit)
+    }
+
+    /** Home requires a genuine multi-track release and its available track list. */
+    suspend fun recommendationAlbumTracks(albumId: String): List<CatalogTrack> {
         val root = getAlbumJson(albumId)
+        val kind = root.optString("record_type").lowercase()
+        if (kind !in setOf("album", "ep") || root.optInt("nb_tracks") < 2) return emptyList()
+        return parseAlbumTracks(albumId, root, 100).takeIf { it.size >= 2 }.orEmpty()
+    }
+
+    private fun parseAlbumTracks(albumId: String, root: JSONObject, limit: Int): List<CatalogTrack> {
         val tracks = root.optJSONObject("tracks")?.optJSONArray("data")
             ?: root.optJSONArray("data")
             ?: return emptyList()

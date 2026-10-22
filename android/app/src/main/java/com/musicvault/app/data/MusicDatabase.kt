@@ -22,8 +22,8 @@ import androidx.room.RoomDatabase
         UserPreferences::class,
         DownloadQueueEntity::class
     ],
-    version = 19,
-    exportSchema = false
+    version = 20,
+    exportSchema = true
 )
 abstract class MusicDatabase : RoomDatabase() {
     abstract fun downloadQueueDao(): DownloadQueueDao
@@ -39,6 +39,13 @@ abstract class MusicDatabase : RoomDatabase() {
     abstract fun userPreferencesDao(): UserPreferencesDao
 
     companion object {
+        /** Rebuild only the derived index; every library and queue row stays intact. */
+        val MIGRATION_19_20 = object : androidx.room.migration.Migration(19, 20) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE download_queue ADD COLUMN requiresCharging INTEGER NOT NULL DEFAULT 0")
+                rebuildTrackSearchIndex(db, unicode = true)
+            }
+        }
         val MIGRATION_18_19 = object : androidx.room.migration.Migration(18, 19) {
             override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
                 db.execSQL("""CREATE TABLE IF NOT EXISTS download_queue (
@@ -231,14 +238,15 @@ abstract class MusicDatabase : RoomDatabase() {
             db.execSQL("ALTER TABLE $newTable RENAME TO $oldTable")
         }
 
-        private fun rebuildTrackSearchIndex(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+        private fun rebuildTrackSearchIndex(db: androidx.sqlite.db.SupportSQLiteDatabase, unicode: Boolean = false) {
             // The FTS table is only a derived search index. Rebuilding it is safe and
             // prevents old experimental definitions/triggers from breaking startup.
             db.execSQL("DROP TRIGGER IF EXISTS tracks_fts_insert")
             db.execSQL("DROP TRIGGER IF EXISTS tracks_fts_update")
             db.execSQL("DROP TRIGGER IF EXISTS tracks_fts_delete")
             db.execSQL("DROP TABLE IF EXISTS tracks_fts")
-            db.execSQL("CREATE VIRTUAL TABLE tracks_fts USING FTS4(trackId TEXT NOT NULL, title TEXT NOT NULL, artistName TEXT NOT NULL, albumTitle TEXT NOT NULL)")
+            val tokenizer = if (unicode) ", tokenize=unicode61 `remove_diacritics=1`" else ""
+            db.execSQL("CREATE VIRTUAL TABLE tracks_fts USING FTS4(trackId TEXT NOT NULL, title TEXT NOT NULL, artistName TEXT NOT NULL, albumTitle TEXT NOT NULL$tokenizer)")
             db.execSQL("INSERT INTO tracks_fts(trackId,title,artistName,albumTitle) SELECT id,title,artistName,albumTitle FROM tracks")
             createFtsTriggers(db)
         }
@@ -266,7 +274,7 @@ abstract class MusicDatabase : RoomDatabase() {
                 )
                 .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14)
                 // ✅ Performance optimizations for Room
-                .addMigrations(MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19)
+                .addMigrations(MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20)
                 .addCallback(object : RoomDatabase.Callback() {
                     override fun onOpen(db: androidx.sqlite.db.SupportSQLiteDatabase) {
                         createFtsTriggers(db)

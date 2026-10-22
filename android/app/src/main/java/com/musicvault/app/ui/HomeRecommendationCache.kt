@@ -9,8 +9,8 @@ import java.time.LocalDate
 
 /** Small persistent snapshot used to paint Home while the library/catalog flows warm up. */
 internal object HomeRecommendationCache {
-    private const val CACHE_KEY = "home_recommendations_v1"
-    private const val PROFILE_KEY = "home_recommendation_profile_v1"
+    private const val CACHE_KEY = "home_recommendations_v2"
+    private const val PROFILE_KEY = "home_recommendation_profile_v2"
 
     data class Snapshot(
         val profileKey: String,

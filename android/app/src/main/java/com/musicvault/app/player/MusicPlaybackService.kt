@@ -23,21 +23,54 @@ import kotlinx.coroutines.launch
 import android.view.KeyEvent
 import android.os.SystemClock
 import androidx.media3.session.MediaSession
-import androidx.media3.session.MediaSessionService
+import androidx.media3.session.MediaLibraryService
+import androidx.media3.session.MediaLibraryService.LibraryParams
+import androidx.media3.session.MediaLibraryService.MediaLibrarySession
+import androidx.media3.session.LibraryResult
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
+import androidx.media3.session.SessionCommand
+import android.os.Bundle
+import com.google.common.util.concurrent.Futures
+import com.google.common.util.concurrent.ListenableFuture
+import com.google.common.collect.ImmutableList
+import com.musicvault.app.data.MusicDatabase
+import com.musicvault.app.data.MusicRepository
+import com.musicvault.app.data.Track
+import kotlinx.coroutines.withContext
 import androidx.media3.session.SessionResult
 import androidx.media3.session.SessionError
 import com.musicvault.app.MainActivity
 
 @androidx.annotation.OptIn(markerClass = [UnstableApi::class])
-class MusicPlaybackService : MediaSessionService() {
+class MusicPlaybackService : MediaLibraryService() {
     private lateinit var player: ExoPlayer
-    private var mediaSession: MediaSession? = null
+    private var mediaSession: MediaLibrarySession? = null
+    private var localCatalog: List<Track> = emptyList()
+    private var queueInstalled = false
+    private var loudnessJob: Job? = null
+    private val normalizedGains = mutableMapOf<String, Float>()
+    private val replayGains = mutableMapOf<String, Float>()
     private lateinit var settings: SharedPreferences
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var fadingPlayer: ExoPlayer? = null
+    private var sleepTimerJob: Job? = null
     private var crossfadeJob: Job? = null
     private var crossfadeMonitorJob: Job? = null
+    private var snapshotJob: Job? = null
+    private var lastPlayedMediaId: String? = null
     private val settingsListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == "offline_mode" && settings.getBoolean("offline_mode", false)) {
+            val uri = player.currentMediaItem?.localConfiguration?.uri
+            if (uri?.scheme in listOf("http", "https")) { player.pause(); player.stop() }
+            fadingPlayer?.let { target ->
+                if (target.currentMediaItem?.localConfiguration?.uri?.scheme in listOf("http", "https")) { target.pause(); target.stop() }
+            }
+        }
         if (key == "crossfade_seconds") updateCrossfadeMonitor()
+        if (key in listOf("playback_speed", "skip_silence", "normalize_volume")) {
+            applyAudioOptions(player); fadingPlayer?.let(::applyAudioOptions); applyNormalization(player)
+        }
     }
     private var crossfadeTargetIndex = androidx.media3.common.C.INDEX_UNSET
     private val bufferingStartedAt = java.util.WeakHashMap<ExoPlayer, Long>()
@@ -49,10 +82,31 @@ class MusicPlaybackService : MediaSessionService() {
     override fun onCreate() {
         super.onCreate()
 
-        settings = getSharedPreferences("musicvault.settings", MODE_PRIVATE)
+        settings = com.musicvault.app.settings.AppPreferences.prefs(this)
         settings.registerOnSharedPreferenceChangeListener(settingsListener)
         player = buildPlayer()
         attachPlayerListeners(player)
+        restoreLocalQueue()
+        serviceScope.launch {
+            MusicRepository(MusicDatabase.get(this@MusicPlaybackService)).tracks().collect { tracks ->
+                localCatalog = withContext(Dispatchers.IO) { tracks.filter { PlaybackItems.isReadableLocal(this@MusicPlaybackService, it) } }
+                mediaSession?.notifyChildrenChanged("musicvault.local", localCatalog.size, null)
+            }
+        }
+        com.musicvault.app.scrobble.ListenBrainz.initialize(this)
+        snapshotJob = serviceScope.launch {
+            while (isActive) {
+                if (player.isPlaying) savePlaybackSnapshot()
+                observeScrobble()
+                delay(2_000L)
+            }
+        }
+        PlaybackOptions.onRepeatChanged = {
+            player.repeatMode = if (PlaybackOptions.policy.repeatMode == 0) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ONE
+        }
+        PlaybackOptions.onRepeatChanged?.invoke()
+        PlaybackOptions.onTimerChanged = ::scheduleSleepTimer
+        scheduleSleepTimer()
         AudioSessionBridge.sessionId = player.audioSessionId
         updateCrossfadeMonitor()
 
@@ -64,9 +118,59 @@ class MusicPlaybackService : MediaSessionService() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        mediaSession = MediaSession.Builder(this, player)
-            .setSessionActivity(pendingIntent)
-            .setCallback(object : MediaSession.Callback {
+        mediaSession = MediaLibrarySession.Builder(this, player, object : MediaLibrarySession.Callback {
+                override fun onConnect(session: MediaSession, controller: MediaSession.ControllerInfo): MediaSession.ConnectionResult {
+                    val result = super.onConnect(session, controller)
+                    return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+                        .setAvailableSessionCommands(result.availableSessionCommands.buildUpon()
+                            .add(SessionCommand("musicvault.restore_order", Bundle.EMPTY)).build()).build()
+                }
+                override fun onCustomCommand(session: MediaSession, controller: MediaSession.ControllerInfo, command: SessionCommand, args: Bundle): ListenableFuture<SessionResult> {
+                    if (command.customAction != "musicvault.restore_order" || controller.packageName != packageName)
+                        return Futures.immediateFuture(SessionResult(SessionError.ERROR_PERMISSION_DENIED))
+                    val order = args.getIntArray("order") ?: intArrayOf()
+                    if (order.sorted() != (0 until player.mediaItemCount).toList())
+                        return Futures.immediateFuture(SessionResult(SessionError.ERROR_BAD_VALUE))
+                    player.setShuffleOrder(androidx.media3.exoplayer.source.ShuffleOrder.DefaultShuffleOrder(order, 0L))
+                    PlaybackOptions.restoreRepeat(args.getInt("repeat", 0))
+                    savePlaybackSnapshot()
+                    return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+                }
+                override fun onGetLibraryRoot(session: MediaLibrarySession, browser: MediaSession.ControllerInfo, params: LibraryParams?): ListenableFuture<LibraryResult<MediaItem>> =
+                    Futures.immediateFuture(LibraryResult.ofItem(libraryRoot(), params))
+                override fun onGetChildren(session: MediaLibrarySession, browser: MediaSession.ControllerInfo, parentId: String, page: Int, pageSize: Int, params: LibraryParams?): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
+                    if (parentId != "musicvault.local" || page < 0 || pageSize <= 0)
+                        return Futures.immediateFuture(LibraryResult.ofError(SessionError.ERROR_BAD_VALUE))
+                    val offset = (page.toLong() * pageSize).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+                    return Futures.immediateFuture(LibraryResult.ofItemList(localCatalog.drop(offset).take(pageSize).mapNotNull { PlaybackItems.build(this@MusicPlaybackService, it) }, params))
+                }
+                override fun onGetItem(session: MediaLibrarySession, browser: MediaSession.ControllerInfo, mediaId: String): ListenableFuture<LibraryResult<MediaItem>> {
+                    val item = if (mediaId == "musicvault.local") libraryRoot() else localCatalog.firstOrNull { it.id == mediaId }?.let { PlaybackItems.build(this@MusicPlaybackService, it) }
+                    return Futures.immediateFuture(if (item != null) LibraryResult.ofItem(item, null) else LibraryResult.ofError(SessionError.ERROR_BAD_VALUE))
+                }
+                override fun onSubscribe(session: MediaLibrarySession, browser: MediaSession.ControllerInfo, parentId: String, params: LibraryParams?): ListenableFuture<LibraryResult<Void>> {
+                    return if (parentId == "musicvault.local") {
+                        session.notifyChildrenChanged(browser, parentId, localCatalog.size, params)
+                        Futures.immediateFuture(LibraryResult.ofVoid())
+                    } else Futures.immediateFuture(LibraryResult.ofError(SessionError.ERROR_BAD_VALUE))
+                }
+                override fun onSearch(session: MediaLibrarySession, browser: MediaSession.ControllerInfo, query: String, params: LibraryParams?): ListenableFuture<LibraryResult<Void>> {
+                    session.notifySearchResultChanged(browser, query, searchLocal(query).size, params)
+                    return Futures.immediateFuture(LibraryResult.ofVoid())
+                }
+                override fun onGetSearchResult(session: MediaLibrarySession, browser: MediaSession.ControllerInfo, query: String, page: Int, pageSize: Int, params: LibraryParams?): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
+                    if (page < 0 || pageSize <= 0) return Futures.immediateFuture(LibraryResult.ofError(SessionError.ERROR_BAD_VALUE))
+                    val offset = (page.toLong() * pageSize).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+                    return Futures.immediateFuture(LibraryResult.ofItemList(searchLocal(query).drop(offset).take(pageSize).mapNotNull { PlaybackItems.build(this@MusicPlaybackService, it) }, params))
+                }
+                override fun onAddMediaItems(session: MediaSession, controller: MediaSession.ControllerInfo, mediaItems: List<MediaItem>): ListenableFuture<List<MediaItem>> {
+                    return Futures.immediateFuture(mediaItems.flatMap { item ->
+                        if (controller.packageName == packageName && item.localConfiguration != null) listOf(item)
+                        else if (!item.requestMetadata.searchQuery.isNullOrBlank()) searchLocal(item.requestMetadata.searchQuery!!).mapNotNull { PlaybackItems.build(this@MusicPlaybackService, it) }
+                        else listOfNotNull(localCatalog.firstOrNull { it.id == item.mediaId }?.let { PlaybackItems.build(this@MusicPlaybackService, it) })
+                    })
+                }
+
                 override fun onPlayerCommandRequest(
                     session: MediaSession,
                     controller: MediaSession.ControllerInfo,
@@ -113,13 +217,42 @@ class MusicPlaybackService : MediaSessionService() {
                     return super.onMediaButtonEvent(session, controllerInfo, intent)
                 }
             })
+            .setSessionActivity(pendingIntent)
             .build()
     }
 
 
     private fun attachPlayerListeners(target: ExoPlayer) {
         target.addListener(object : Player.Listener {
+            override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                val id = target.currentMediaItem?.mediaId ?: return
+                for (group in tracks.groups) {
+                    for (index in 0 until group.length) {
+                        if (!group.isTrackSelected(index)) continue
+                        val metadata = group.getTrackFormat(index).metadata ?: continue
+                        ReplayGain.gain(metadata)?.let { replayGains[id] = it }
+                    }
+                }
+                if (target === player && crossfadeJob?.isActive != true) target.volume = normalizedGain(target)
+            }
+            override fun onEvents(changedPlayer: Player, events: Player.Events) {
+                if (target === player) {
+                    if (target.currentMediaItem == null) PlaybackRouteState.current.value = null
+                    target.currentMediaItem?.let { item ->
+                        PlaybackRouteState.current.value = PlaybackSnapshot.decode(item.mediaMetadata.extras?.getString(PlaybackSnapshot.KEY))?.track
+                            ?.copy(audioUri = item.localConfiguration?.uri?.toString())
+                    }
+                }
+                if (target === player && events.containsAny(
+                    Player.EVENT_MEDIA_ITEM_TRANSITION, Player.EVENT_POSITION_DISCONTINUITY,
+                    Player.EVENT_IS_PLAYING_CHANGED, Player.EVENT_PLAYBACK_STATE_CHANGED,
+                    Player.EVENT_TIMELINE_CHANGED, Player.EVENT_SHUFFLE_MODE_ENABLED_CHANGED, Player.EVENT_REPEAT_MODE_CHANGED
+                )) { savePlaybackSnapshot(); observeScrobble() }
+            }
             override fun onMediaItemTransition(mediaItem: androidx.media3.common.MediaItem?, reason: Int) {
+                if (target === player && reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT) {
+                    PlaybackOptions.trackRepeated()
+                }
                 // During an active crossfade the fade ramp owns both players'
                 // volumes and the target index. A transition fired by the
                 // fading player (auto-advance when it runs out of track) or by
@@ -127,7 +260,8 @@ class MusicPlaybackService : MediaSessionService() {
                 // old player audibly jumps back to full volume mid-fade.
                 if (crossfadeJob?.isActive == true) return
                 crossfadeTargetIndex = androidx.media3.common.C.INDEX_UNSET
-                target.volume = 1f
+                target.volume = normalizedGain(target)
+                if (target === player) applyNormalization(target)
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
@@ -148,6 +282,93 @@ class MusicPlaybackService : MediaSessionService() {
         })
     }
 
+    private fun observeScrobble() {
+        val track = player.currentMediaItem?.let { PlaybackSnapshot.decode(it.mediaMetadata.extras?.getString(PlaybackSnapshot.KEY))?.track }
+        com.musicvault.app.scrobble.ListenBrainz.observe(this, track, player.isPlaying, player.currentPosition.coerceAtLeast(0L))
+    }
+
+    private fun searchLocal(query: String): List<Track> {
+        val words = query.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+        if (words.isEmpty()) return emptyList()
+        return localCatalog.filter { track -> words.all { word ->
+            (track.title + " " + track.artistName + " " + track.albumTitle).contains(word, ignoreCase = true)
+        } }
+    }
+
+    private fun libraryRoot(): MediaItem = MediaItem.Builder().setMediaId("musicvault.local")
+        .setMediaMetadata(MediaMetadata.Builder().setTitle("Música local").setIsBrowsable(true).setIsPlayable(false)
+            .setMediaType(MediaMetadata.MEDIA_TYPE_FOLDER_MIXED).build()).build()
+
+    private fun restoreLocalQueue() {
+        val state = PlaybackQueueState.decode(settings.getString(PlaybackQueueState.KEY, null)) ?: return
+        // A mixed/remote queue needs the application's resolver; never reuse expired URLs.
+        if (!state.tracks.all { PlaybackItems.isReadableLocal(this, it) }) return
+        val items = state.tracks.mapNotNull { PlaybackItems.build(this, it) }
+        if (items.size != state.tracks.size) return
+        player.setMediaItems(items, state.index, state.positionMs)
+        player.setShuffleOrder(androidx.media3.exoplayer.source.ShuffleOrder.DefaultShuffleOrder(state.shuffleOrder.toIntArray(), 0L))
+        player.shuffleModeEnabled = state.shuffle
+        PlaybackOptions.restoreRepeat(state.repeatMode)
+        player.prepare()
+        player.pause()
+    }
+
+    private fun savePlaybackSnapshot() {
+        if (player.mediaItemCount == 0) {
+            if (!queueInstalled) return
+            settings.edit().remove(PlaybackQueueState.KEY).remove(PlaybackSnapshot.KEY).apply()
+            return
+        }
+        queueInstalled = true
+        val tracks = (0 until player.mediaItemCount).map { index ->
+            PlaybackSnapshot.decode(player.getMediaItemAt(index).mediaMetadata.extras?.getString(PlaybackSnapshot.KEY))?.track ?: return
+        }
+        val order = mutableListOf<Int>()
+        val timeline = player.currentTimeline
+        var next = timeline.getFirstWindowIndex(true)
+        while (next != C.INDEX_UNSET && next !in order && order.size < tracks.size) {
+            order += next
+            next = timeline.getNextWindowIndex(next, Player.REPEAT_MODE_OFF, true)
+        }
+        QueueRestoration.state?.let { restoring ->
+            val savedIndex = restoring.tracks.indexOfFirst { it.id == player.currentMediaItem?.mediaId }.takeIf { it >= 0 } ?: restoring.index
+            val saved = restoring.copy(index = savedIndex, positionMs = player.currentPosition.coerceAtLeast(0L))
+            settings.edit().putString(PlaybackQueueState.KEY, saved.encode())
+                .putString(PlaybackSnapshot.KEY, PlaybackSnapshot(saved.tracks[saved.index], saved.positionMs).encode()).apply()
+            return
+        }
+        val index = player.currentMediaItemIndex.coerceIn(tracks.indices)
+        val position = player.currentPosition.coerceAtLeast(0L)
+        settings.edit().putString(PlaybackQueueState.KEY, PlaybackQueueState(tracks, index, position,
+            player.shuffleModeEnabled, order, PlaybackOptions.policy.repeatMode).encode())
+            .putString(PlaybackSnapshot.KEY, PlaybackSnapshot(tracks[index], position).encode()).apply()
+    }
+
+    private fun applyAudioOptions(target: ExoPlayer) {
+        target.setPlaybackSpeed(settings.getFloat("playback_speed", 1f).coerceIn(0.5f, 2f))
+        target.skipSilenceEnabled = settings.getBoolean("skip_silence", false)
+    }
+    private fun normalizedGain(target: ExoPlayer): Float = if (settings.getBoolean("normalize_volume", false))
+        replayGains[target.currentMediaItem?.mediaId] ?: normalizedGains[target.currentMediaItem?.mediaId] ?: 1f else 1f
+    private fun applyNormalization(target: ExoPlayer) {
+        loudnessJob?.cancel()
+        if (crossfadeJob?.isActive != true) target.volume = normalizedGain(target)
+        if (!settings.getBoolean("normalize_volume", false)) return
+        val item = target.currentMediaItem ?: return
+        val reference = item.localConfiguration?.uri?.toString() ?: return
+        if (replayGains.containsKey(item.mediaId) || normalizedGains.containsKey(item.mediaId)) return
+        loudnessJob = serviceScope.launch {
+            val gain = withContext(Dispatchers.IO) { LocalLoudness.gain(this@MusicPlaybackService, reference) } ?: return@launch
+            normalizedGains[item.mediaId] = gain
+            if (target === player && target.currentMediaItem?.mediaId == item.mediaId && crossfadeJob?.isActive != true) target.volume = normalizedGain(target)
+        }
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        savePlaybackSnapshot()
+        super.onTaskRemoved(rootIntent)
+    }
+
     private fun buildPlayer(requestAudioFocus: Boolean = true): ExoPlayer {
         // Remote music can start safely with a much smaller startup buffer than
         // Media3's general-purpose streaming defaults. Keep local/offline files
@@ -165,8 +386,29 @@ class MusicPlaybackService : MediaSessionService() {
             .setLoadControl(loadControl)
             .setMediaSourceFactory(DefaultMediaSourceFactory(StreamingCache.dataSourceFactory(this)))
             .setAudioAttributes(mediaAudioAttributes, requestAudioFocus)
+            .setWakeMode(C.WAKE_MODE_LOCAL)
             .setHandleAudioBecomingNoisy(true)
-            .build()
+            .setPauseAtEndOfMediaItems(false)
+            .build().also(::applyAudioOptions)
+    }
+
+    private fun scheduleSleepTimer() {
+        sleepTimerJob?.cancel()
+        sleepTimerJob = null
+        if (PlaybackOptions.policy.timerDeadlineMs == 0L) return
+        sleepTimerJob = serviceScope.launch {
+            while (isActive) {
+                if (PlaybackOptions.policy.consumeTimerExpiry(SystemClock.elapsedRealtime())) {
+                    // Pausing the session player also makes an active fade abort.
+                    player.pause()
+                    fadingPlayer?.pause()
+                    PlaybackOptions.updateRemaining()
+                    break
+                }
+                PlaybackOptions.updateRemaining()
+                delay(PlaybackOptions.policy.remainingMs(SystemClock.elapsedRealtime()).coerceIn(1L, 1000L))
+            }
+        }
     }
 
     private fun startCrossfadeMonitor() {
@@ -207,6 +449,9 @@ class MusicPlaybackService : MediaSessionService() {
 
     private fun updateCrossfadeMonitor() {
         if (settings.getInt("crossfade_seconds", 5).coerceIn(0, 12) == 0) {
+            crossfadeJob?.cancel()
+            crossfadeJob = null
+            fadingPlayer?.let { abortCrossfade(player, it) }
             crossfadeMonitorJob?.cancel()
             crossfadeMonitorJob = null
         } else {
@@ -239,6 +484,7 @@ class MusicPlaybackService : MediaSessionService() {
         // player starts, which turns the crossfade into a hard switch and leaves
         // the UI reporting the old player as paused.
         val next = buildPlayer(requestAudioFocus = false)
+        fadingPlayer = next
         attachPlayerListeners(next)
         val wasShuffled = current.shuffleModeEnabled
         val sourceTimeline = current.currentTimeline
@@ -284,6 +530,7 @@ class MusicPlaybackService : MediaSessionService() {
         if (!ready) {
             Log.d("MusicPlaybackService", "Crossfade aborted: next item never became READY")
             next.release()
+            fadingPlayer = null
             crossfadeTargetIndex = androidx.media3.common.C.INDEX_UNSET
             return
         }
@@ -343,13 +590,13 @@ class MusicPlaybackService : MediaSessionService() {
                 else -> (1f - (remaining - handoffMarginMs).toFloat() / fadeStartRemaining).coerceIn(0f, 1f)
             }
             if (t >= 1f) break
-            current.volume = 1f - t
-            next.volume = t
+            current.volume = (1f - t) * normalizedGain(current)
+            next.volume = t * normalizedGain(next)
             delay(40L)
         }
         if (currentCoroutineContext().isActive) {
             current.volume = 0f
-            next.volume = 1f
+            next.volume = normalizedGain(next)
             // Re-enable focus handling and swap the session BEFORE the old
             // player is released. Releasing `current` abandons audio focus;
             // doing that before `next` re-requests it leaves a window with no
@@ -360,6 +607,8 @@ class MusicPlaybackService : MediaSessionService() {
             current.stop()
             current.release()
             player = next
+            applyNormalization(next)
+            savePlaybackSnapshot()
             // Restore the user's shuffle setting on the session player so the
             // app state and future hand-offs stay consistent.
             next.shuffleModeEnabled = wasShuffled
@@ -367,6 +616,7 @@ class MusicPlaybackService : MediaSessionService() {
             next.stop()
             next.release()
         }
+        fadingPlayer = null
         crossfadeTargetIndex = androidx.media3.common.C.INDEX_UNSET
     }
 
@@ -374,25 +624,35 @@ class MusicPlaybackService : MediaSessionService() {
     private fun abortCrossfade(current: ExoPlayer, next: ExoPlayer) {
         next.stop()
         next.release()
+        fadingPlayer = null
         // Restore full volume: unpausing must never come back silent, and a
         // newly picked song must not inherit the ramped-down volume of the
         // aborted fade.
-        current.volume = 1f
+        current.volume = normalizedGain(current)
         crossfadeTargetIndex = androidx.media3.common.C.INDEX_UNSET
     }
 
-    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? =
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? =
         mediaSession
 
     override fun onDestroy() {
+        savePlaybackSnapshot()
+        com.musicvault.app.scrobble.ListenBrainz.observe(this, PlaybackRouteState.track.value, false, player.currentPosition.coerceAtLeast(0L))
+        snapshotJob?.cancel()
+        loudnessJob?.cancel()
+        PlaybackOptions.reset()
+        sleepTimerJob?.cancel()
         settings.unregisterOnSharedPreferenceChangeListener(settingsListener)
         crossfadeMonitorJob?.cancel()
         crossfadeJob?.cancel()
         serviceScope.coroutineContext[Job]?.cancel()
         mediaSession?.release()
         mediaSession = null
+        fadingPlayer?.release()
+        fadingPlayer = null
         player.release()
         AudioSessionBridge.sessionId = 0
+        PlaybackRouteState.current.value = null
         super.onDestroy()
     }
 }

@@ -1,0 +1,75 @@
+name: Android quality
+on:
+  pull_request:
+    paths: ["android/**", ".github/workflows/android-quality.yml"]
+  push:
+    paths: ["android/**", ".github/workflows/android-quality.yml"]
+  workflow_dispatch:
+    inputs:
+      instrumentation:
+        description: "Run offline instrumented checks on an emulator"
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: android-quality-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  local-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install Android platform
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - name: Unit tests and lint (offline fixtures, no live provider smoke)
+        run: ./gradlew :app:testDebugUnitTest :app:lintDebug --console=plain --no-daemon
+      - name: Publish reports only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-unit-and-lint-reports
+          if-no-files-found: ignore
+          path: |
+            android/app/build/reports/tests/testDebugUnitTest/
+            android/app/build/test-results/testDebugUnitTest/
+            android/app/build/reports/lint-results-debug.*
+  instrumentation:
+    if: github.event_name == 'workflow_dispatch' && inputs.instrumentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Enable emulator acceleration
+        run: |
+          sudo chmod 666 /dev/kvm
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          working-directory: android
+          script: ./gradlew :app:connectedDebugAndroidTest -Pmusicvault.emulatorAbi=true --console=plain --no-daemon
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-instrumentation-reports
+          if-no-files-found: ignore
+          path: android/app/build/reports/androidTests/connected/

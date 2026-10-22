@@ -9,6 +9,10 @@ import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 
 class MusicRepository(private val db: MusicDatabase) {
+    companion object {
+        const val FAVORITES_PLAYLIST_ID = "playlist:favorites"
+    }
+
     fun tracks(): Flow<List<Track>> =
         db.trackDao().observeAll().distinctUntilChanged().map { list -> list.map(::toTrack) }.flowOn(Dispatchers.IO)
 
@@ -70,6 +74,16 @@ class MusicRepository(private val db: MusicDatabase) {
         if (tracks.isEmpty()) return
         db.withTransaction {
             val dao = db.playlistDao()
+            // Playlist rows join against tracks; a streaming song must have a
+            // durable metadata row before its playlist reference can be visible.
+            db.trackDao().insertIfAbsent(tracks.map(::storedTrack))
+            if (id == FAVORITES_PLAYLIST_ID) {
+                ensureFavoritesPlaylist()
+                val liked = db.favoriteDao().exportAll().mapTo(HashSet()) { it.trackId }
+                tracks.filter { liked.add(it.id) }.forEach {
+                    db.favoriteDao().add(FavoriteEntity(it.id, System.currentTimeMillis()))
+                }
+            }
             val existing = dao.trackIds(id).toHashSet()
             val additions = tracks.filter { existing.add(it.id) }
             val start = dao.nextPosition(id)
@@ -158,7 +172,10 @@ class MusicRepository(private val db: MusicDatabase) {
     }
 
     suspend fun removeTrackFromPlaylist(id: String, trackId: String) {
-        db.playlistDao().deleteTrack(id, trackId)
+        db.withTransaction {
+            db.playlistDao().deleteTrack(id, trackId)
+            if (id == FAVORITES_PLAYLIST_ID) db.favoriteDao().remove(FavoriteEntity(trackId, 0L))
+        }
     }
 
     suspend fun addTrackToAlbum(id: String, track: Track) {
@@ -193,19 +210,53 @@ class MusicRepository(private val db: MusicDatabase) {
     fun favorites(): Flow<Set<String>> =
         db.favoriteDao().observeAll().map { list -> list.mapTo(HashSet()) { it.trackId } }
 
-    suspend fun toggleFavorite(trackId: String): Boolean {
-        val favorite = db.favoriteDao().isFavorite(trackId)
+    suspend fun toggleFavorite(track: Track): Boolean = db.withTransaction {
+        ensureFavoritesPlaylist()
+        val favorite = db.favoriteDao().isFavorite(track.id)
         if (favorite) {
-            db.favoriteDao().remove(FavoriteEntity(trackId, 0L))
-            return false
+            removeTrackFromPlaylist(FAVORITES_PLAYLIST_ID, track.id)
+            return@withTransaction false
         }
-        db.favoriteDao().add(FavoriteEntity(trackId, System.currentTimeMillis()))
-        return true
+        addTrackToPlaylist(FAVORITES_PLAYLIST_ID, track)
+        true
     }
 
-    suspend fun recordPlay(track: Track, completionRatio: Float) {
-        db.withTransaction {
-            db.historyDao().insert(
+    /** Backfill references from older builds without discarding unknown likes. */
+    suspend fun reconcileFavorites(knownTracks: List<Track> = emptyList()): Set<String> = db.withTransaction {
+        ensureFavoritesPlaylist()
+        val favorites = db.favoriteDao().exportAll().sortedBy { it.createdAt }
+        val likedIds = favorites.mapTo(HashSet()) { it.trackId }
+        val recovered = knownTracks.filter { it.id in likedIds }.distinctBy { it.id }
+        if (recovered.isNotEmpty()) db.trackDao().insertIfAbsent(recovered.map(::storedTrack))
+        val dao = db.playlistDao()
+        val linked = dao.trackIds(FAVORITES_PLAYLIST_ID).toHashSet()
+        val start = dao.nextPosition(FAVORITES_PLAYLIST_ID)
+        val additions = favorites.filter { it.trackId !in linked }
+        if (additions.isNotEmpty()) dao.upsertTracks(additions.mapIndexed { index, item ->
+            PlaylistTrackEntity(FAVORITES_PLAYLIST_ID, item.trackId, start + index)
+        })
+        linked.filter { it !in likedIds }.forEach { dao.deleteTrack(FAVORITES_PLAYLIST_ID, it) }
+        val available = likedIds.toList().chunked(500).flatMap { db.trackDao().getByIds(it) }
+        available.firstOrNull { !it.coverUri.isNullOrBlank() }?.coverUri?.let {
+            dao.setCoverIfEmpty(FAVORITES_PLAYLIST_ID, it)
+        }
+        likedIds - available.mapTo(HashSet()) { it.id }
+    }
+
+    private suspend fun ensureFavoritesPlaylist() {
+        db.playlistDao().insertIfAbsent(PlaylistEntity(FAVORITES_PLAYLIST_ID, "Favoritos", "Canciones que te gustan"))
+    }
+
+    private fun storedTrack(track: Track) = TrackEntity(
+        track.id, track.title, track.artistName, track.albumId, track.albumTitle,
+        track.durationMs, track.audioUri.takeIf { track.isDownloaded },
+        track.isDownloaded && !track.audioUri.isNullOrBlank(), track.coverUri, track.source, track.sourceId
+    )
+
+    suspend fun recordPlay(track: Track, completionRatio: Float): Long = db.withTransaction {
+            // Retain metadata for streamed listens without saving temporary audio URLs.
+            db.trackDao().insertIfAbsent(listOf(storedTrack(track)))
+            val historyId = db.historyDao().insert(
                 PlayHistoryEntity(
                     trackId = track.id,
                     playedAt = System.currentTimeMillis(),
@@ -213,7 +264,7 @@ class MusicRepository(private val db: MusicDatabase) {
                 )
             )
             db.historyDao().trim(2_000)
-        }
+            historyId
     }
 
     /** Apply a MediaStore snapshot without invalidating Room when nothing changed. */

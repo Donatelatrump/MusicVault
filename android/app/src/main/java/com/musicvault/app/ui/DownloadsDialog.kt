@@ -1,5 +1,8 @@
 package com.musicvault.app.ui
 
+import com.musicvault.app.R
+import androidx.compose.ui.res.stringResource
+
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -38,8 +41,8 @@ internal fun DownloadsDialog(queue: List<DownloadQueueEntity>, onDismiss: () -> 
         Surface(Modifier.fillMaxSize()) {
             Column(Modifier.fillMaxSize().safeDrawingPadding().padding(16.dp)) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Descargas", style = MaterialTheme.typography.headlineSmall)
-                    TextButton(onClick = onDismiss) { Text("Cerrar") }
+                    Text(stringResource(R.string.ui_descargas_fc3ae1), style = MaterialTheme.typography.headlineSmall)
+                    TextButton(onClick = onDismiss) { Text(stringResource(R.string.ui_cerrar_4b0816)) }
                 }
                 ScrollableTabRow(selectedTabIndex = filter, edgePadding = 0.dp) {
                     listOf("Pendientes", "Completadas", "Fallidas / canceladas").forEachIndexed { index, label ->
@@ -47,11 +50,11 @@ internal fun DownloadsDialog(queue: List<DownloadQueueEntity>, onDismiss: () -> 
                     }
                 }
                 TextButton(enabled = !busy && queue.any { it.state == "failed" }, onClick = { perform { DownloadQueue.retryFailed(context) } }) {
-                    Text("Reintentar fallidas")
+                    Text(stringResource(R.string.ui_reintentar_fallidas_dad5b6))
                 }
-                Text("Las pendientes se recuperan al volver la conexión. Tras forzar el cierre de la app, vuelve a abrirla para continuar.", style = MaterialTheme.typography.bodySmall)
+                Text(stringResource(R.string.ui_las_pendientes_se_recuperan_al_volver_la_conex_7fa97b), style = MaterialTheme.typography.bodySmall)
                 message?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                if (shown.isEmpty()) Text("No hay descargas en esta sección.", Modifier.padding(vertical = 20.dp))
+                if (shown.isEmpty()) Text(stringResource(R.string.ui_no_hay_descargas_en_esta_seccion_364597), Modifier.padding(vertical = 20.dp))
                 LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     items(shown, key = { it.id }) { item ->
                         Card(Modifier.fillMaxWidth()) {
@@ -69,8 +72,8 @@ internal fun DownloadsDialog(queue: List<DownloadQueueEntity>, onDismiss: () -> 
                                 Text(label)
                                 item.error?.let { Text(it, maxLines = 4, style = MaterialTheme.typography.bodySmall) }
                                 if (item.state == "running") LinearProgressIndicator(progress = { item.progress / 100f }, modifier = Modifier.fillMaxWidth())
-                                if (DownloadQueue.isActive(item.state)) TextButton(enabled = !busy, onClick = { perform { DownloadQueue.cancel(context, item.id) } }) { Text("Cancelar") }
-                                else if (item.state != "complete") TextButton(enabled = !busy, onClick = { perform { DownloadQueue.retry(context, item.id) } }) { Text("Reintentar") }
+                                if (DownloadQueue.isActive(item.state)) TextButton(enabled = !busy, onClick = { perform { DownloadQueue.cancel(context, item.id) } }) { Text(stringResource(R.string.ui_cancelar_c111e0)) }
+                                else if (item.state != "complete") TextButton(enabled = !busy, onClick = { perform { DownloadQueue.retry(context, item.id) } }) { Text(stringResource(R.string.ui_reintentar_adec7b)) }
                             }
                         }
                     }

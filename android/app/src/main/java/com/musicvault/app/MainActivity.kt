@@ -17,7 +17,7 @@ import com.musicvault.app.ui.theme.MusicVaultTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
-class MainActivity : ComponentActivity() {
+class MainActivity : androidx.fragment.app.FragmentActivity() {
     // Lazy database initialization - solo cuando se necesite
     private val database by lazy {
         MusicDatabase.get(applicationContext)
@@ -86,6 +86,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        com.musicvault.app.diagnostics.PerformanceDiagnostics.onResume(this)
         // Si el usuario volvió desde Ajustes después de habilitar manualmente
         // el permiso, lo volvemos a evaluar para mantener el estado interno
         // del ViewModel sincronizado.
@@ -95,6 +96,16 @@ class MainActivity : ComponentActivity() {
         // but muted on some devices.
         viewModel.refreshPlaybackState()
         requestStoragePermissionsIfNeeded()
+    }
+
+    override fun onPause() {
+        com.musicvault.app.diagnostics.PerformanceDiagnostics.onPause(this)
+        super.onPause()
+    }
+
+    override fun onDestroy() {
+        com.musicvault.app.diagnostics.PerformanceDiagnostics.onDestroy(this)
+        super.onDestroy()
     }
 
     private fun requestStoragePermissionsIfNeeded() {

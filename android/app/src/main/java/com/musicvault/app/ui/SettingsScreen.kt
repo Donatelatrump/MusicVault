@@ -1,5 +1,8 @@
 package com.musicvault.app.ui
 
+import com.musicvault.app.R
+import androidx.compose.ui.res.stringResource
+
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -21,6 +24,7 @@ import com.musicvault.app.ui.theme.VaultIcons
 
 @Composable
 internal fun SettingsScreen(
+    vm: MusicVaultViewModel,
     crossfadeSeconds: Int,
     playerStyle: String,
     appDesign: String,
@@ -36,6 +40,17 @@ internal fun SettingsScreen(
     onDisconnectSpotify: () -> Unit,
     onClose: () -> Unit
 ) {
+    var tool by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
+    val offline by vm.offlineMode.collectAsState()
+    if (tool != null) {
+        androidx.activity.compose.BackHandler { tool = null }
+        when (tool) {
+            "library" -> LibraryManagementScreen { tool = null }
+            "playback" -> PlaybackToolsScreen { tool = null }
+            "providers" -> ProviderToolsScreen { tool = null }
+        }
+        return
+    }
     val hybrid = LocalHybridDesign.current
     Column(
         Modifier
@@ -45,30 +60,40 @@ internal fun SettingsScreen(
         verticalArrangement = Arrangement.spacedBy(if (hybrid) 12.dp else 14.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onClose) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Atrás", tint = VaultColors.TextPrimary) }
-            Text("Ajustes", color = VaultColors.TextPrimary, fontSize = if (hybrid) 24.sp else 26.sp, fontWeight = FontWeight.Bold, fontFamily = VaultFonts.Display, letterSpacing = (-0.75).sp)
+            IconButton(onClick = onClose) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.ui_atras_0e715a), tint = VaultColors.TextPrimary) }
+            Text(stringResource(R.string.ui_ajustes_9751f8), color = VaultColors.TextPrimary, fontSize = if (hybrid) 24.sp else 26.sp, fontWeight = FontWeight.Bold, fontFamily = VaultFonts.Display, letterSpacing = (-0.75).sp)
         }
-        SettingsSection("APARIENCIA") {
-            Text("Diseño de la aplicación", color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+        SettingsSection(stringResource(R.string.ui_conexion_y_herramientas_baa597)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(stringResource(R.string.ui_modo_sin_conexion_f73a84), modifier = Modifier.weight(1f), color = VaultColors.TextPrimary)
+                Switch(checked = offline, onCheckedChange = vm::setOfflineMode)
+            }
+            Text(stringResource(R.string.ui_busca_y_reproduce_archivos_disponibles_en_este_3d8022), color = VaultColors.TextSecondary)
+            TextButton(onClick = { tool = "playback" }) { Text(stringResource(R.string.ui_reproduccion_y_chromecast_1abd2c)) }
+            TextButton(onClick = { tool = "library" }) { Text(stringResource(R.string.ui_almacenamiento_m3u_y_respaldos_59647b)) }
+            TextButton(onClick = { tool = "providers" }) { Text(stringResource(R.string.ui_proveedores_fallos_y_listenbrainz_801ea2)) }
+        }
+        SettingsSection(stringResource(R.string.ui_apariencia_0f2c3a)) {
+            Text(stringResource(R.string.ui_diseno_de_la_aplicacion_c99ac9), color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
             Spacer(Modifier.height(4.dp))
             Text(
-                "Puedes volver al diseño anterior en cualquier momento. Tus canciones y ajustes no cambian.",
+                stringResource(R.string.ui_puedes_volver_al_diseno_anterior_en_cualquier_3556d6),
                 color = VaultColors.TextTertiary,
                 fontSize = 12.sp
             )
             Spacer(Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 StyleOption(
-                    title = "Híbrido",
-                    description = "Más claro, compacto y fácil de recorrer.",
+                    title = stringResource(com.musicvault.app.R.string.ui_hibrido_9cb40a),
+                    description = stringResource(com.musicvault.app.R.string.ui_mas_claro_compacto_y_facil_de_recorrer_c1cb4d),
                     icon = Icons.Default.Home,
                     selected = appDesign == APP_DESIGN_HYBRID,
                     onClick = { onAppDesignChange(APP_DESIGN_HYBRID) },
                     modifier = Modifier.weight(1f)
                 )
                 StyleOption(
-                    title = "Clásico",
-                    description = "Restaura la apariencia anterior de MusicVault.",
+                    title = stringResource(com.musicvault.app.R.string.ui_clasico_5fff0e),
+                    description = stringResource(com.musicvault.app.R.string.ui_restaura_la_apariencia_anterior_de_musicvault_f239b1),
                     icon = VaultIcons.LibraryMusic,
                     selected = appDesign == APP_DESIGN_CLASSIC,
                     onClick = { onAppDesignChange(APP_DESIGN_CLASSIC) },
@@ -78,20 +103,20 @@ internal fun SettingsScreen(
             Spacer(Modifier.height(18.dp))
             HorizontalDivider(color = VaultColors.Divider)
             Spacer(Modifier.height(18.dp))
-            Text("Estilo del reproductor", color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+            Text(stringResource(R.string.ui_estilo_del_reproductor_43172e), color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
             Spacer(Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 StyleOption(
-                    title = "Tornamesa / Vinilo",
-                    description = "Disco giratorio con brazo, control de RPM y hardware del deck.",
+                    title = stringResource(com.musicvault.app.R.string.ui_tornamesa_vinilo_d11d6f),
+                    description = stringResource(com.musicvault.app.R.string.ui_disco_giratorio_con_brazo_control_de_rpm_y_har_6f62f0),
                     icon = VaultIcons.Album,
                     selected = playerStyle == "vinyl",
                     onClick = { onPlayerStyleChange("vinyl") },
                     modifier = Modifier.weight(1f)
                 )
                 StyleOption(
-                    title = "Visualizador circular",
-                    description = "Portada central rodeada por anillos de graves, medios y agudos.",
+                    title = stringResource(com.musicvault.app.R.string.ui_visualizador_circular_9a3ecc),
+                    description = stringResource(com.musicvault.app.R.string.ui_portada_central_rodeada_por_anillos_de_graves_f92ccd),
                     icon = VaultIcons.GraphicEq,
                     selected = playerStyle == "circular",
                     onClick = { onPlayerStyleChange("circular") },
@@ -99,8 +124,8 @@ internal fun SettingsScreen(
                 )
             }
         }
-        SettingsSection("REPRODUCCIÓN") {
-            Text("Crossfade", color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+        SettingsSection(stringResource(R.string.ui_reproduccion_5e88a8)) {
+            Text(stringResource(R.string.ui_crossfade_00acfc), color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
             Spacer(Modifier.height(4.dp))
             // Keep the drag value local so a 60 Hz gesture never recomposes the whole
             // app (crossfadeSeconds feeds the root state combine) nor hits prefs.
@@ -130,8 +155,8 @@ internal fun SettingsScreen(
                 )
             }
         }
-        SettingsSection("ALMACENAMIENTO") {
-            Text("Ruta de descargas", color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+        SettingsSection(stringResource(R.string.ui_almacenamiento_a825b8)) {
+            Text(stringResource(R.string.ui_ruta_de_descargas_5cb409), color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
             Spacer(Modifier.height(6.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(VaultIcons.FolderOpen, null, tint = VaultColors.Accent, modifier = Modifier.size(20.dp))
@@ -148,21 +173,21 @@ internal fun SettingsScreen(
                 ) {
                     Icon(VaultIcons.FolderOpen, null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
-                    Text("Elegir carpeta", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                    Text(stringResource(R.string.ui_elegir_carpeta_6df387), fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                 }
                 OutlinedButton(
                     onClick = onUseInternalFolder,
                     shape = RoundedCornerShape(50),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = VaultColors.TextPrimary)
                 ) {
-                    Text("Usar carpeta interna", fontSize = 13.sp)
+                    Text(stringResource(R.string.ui_usar_carpeta_interna_782032), fontSize = 13.sp)
                 }
             }
         }
         LibraryToolsSettings()
-        SettingsSection("SPOTIFY") {
+        SettingsSection(stringResource(R.string.ui_spotify_d41904)) {
             Text(
-                if (spotifyConnected) "Cuenta conectada en este dispositivo" else "Spotify no está conectado",
+                if (spotifyConnected) stringResource(com.musicvault.app.R.string.ui_cuenta_conectada_en_este_dispositivo_0995f6) else stringResource(com.musicvault.app.R.string.ui_spotify_no_esta_conectado_cdb07a),
                 color = VaultColors.TextPrimary,
                 fontWeight = FontWeight.SemiBold,
                 fontSize = 15.sp
@@ -174,7 +199,7 @@ internal fun SettingsScreen(
                     enabled = !spotifyBusy,
                     shape = RoundedCornerShape(50),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = VaultColors.TextPrimary)
-                ) { Text("Desconectar Spotify", fontSize = 13.sp) }
+                ) { Text(stringResource(R.string.ui_desconectar_spotify_547c56), fontSize = 13.sp) }
             } else {
                 Button(
                     onClick = onConnectSpotify,
@@ -184,7 +209,7 @@ internal fun SettingsScreen(
                         containerColor = VaultColors.Accent,
                         contentColor = VaultColors.OnAccent
                     )
-                ) { Text("Conectar Spotify", fontWeight = FontWeight.SemiBold, fontSize = 13.sp) }
+                ) { Text(stringResource(R.string.ui_conectar_spotify_ed2de8), fontWeight = FontWeight.SemiBold, fontSize = 13.sp) }
             }
         }
     }

@@ -13,8 +13,8 @@ android {
         applicationId = "com.musicvault.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 20
-        versionName = "0.5.9"
+        versionCode = 26
+        versionName = "0.6.3"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         testProguardFiles("test-proguard-rules.pro")
 
@@ -27,7 +27,11 @@ android {
         abi {
             isEnable = true
             reset()
-            include("arm64-v8a", "armeabi-v7a")
+            if (providers.gradleProperty("musicvault.emulatorAbi").orNull == "true") {
+                include("x86_64")
+            } else {
+                include("arm64-v8a", "armeabi-v7a")
+            }
             isUniversalApk = true
         }
     }
@@ -59,6 +63,8 @@ android {
             matchingFallbacks += listOf("release")
         }
     }
+
+    sourceSets.getByName("androidTest").assets.srcDir("$projectDir/schemas")
 
     testBuildType = providers.gradleProperty("musicvault.testBuildType").orElse("debug").get()
 
@@ -130,7 +136,13 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-service:2.8.7")
     implementation("androidx.work:work-runtime-ktx:2.10.0")
-    implementation("androidx.navigation:navigation-compose:2.8.5")
+
+    implementation("androidx.datastore:datastore-preferences:1.1.3")
+    implementation("androidx.metrics:metrics-performance:1.0.0")
+    // 22.3.1 publishes Kotlin 2.2 metadata; 22.0.0 supports this Kotlin 2.0 toolchain.
+    implementation("com.google.android.gms:play-services-cast-framework:22.0.0")
+    debugImplementation("com.squareup.leakcanary:leakcanary-android:2.14")
+    androidTestImplementation("androidx.room:room-testing:2.7.0")
 
     implementation("androidx.room:room-runtime:2.7.0")
     implementation("androidx.room:room-ktx:2.7.0")
@@ -146,7 +158,6 @@ dependencies {
     implementation("androidx.media3:media3-datasource-cronet:$media3Version")
     implementation("androidx.media3:media3-database:$media3Version")
     implementation("androidx.media3:media3-session:$media3Version")
-    implementation("androidx.media3:media3-ui:$media3Version")
     // Preferred streaming network stack. Google Play Services Cronet gives
     // HTTP/2 + HTTP/3/QUIC without bundling the ~8 MB embedded Cronet binary.
     implementation("com.google.android.gms:play-services-cronet:18.1.1")
@@ -177,3 +188,6 @@ tasks.register("verifyReleaseDownloadRules") {
         }
     }
 }
+
+
+ksp { arg("room.schemaLocation", "$projectDir/schemas") }

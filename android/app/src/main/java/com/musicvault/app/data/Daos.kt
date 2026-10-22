@@ -72,8 +72,11 @@ interface PlaylistDao {
 interface HistoryDao {
     @Insert suspend fun insert(item: PlayHistoryEntity): Long
     @Query("SELECT id FROM play_history WHERE trackId=:trackId ORDER BY playedAt DESC LIMIT 1") suspend fun latestId(trackId: String): Long?
-    @Query("UPDATE play_history SET completionRatio=:ratio WHERE id=:id") suspend fun updateCompletion(id: Long, ratio: Float)
+    @Query("UPDATE play_history SET completionRatio=:ratio WHERE id=:id AND completionRatio >= 0") suspend fun updateCompletion(id: Long, ratio: Float)
+    @Query("UPDATE play_history SET completionRatio=-1 WHERE id=(SELECT id FROM play_history WHERE trackId=:trackId AND playedAt>=:cutoff ORDER BY playedAt DESC LIMIT 1) AND completionRatio>=0 AND completionRatio<0.35")
+    suspend fun markSkipped(trackId: String, cutoff: Long)
     @Query("SELECT * FROM play_history ORDER BY playedAt DESC LIMIT :limit") fun observeRecent(limit: Int): Flow<List<PlayHistoryEntity>>
+    @Query("SELECT * FROM play_history ORDER BY playedAt DESC LIMIT :limit") suspend fun recent(limit: Int): List<PlayHistoryEntity>
     @Query("DELETE FROM play_history WHERE id NOT IN (SELECT id FROM play_history ORDER BY playedAt DESC LIMIT :limit)")
     suspend fun trim(limit: Int)
 }
@@ -107,6 +110,8 @@ interface DownloadRecordDao {
 
 @Dao
 interface CatalogSearchCacheDao {
+    @Query("SELECT * FROM catalog_search_cache ORDER BY savedAt DESC")
+    suspend fun exportAll(): List<CatalogSearchCacheEntity>
     @Query("SELECT * FROM catalog_search_cache WHERE cacheKey=:cacheKey LIMIT 1")
     suspend fun get(cacheKey: String): CatalogSearchCacheEntity?
 

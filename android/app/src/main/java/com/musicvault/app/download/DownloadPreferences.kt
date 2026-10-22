@@ -10,7 +10,7 @@ object DownloadPreferences {
     const val WIFI_ONLY = "download_wifi_only"
     const val CACHE_MB = "stream_cache_mb"
     val cacheSizes = listOf(256, 512, 1024, 2048)
-    fun prefs(context: Context) = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+    fun prefs(context: Context) = com.musicvault.app.settings.AppPreferences.prefs(context)
     fun quality(context: Context) = DownloadQuality.parse(prefs(context).getString(QUALITY, null))
     fun wifiOnly(context: Context) = prefs(context).getBoolean(WIFI_ONLY, false)
     fun cacheMb(context: Context) = prefs(context).getInt(CACHE_MB, 1024).takeIf { it in cacheSizes } ?: 1024

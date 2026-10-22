@@ -12,6 +12,7 @@ import androidx.room.withTransaction
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
+import androidx.work.WorkInfo
 import com.musicvault.app.MainActivity
 import com.musicvault.app.R
 import com.musicvault.app.data.*
@@ -28,9 +29,20 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
         val row = dao.get(trackId) ?: return@withContext Result.success()
         if (row.generation != generation || !DownloadQueue.isActive(row.state)) return@withContext Result.success()
         var wifiLost = false
+        var chargingLost = false
+        var offlineEnabled = false
+        var pendingOutput: ProviderResult.Success? = null
         try {
+            if (offline(context)) {
+                dao.update(trackId, generation, "waiting", row.progress, "Modo sin conexión activo; descarga pendiente hasta desactivarlo", row.attempts)
+                return@withContext Result.retry()
+            }
             if (row.wifiOnly && !DownloadPreferences.wifiAvailable(context)) {
                 dao.update(trackId, generation, "waiting", 0, "Esperando Wi-Fi", row.attempts)
+                return@withContext Result.retry()
+            }
+            if (row.requiresCharging && !charging(context)) {
+                dao.update(trackId, generation, "waiting", 0, "Esperando que el dispositivo esté cargando", row.attempts)
                 return@withContext Result.retry()
             }
             setForeground(foreground(row.track.title, 0))
@@ -42,7 +54,8 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
                 val transfer = async {
                     Providers.download(row.track.title, row.track.artistName,
                         requestId = generation, sourceUrl = row.sourceUrl, cacheKey = trackId,
-                        quality = DownloadQuality.parse(row.quality), onProgress = { value ->
+                        quality = DownloadQuality.parse(row.quality), albumTitle = row.track.albumTitle,
+                        coverUri = row.track.coverUri, onProgress = { value ->
                             val now = android.os.SystemClock.elapsedRealtime()
                             if (value != lastProgress && (value == 100 || now - lastTime >= 750)) {
                                 lastTime = now
@@ -56,10 +69,12 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
                         })
                 }
                 val networkWatch = launch {
-                    while (isActive && !transfer.isCompleted && row.wifiOnly) {
+                    while (isActive && !transfer.isCompleted) {
                         delay(1000)
-                        if (!DownloadPreferences.wifiAvailable(context)) {
-                            wifiLost = true
+                        if (offline(context) || (row.wifiOnly && !DownloadPreferences.wifiAvailable(context)) || (row.requiresCharging && !charging(context))) {
+                            offlineEnabled = offline(context)
+                            wifiLost = row.wifiOnly && !DownloadPreferences.wifiAvailable(context)
+                            chargingLost = row.requiresCharging && !charging(context)
                             Providers.cancel(generation)
                             transfer.cancel()
                             break
@@ -73,6 +88,7 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
                     throw cancelled
                 } finally { networkWatch.cancel() }
             }
+            pendingOutput = result as? ProviderResult.Success
             ensureActive()
             if (wifiLost) {
                 dao.update(trackId, generation, "waiting", 0, "Esperando Wi-Fi", row.attempts)
@@ -92,6 +108,8 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
                             true
                         }
                     }
+                    if (!stored) discardOutput(result)
+                    pendingOutput = null
                     if (stored) {
                         DownloadEvents.result(context, trackId, result)
                         try {
@@ -117,7 +135,7 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
                         is ProviderResult.Unavailable -> result.reason
                         else -> "No se pudo descargar"
                     }
-                    val retry = result is ProviderResult.Error && row.attempts < 2
+                    val retry = result is ProviderResult.Error && (result.failure?.retryable != false) && row.attempts < 2
                     val changed = dao.update(trackId, generation, if (retry) "waiting" else "failed", 0, message, row.attempts + 1)
                     if (!retry && changed > 0) DownloadEvents.result(context, trackId, result)
                     if (retry) Result.retry() else Result.failure()
@@ -126,10 +144,27 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
         } catch (cancelled: CancellationException) {
             Providers.cancel(generation)
             withContext(NonCancellable) {
-                dao.update(trackId, generation, "waiting", 0, if (row.wifiOnly) "Esperando Wi-Fi" else "Descarga interrumpida; pendiente", row.attempts)
+                pendingOutput?.let { output ->
+                    if (db.trackDao().get(trackId)?.audioUri != output.audioUri) discardOutput(output)
+                }
             }
-            if (wifiLost && currentCoroutineContext().isActive) Result.retry() else throw cancelled
+            withContext(NonCancellable) {
+                val reasonCode = if (Build.VERSION.SDK_INT >= 31) stopReason else WorkInfo.STOP_REASON_NOT_STOPPED
+                val timedOut = reasonCode == WorkInfo.STOP_REASON_FOREGROUND_SERVICE_TIMEOUT || reasonCode == WorkInfo.STOP_REASON_TIMEOUT
+                val reason = when {
+                    offlineEnabled -> "Modo sin conexión activo; descarga pendiente hasta desactivarlo"
+                    timedOut -> "Android detuvo la descarga por límite de tiempo. Abre la app y reintenta desde Descargas."
+                    wifiLost || reasonCode == WorkInfo.STOP_REASON_CONSTRAINT_CONNECTIVITY -> "Esperando Wi-Fi o conexión disponible"
+                    chargingLost || reasonCode == WorkInfo.STOP_REASON_CONSTRAINT_CHARGING -> "Esperando que el dispositivo esté cargando"
+                    reasonCode == WorkInfo.STOP_REASON_QUOTA -> "Android aplazó la descarga por cuota; pendiente"
+                    else -> "Descarga interrumpida; pendiente"
+                }
+                dao.update(trackId, generation, if (timedOut) "failed" else "waiting", 0, reason, row.attempts)
+                com.musicvault.app.diagnostics.LocalDiagnostics.record(context, "download_stop", "reason=$reasonCode")
+            }
+            if ((offlineEnabled || wifiLost || chargingLost) && currentCoroutineContext().isActive) Result.retry() else throw cancelled
         } catch (failure: Throwable) {
+            currentCoroutineContext().ensureActive()
             if (failure is VirtualMachineError || failure is ThreadDeath) throw failure
             android.util.Log.e("MusicVaultDownload", "Download worker failed", failure)
             val message = "No se pudo preparar o completar la descarga. Reintenta desde Descargas."
@@ -139,6 +174,20 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
             Result.failure()
         }
     }
+
+    private fun discardOutput(result: ProviderResult.Success) {
+        val path = result.localPath ?: return
+        runCatching {
+            if (path.startsWith("content://")) android.provider.DocumentsContract.deleteDocument(applicationContext.contentResolver, android.net.Uri.parse(path))
+            else java.io.File(path).delete()
+        }
+    }
+
+    private fun offline(context: Context): Boolean =
+        com.musicvault.app.settings.AppPreferences.prefs(context).getBoolean("offline_mode", false)
+
+    private fun charging(context: Context): Boolean =
+        context.getSystemService(android.os.BatteryManager::class.java).isCharging
 
     private fun foreground(title: String, progress: Int): ForegroundInfo {
         val context = applicationContext

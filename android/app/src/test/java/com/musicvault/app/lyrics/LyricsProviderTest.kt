@@ -5,6 +5,39 @@ import org.junit.Assert.assertNotNull
 import org.junit.Test
 
 class LyricsProviderTest {
+    @Test
+    fun `canceling exact lookup does not start fallback search`() = kotlinx.coroutines.runBlocking {
+        var requests = 0
+        try {
+            LyricsProvider.fetch("Artist", "Title", requestBody = {
+                requests++
+                throw kotlinx.coroutines.CancellationException("Changed song")
+            })
+            org.junit.Assert.fail("Cancellation was swallowed")
+        } catch (_: kotlinx.coroutines.CancellationException) {
+            assertEquals(1, requests)
+        }
+    }
+
+    @Test
+    fun `catalog miss searches for the same song and returns available plain lyrics`() = kotlinx.coroutines.runBlocking {
+        val words = "These are the words of the requested song. They are long enough to represent a real lyric rather than a placeholder."
+        val result = LyricsProvider.fetch("Artist", "Title", durationMs = 180_000, requestBody = { url ->
+            when {
+                "/api/get?" in url -> null
+                "/api/search?q=Title+Artist" in url -> """[{"trackName":"Title","artistName":"Artist","duration":180,"plainLyrics":"$words"}]"""
+                else -> throw AssertionError("Unexpected request: $url")
+            }
+        })
+        assertEquals(words, result?.plain)
+    }
+
+    @Test
+    fun `stored lyrics preserve YouTube provenance`() {
+        val lyrics = Lyrics("Words from the exact video", emptyList(), origin = "youtube")
+        assertEquals(lyrics, LyricsProvider.parseStoredLrc(LyricsProvider.buildLrc(lyrics)))
+    }
+
     private fun timed(vararg times: Long) = Lyrics(
         plain = "A complete plain lyric that remains available whenever synchronization confidence is too low.",
         synced = times.mapIndexed { index, time -> LyricLine(time, "Line $index") }

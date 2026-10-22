@@ -8,6 +8,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import org.json.JSONArray
@@ -87,7 +88,7 @@ class YouTubeMetadataProvider : CatalogProvider {
         var results: List<CatalogTrack> = emptyList()
         for (attempt in 0 until SEARCH_ATTEMPTS) {
             results = try {
-                withContext(Dispatchers.IO) {
+                runInterruptible(Dispatchers.IO) {
                     searchFlatLines(query, limit)
                         .ifEmpty { searchJsonFallback(query, limit) }
                 }
@@ -127,7 +128,7 @@ class YouTubeMetadataProvider : CatalogProvider {
                 "%(id)s\t%(title)s\t%(uploader)s\t%(channel)s\t%(duration)s\t%(thumbnail)s\t%(webpage_url)s"
             )
         }
-        val response = YoutubeDL.getInstance().execute(request, null, false)
+        val response = com.musicvault.app.providers.ProviderMaintenance.execute(request)
         return parseFlatSearchLines(response.out, query, safeLimit)
     }
 
@@ -190,7 +191,7 @@ class YouTubeMetadataProvider : CatalogProvider {
             addOption("--retries", "2")
             addOption("--socket-timeout", "8")
         }
-        val response = YoutubeDL.getInstance().execute(request, null, false)
+        val response = com.musicvault.app.providers.ProviderMaintenance.execute(request)
         return parseSearchResponse(response.out, query, limit)
     }
 

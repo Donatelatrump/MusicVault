@@ -6,6 +6,17 @@ import org.junit.Test
 
 class YouTubeCaptionParserTest {
     @Test
+    fun `accepts WebVTT cues without hours and Windows newlines`() {
+        val raw = "WEBVTT\r\n\r\n" + (1..5).joinToString("\r\n\r\n") {
+            "00:0$it.250 --> 00:0${it + 1}.000\r\nLine $it"
+        }
+        val parsed = YouTubeCaptionParser.parse(raw)
+        assertNotNull(parsed)
+        assertEquals(1_250L, parsed!!.synced.first().timeMs)
+        assertEquals("Line 5", parsed.synced.last().text)
+    }
+
+    @Test
     fun `parses timed YouTube WebVTT and ignores music markers`() {
         val parsed = YouTubeCaptionParser.parse(
             """

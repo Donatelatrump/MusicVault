@@ -20,8 +20,11 @@ object VocalActivityDetector {
     private const val MIN_DELAY_MS = 350L
     private const val MAX_DELAY_MS = 20_000L
 
+    internal fun isLocalReference(reference: String): Boolean =
+        reference.startsWith("/") || reference.startsWith("content://") || reference.startsWith("file://")
+
     fun align(context: Context, audioReference: String?, lyrics: Lyrics): Lyrics {
-        if (lyrics.synced.isEmpty() || audioReference.isNullOrBlank()) return lyrics
+        if (lyrics.synced.isEmpty() || audioReference.isNullOrBlank() || !isLocalReference(audioReference)) return lyrics
         val onset = detectOnset(context, audioReference) ?: return lyrics
         val firstLine = lyrics.synced.first().timeMs
         val delay = onset - firstLine
@@ -32,10 +35,11 @@ object VocalActivityDetector {
     }
 
     private fun detectOnset(context: Context, reference: String): Long? = runCatching {
+        val deadline = System.nanoTime() + 1_500_000_000L
         val extractor = MediaExtractor()
         try {
             val uri = Uri.parse(reference)
-            if (uri.scheme == "content") extractor.setDataSource(context, uri, null)
+            if (uri.scheme == "content" || uri.scheme == "file") extractor.setDataSource(context, uri, null)
             else extractor.setDataSource(reference)
             val track = (0 until extractor.trackCount).firstOrNull {
                 extractor.getTrackFormat(it).getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
@@ -53,6 +57,7 @@ object VocalActivityDetector {
                 var voicedSince = -1L
                 val info = MediaCodec.BufferInfo()
                 while (!outputEnded) {
+                    if (Thread.currentThread().isInterrupted || System.nanoTime() >= deadline) return null
                     if (!inputEnded) {
                         val inputIndex = codec.dequeueInputBuffer(10_000)
                         if (inputIndex >= 0) {

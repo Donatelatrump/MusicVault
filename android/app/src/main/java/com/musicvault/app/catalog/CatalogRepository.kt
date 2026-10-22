@@ -1,5 +1,10 @@
 package com.musicvault.app.catalog
 
+import com.musicvault.app.data.Album
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.CancellationException
 import com.musicvault.app.data.AlbumEntity
 import com.musicvault.app.data.MusicDatabase
 import com.musicvault.app.data.TrackEntity
@@ -9,6 +14,7 @@ import org.json.JSONObject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
@@ -18,6 +24,16 @@ class CatalogRepository(
     private val provider: CatalogProvider,
     private val db: MusicDatabase
 ) {
+    /** Recover older likes from all cached metadata, beyond Home's bounded feed. */
+    suspend fun cachedTracksForIds(ids: Set<String>): List<CatalogTrack> = withContext(Dispatchers.IO) {
+        if (ids.isEmpty()) return@withContext emptyList()
+        db.catalogSearchCacheDao().exportAll().asSequence()
+            .flatMap { entry -> runCatching { decode(entry).tracks }.getOrDefault(emptyList()).asSequence() }
+            .filter { "${it.provider}:recording:${it.id}" in ids }
+            .distinctBy { "${it.provider}:${it.id}" }
+            .toList()
+    }
+
     /**
      * Returns the underlying [MetadataCatalogProvider] when the active provider
      * is one, otherwise null. Used by the UI to issue incremental
@@ -252,6 +268,44 @@ class CatalogRepository(
             persistTracks(results)
         }
         return results
+    }
+
+    private val homeAlbumChecks = object : LinkedHashMap<String, Pair<Boolean, Long>>(128, .75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<Boolean, Long>>?): Boolean = size > 128
+    }
+
+    /** Probe only Home candidates. Ordinary search stays fast and singles remain searchable. */
+    suspend fun prepareHomeAlbums(candidates: List<Album>): List<Album> = coroutineScope {
+        val source = (provider as? MetadataCatalogProvider)?.effectiveProviders?.filterIsInstance<DeezerCatalogProvider>()?.firstOrNull()
+            ?: return@coroutineScope emptyList()
+        val slots = Semaphore(3)
+        candidates.map { stored -> async(Dispatchers.IO) {
+            val album = AlbumCatalogIdentity.fromStored(stored) ?: return@async null
+            if (album.provider != "deezer") return@async null
+            val key = "${album.provider}:${album.id}"
+            val previous = synchronized(homeAlbumChecks) { homeAlbumChecks[key] }
+            if (previous != null && previous.second > System.currentTimeMillis()) {
+                return@async if (previous.first) stored else null
+            }
+            if (com.musicvault.app.providers.Providers.isOffline()) return@async null
+            slots.withPermit {
+                try {
+                    val tracks = source.recommendationAlbumTracks(album.id)
+                    val accepted = tracks.size >= 2
+                    synchronized(homeAlbumChecks) { homeAlbumChecks[key] = accepted to (System.currentTimeMillis() + 3_600_000L) }
+                    if (!accepted) null else {
+                        synchronized(albumTrackCache) { albumTrackCache[key] = tracks }
+                        // Persisting the candidate's tracks is unnecessary for rendering Home;
+                        // cache them for immediate detail and preserve provider album order.
+                        stored
+                    }
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) {
+                    synchronized(homeAlbumChecks) { homeAlbumChecks[key] = false to (System.currentTimeMillis() + 60_000L) }
+                    null
+                }
+            }
+        } }.awaitAll().filterNotNull()
     }
 
     private suspend fun persist(results: MetadataCatalogProvider.SearchResult) {

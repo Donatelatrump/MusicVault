@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- Allowlist: no credentials, databases, grants, queues or private audio. -->
+    <include domain="sharedpref" path="musicvault.portable.settings.xml" />
+</full-backup-content>

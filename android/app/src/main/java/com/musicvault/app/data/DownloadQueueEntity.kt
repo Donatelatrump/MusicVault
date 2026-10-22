@@ -15,7 +15,8 @@ data class DownloadQueueEntity(
     val progress: Int = 0,
     val attempts: Int = 0,
     val error: String? = null,
-    val updatedAt: Long = System.currentTimeMillis()
+    val updatedAt: Long = System.currentTimeMillis(),
+    @ColumnInfo(defaultValue = "0") val requiresCharging: Boolean = false
 )
 
 @Dao

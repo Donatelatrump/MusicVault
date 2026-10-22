@@ -1,5 +1,8 @@
 package com.musicvault.app.ui
 
+import com.musicvault.app.R
+import androidx.compose.ui.res.stringResource
+
 import android.content.Context
 import android.media.AudioManager
 import android.net.Uri
@@ -12,6 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.musicvault.app.backup.LibraryBackupStore
+import com.musicvault.app.backup.ReleaseMigrationStore
 import com.musicvault.app.data.MusicDatabase
 import com.musicvault.app.download.*
 import com.musicvault.app.player.StreamingCache
@@ -41,7 +45,7 @@ internal fun LibraryToolsSettings() {
             busy = true
             try { message = action(); revision++ }
             catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
-            catch (error: Exception) { message = error.message ?: "No se pudo completar la operación." }
+            catch (error: Exception) { message = error.message ?: context.getString(R.string.ui_no_se_pudo_completar_la_operacion_5f98e8) }
             finally { busy = false }
         }
     }
@@ -49,7 +53,7 @@ internal fun LibraryToolsSettings() {
     val export = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         if (uri != null) perform {
             LibraryBackupStore.export(context, uri)
-            "Respaldo guardado. Incluye biblioteca, playlists, favoritos y ajustes; los archivos de audio se conservan aparte."
+            context.getString(R.string.ui_respaldo_guardado_incluye_biblioteca_playlists_54cdcd)
         }
     }
     val restore = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -61,77 +65,103 @@ internal fun LibraryToolsSettings() {
             "Respaldo combinado: $count playlists. Vuelve a abrir la app para aplicar todos los ajustes de apariencia y reproducción."
         }
     }
+    val migrationExport = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        if (uri != null) perform {
+            val result = ReleaseMigrationStore.exportFromDebug(context, uri)
+            "Paquete listo: ${result.audioFiles} audios y ${result.playlists} playlists. Consérvalo hasta verificar la release."
+        }
+    }
+    val migrationImport = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) perform {
+            val result = ReleaseMigrationStore.importIntoRelease(context, uri)
+            "Migración recibida: ${result.audioFiles} audios y ${result.playlists} playlists. Comprueba la reproducción antes de quitar debug."
+        }
+    }
     LaunchedEffect(revision, queue.count { it.state == "complete" }) {
         runCatching { withContext(Dispatchers.IO) { StorageUsage.read(context) } }
             .onSuccess { storage = it }
     }
-    SettingsSection("DESCARGAS") {
-        Text("Calidad del audio", style = MaterialTheme.typography.titleSmall)
+    SettingsSection(stringResource(R.string.ui_descargas_2b98b7)) {
+        Text(context.getString(R.string.ui_calidad_del_audio_954893), style = MaterialTheme.typography.titleSmall)
         DownloadQuality.entries.forEach { option ->
             Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                 RadioButton(selected = quality == option, onClick = {
                     quality = option
                     DownloadPreferences.prefs(context).edit().putString(DownloadPreferences.QUALITY, option.name).apply()
                 })
-                Text(option.label)
+                Text(if (option == DownloadQuality.BEST) stringResource(com.musicvault.app.R.string.ui_mejor_calidad_disponible_719e83) else stringResource(com.musicvault.app.R.string.ui_ahorrar_datos_59622d))
             }
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-            Text("Descargar solo por Wi-Fi", modifier = Modifier.weight(1f))
+            Text(context.getString(R.string.ui_descargar_solo_por_wi_fi_76a32b), modifier = Modifier.weight(1f))
             Switch(checked = wifiOnly, onCheckedChange = {
                 wifiOnly = it
                 DownloadPreferences.prefs(context).edit().putBoolean(DownloadPreferences.WIFI_ONLY, it).apply()
             })
         }
-        Text("Se aplica a nuevas descargas y reintentos.", style = MaterialTheme.typography.bodySmall)
+        Text(context.getString(R.string.ui_se_aplica_a_nuevas_descargas_y_reintentos_d4b60e), style = MaterialTheme.typography.bodySmall)
         Spacer(Modifier.height(8.dp))
         Button(onClick = { showDownloads = true }) {
             Text("Ver descargas · ${queue.count { DownloadQueue.isActive(it.state) }} pendientes")
         }
     }
-    SettingsSection("ESPACIO EN EL DISPOSITIVO") {
+    SettingsSection(context.getString(R.string.ui_espacio_en_el_dispositivo_b6ef3c)) {
         Text("Caché de streaming: ${formatBytes(storage.cacheBytes)}")
         Text("Audio descargado: ${formatBytes(storage.downloadBytes)}${if (storage.unknownFiles > 0) " (más ${storage.unknownFiles} archivos sin tamaño disponible)" else ""}")
         Spacer(Modifier.height(8.dp))
-        Text("Límite de caché", style = MaterialTheme.typography.titleSmall)
+        Text(context.getString(R.string.ui_limite_de_cache_ee5364), style = MaterialTheme.typography.titleSmall)
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             DownloadPreferences.cacheSizes.forEach { size ->
                 FilterChip(selected = cacheLimit == size, enabled = !busy,
                     onClick = { perform {
                         withContext(Dispatchers.IO) { StreamingCache.resize(context, size) }
                         cacheLimit = size
-                        "Límite de caché actualizado."
+                        context.getString(R.string.ui_limite_de_cache_actualizado_aaff0c)
                     } }, label = { Text(if (size >= 1024) "${size / 1024} GB" else "$size MB") })
             }
         }
-        Text("La caché acelera el streaming. Las canciones descargadas se guardan por separado.", style = MaterialTheme.typography.bodySmall)
+        Text(context.getString(R.string.ui_la_cache_acelera_el_streaming_las_canciones_de_69b689), style = MaterialTheme.typography.bodySmall)
         Row {
-            TextButton(enabled = !busy && queue.none { DownloadQueue.isActive(it.state) }, onClick = { confirmClear = true }) { Text("Vaciar caché") }
-            TextButton(enabled = !busy, onClick = { revision++ }) { Text("Actualizar espacio") }
+            TextButton(enabled = !busy && queue.none { DownloadQueue.isActive(it.state) }, onClick = { confirmClear = true }) { Text(context.getString(R.string.ui_vaciar_cache_d6ee09)) }
+            TextButton(enabled = !busy, onClick = { revision++ }) { Text(context.getString(R.string.ui_actualizar_espacio_1dd9d2)) }
         }
     }
-    SettingsSection("RESPALDO DE BIBLIOTECA") {
-        Text("Exporta playlists, favoritos, canciones y ajustes. Al importar se combinan con tu biblioteca actual y se restauran los ajustes incluidos.", style = MaterialTheme.typography.bodyMedium)
-        Text("Los archivos de audio y las sesiones de Spotify no se incluyen.", style = MaterialTheme.typography.bodySmall)
+    SettingsSection(context.getString(R.string.ui_respaldo_de_biblioteca_b8f7e1)) {
+        Text(context.getString(R.string.ui_exporta_playlists_favoritos_canciones_y_ajuste_ec0bd1), style = MaterialTheme.typography.bodyMedium)
+        Text(context.getString(R.string.ui_los_archivos_de_audio_y_las_sesiones_de_spotif_4c3bd3), style = MaterialTheme.typography.bodySmall)
         Row {
-            TextButton(enabled = !busy, onClick = { export.launch("MusicVault-biblioteca.json") }) { Text("Exportar") }
-            TextButton(enabled = !busy, onClick = { restore.launch(arrayOf("application/json", "text/plain", "application/octet-stream")) }) { Text("Importar") }
+            TextButton(enabled = !busy, onClick = { export.launch("MusicVault-biblioteca.json") }) { Text(stringResource(R.string.ui_exportar_9a8523)) }
+            TextButton(enabled = !busy, onClick = { restore.launch(arrayOf("application/json", "text/plain", "application/octet-stream")) }) { Text(stringResource(R.string.ui_importar_b28a54)) }
+        }
+    }
+    SettingsSection(context.getString(R.string.ui_migrar_de_debug_a_release_5dd37f)) {
+        if (context.packageName.endsWith(".debug")) {
+            Text(context.getString(R.string.ui_copia_tus_canciones_y_biblioteca_a_un_archivo_e5b8a0))
+            TextButton(enabled = !busy && queue.none { DownloadQueue.isActive(it.state) },
+                onClick = { migrationExport.launch("MusicVault-migracion.zip") }) {
+                Text(context.getString(R.string.ui_crear_paquete_para_release_010a71))
+            }
+        } else {
+            Text(context.getString(R.string.ui_selecciona_el_paquete_creado_en_debug_se_copia_c33db5))
+            TextButton(enabled = !busy, onClick = { migrationImport.launch(arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream")) }) {
+                Text(context.getString(R.string.ui_importar_paquete_de_debug_6cbf97))
+            }
         }
     }
     if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
     message?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
     if (showDownloads) DownloadsDialog(queue = queue, onDismiss = { showDownloads = false })
     if (confirmClear) AlertDialog(onDismissRequest = { confirmClear = false },
-        title = { Text("Vaciar caché de streaming") },
-        text = { Text("Se borrará el audio temporal. Tus canciones descargadas y playlists se conservarán.") },
+        title = { Text(context.getString(R.string.ui_vaciar_cache_de_streaming_003106)) },
+        text = { Text(context.getString(R.string.ui_se_borrara_el_audio_temporal_tus_canciones_des_7d63e3)) },
         confirmButton = { TextButton(onClick = {
             confirmClear = false
             perform {
-                check(!context.getSystemService(AudioManager::class.java).isMusicActive) { "Pausa la reproducción antes de vaciar la caché." }
+                check(!context.getSystemService(AudioManager::class.java).isMusicActive) { context.getString(R.string.ui_pausa_la_reproduccion_antes_de_vaciar_la_cache_31af89) }
                 withContext(Dispatchers.IO) { StreamingCache.clearStreamingCache(context) }
-                "Caché vaciada."
+                context.getString(R.string.ui_cache_vaciada_109cea)
             }
-        }) { Text("Vaciar") } }, dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Cancelar") } })
+        }) { Text(stringResource(R.string.ui_vaciar_40a9e5)) } }, dismissButton = { TextButton(onClick = { confirmClear = false }) { Text(context.getString(R.string.ui_cancelar_c111e0)) } })
 }
 
 internal fun formatBytes(bytes: Long): String = String.format(Locale.getDefault(), "%.1f MB", bytes / (1024.0 * 1024.0))

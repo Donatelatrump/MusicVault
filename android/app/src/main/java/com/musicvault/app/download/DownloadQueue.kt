@@ -19,7 +19,7 @@ object DownloadQueue {
     suspend fun enqueue(context: Context, track: Track, sourceUrl: String? = track.url) =
         enqueueAll(context, listOf(track to sourceUrl))
 
-    suspend fun enqueueAll(context: Context, tracks: List<Pair<Track, String?>>) = withContext(Dispatchers.IO) {
+    suspend fun enqueueAll(context: Context, tracks: List<Pair<Track, String?>>, wifiOnlyOverride: Boolean? = null, requiresCharging: Boolean = false) = withContext(Dispatchers.IO) {
         lock.withLock {
             val db = MusicDatabase.get(context)
             val dao = db.downloadQueueDao()
@@ -37,7 +37,8 @@ object DownloadQueue {
                     if (prior != null && isActive(prior.state)) prior else {
                         DownloadQueueEntity(track.id, UUID.randomUUID().toString(),
                             DownloadMetadata.snapshot(track), url,
-                            DownloadPreferences.quality(context).name, DownloadPreferences.wifiOnly(context))
+                            DownloadPreferences.quality(context).name, wifiOnlyOverride ?: DownloadPreferences.wifiOnly(context),
+                            requiresCharging = requiresCharging)
                             .also { dao.save(it) }
                     }
                 }
@@ -47,7 +48,7 @@ object DownloadQueue {
     }
 
     private fun schedule(context: Context, item: DownloadQueueEntity) {
-        val constraints = Constraints.Builder().setRequiresStorageNotLow(true)
+        val constraints = Constraints.Builder().setRequiresStorageNotLow(true).setRequiresCharging(item.requiresCharging)
         if (item.wifiOnly && android.os.Build.VERSION.SDK_INT >= 28) {
             constraints.setRequiredNetworkRequest(android.net.NetworkRequest.Builder()
                 .addTransportType(android.net.NetworkCapabilities.TRANSPORT_WIFI)
@@ -59,7 +60,7 @@ object DownloadQueue {
             .setId(UUID.fromString(item.generation))
             .setInputData(workDataOf("trackId" to item.id, "generation" to item.generation))
             .setConstraints(constraints.build())
-            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 15, TimeUnit.SECONDS)
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 1, TimeUnit.MINUTES)
             .addTag("musicvault-download")
             .build()
         WorkManager.getInstance(context).enqueueUniqueWork("download-${item.generation}", ExistingWorkPolicy.KEEP, work).result.get()
@@ -81,10 +82,10 @@ object DownloadQueue {
         lock.withLock {
             val dao = MusicDatabase.get(context).downloadQueueDao()
             val row = dao.get(id) ?: return@withLock
-            if (isActive(row.state) || row.state == "complete") return@withLock
+            if (row.state == "complete" || (isActive(row.state) && row.error?.contains("límite de tiempo") != true)) return@withLock
             val updated = row.copy(generation = UUID.randomUUID().toString(), state = "queued",
                 progress = 0, attempts = 0, error = null, updatedAt = System.currentTimeMillis(),
-                quality = DownloadPreferences.quality(context).name, wifiOnly = DownloadPreferences.wifiOnly(context))
+                quality = DownloadPreferences.quality(context).name)
             dao.save(updated)
             schedule(context, updated)
         }

@@ -47,7 +47,7 @@ data class TrackEntity(
 )
 
 /** Standalone FTS index. Triggers keep it synchronized with String-keyed tracks. */
-@Fts4
+@Fts4(tokenizer = "unicode61", tokenizerArgs = ["remove_diacritics=1"])
 @Entity(tableName = "tracks_fts")
 data class TrackSearchEntity(
     @PrimaryKey @ColumnInfo(name = "rowid") val rowId: Int,

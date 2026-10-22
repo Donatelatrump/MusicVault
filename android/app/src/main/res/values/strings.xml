@@ -1,0 +1,272 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="ui_a_continuacion_0d36b0" formatted="false">A continuación</string>
+    <string name="ui_abrir_album_bdccd1" formatted="false">Abrir álbum</string>
+    <string name="ui_abrir_playlist_b7a8ce" formatted="false">Abrir playlist</string>
+    <string name="ui_actualizar_espacio_1dd9d2" formatted="false">Actualizar espacio</string>
+    <string name="ui_administrar_biblioteca_aa5f86" formatted="false">Administrar biblioteca</string>
+    <string name="ui_agregar_a_album_7c4ad3" formatted="false">Agregar a álbum</string>
+    <string name="ui_agregar_a_cola_ca3388" formatted="false">Agregar a cola</string>
+    <string name="ui_agregar_a_cola_de_reproduccion_f8c617" formatted="false">Agregar a cola de reproducción</string>
+    <string name="ui_agregar_a_musicvault_d3e061" formatted="false">Agregar a MusicVault</string>
+    <string name="ui_ahorrar_datos_59622d" formatted="false">Ahorrar datos</string>
+    <string name="ui_ajustes_9751f8" formatted="false">Ajustes</string>
+    <string name="ui_al_conectar_compartes_artista_cancion_album_y_ca5a98" formatted="false">Al conectar, compartes artista, canción, álbum y hora de escucha con ListenBrainz. Una escucha cuenta tras media canción o 4 minutos. Sin conexión se conserva una cola local; desconectar borra la credencial y la cola.</string>
+    <string name="ui_albumes_797807" formatted="false">Álbumes</string>
+    <string name="ui_albumes_fca454" formatted="false">ÁLBUMES</string>
+    <string name="ui_albumes_para_ti_9c66e7" formatted="false">Álbumes para ti</string>
+    <string name="ui_aleatorio_a7567a" formatted="false">Aleatorio</string>
+    <string name="ui_almacenamiento_a825b8" formatted="false">ALMACENAMIENTO</string>
+    <string name="ui_almacenamiento_ff9345" formatted="false">Almacenamiento</string>
+    <string name="ui_almacenamiento_m3u_y_respaldos_59647b" formatted="false">Almacenamiento, M3U y respaldos</string>
+    <string name="ui_anadir_41261d" formatted="false">Añadir</string>
+    <string name="ui_android_auto_beec0a" formatted="false">Android Auto</string>
+    <string name="ui_anterior_d97f10" formatted="false">Anterior</string>
+    <string name="ui_apariencia_0f2c3a" formatted="false">APARIENCIA</string>
+    <string name="ui_artistas_relacionados_8ac47b" formatted="false">Artistas relacionados</string>
+    <string name="ui_asmr_11ddb2" formatted="false">ASMR</string>
+    <string name="ui_atras_0e715a" formatted="false">Atrás</string>
+    <string name="ui_biblioteca_0b4762" formatted="false">BIBLIOTECA</string>
+    <string name="ui_biblioteca_497ac5" formatted="false">Biblioteca</string>
+    <string name="ui_biblioteca_sin_conexion_3f2054" formatted="false">Biblioteca sin conexión</string>
+    <string name="ui_borrar_eventos_locales_fa8f92" formatted="false">Borrar eventos locales</string>
+    <string name="ui_busca_y_reproduce_archivos_disponibles_en_este_3d8022" formatted="false">Busca y reproduce archivos disponibles en este dispositivo.</string>
+    <string name="ui_buscando_letra_dd59ef" formatted="false">Buscando letra…</string>
+    <string name="ui_buscar_9c0e8f" formatted="false">BUSCAR</string>
+    <string name="ui_buscar_a62405" formatted="false">Buscar</string>
+    <string name="ui_buscar_o_anadir_otro_artista_2d29df" formatted="false">Buscar o añadir otro artista</string>
+    <string name="ui_buscar_por_cancion_o_artista_aaa665" formatted="false">Buscar por canción o artista</string>
+    <string name="ui_cache_vaciada_109cea" formatted="false">Caché vaciada.</string>
+    <string name="ui_calidad_del_audio_954893" formatted="false">Calidad del audio</string>
+    <string name="ui_cambiar_carpeta_de_musica_bbe520" formatted="false">Cambiar carpeta de música</string>
+    <string name="ui_cancelar_c111e0" formatted="false">Cancelar</string>
+    <string name="ui_cancelar_descarga_f42d93" formatted="false">Cancelar descarga</string>
+    <string name="ui_cancelar_operacion_c3745b" formatted="false">Cancelar operación</string>
+    <string name="ui_cancelar_temporizador_2fdecc" formatted="false">Cancelar temporizador</string>
+    <string name="ui_canciones_90e305" formatted="false">CANCIONES</string>
+    <string name="ui_cargando_canciones_de_youtube_9431e4" formatted="false">Cargando canciones de YouTube…</string>
+    <string name="ui_cerrar_4b0816" formatted="false">Cerrar</string>
+    <string name="ui_chromecast_a5ad47" formatted="false">Chromecast</string>
+    <string name="ui_chromecast_no_esta_disponible_en_este_disposit_f79dc1" formatted="false">Chromecast no está disponible en este dispositivo. Comprueba Google Play Services.</string>
+    <string name="ui_clasico_5fff0e" formatted="false">Clásico</string>
+    <string name="ui_cola_de_reproduccion_ddfb28" formatted="false">Cola de reproducción</string>
+    <string name="ui_comprobando_338dc7" formatted="false">Comprobando…</string>
+    <string name="ui_comprobar_actualizacion_846514" formatted="false">Comprobar actualización</string>
+    <string name="ui_con_crossfade_en_0_la_cola_preparada_usa_repro_6a3294" formatted="false">Con crossfade en 0, la cola preparada usa reproducción continua del motor y respeta delay/padding disponibles en el archivo.</string>
+    <string name="ui_conecta_el_telefono_para_navegar_y_reproducir_d7d9d3" formatted="false">Conecta el teléfono para navegar y reproducir la música local disponible. Los archivos ausentes no aparecen.</string>
+    <string name="ui_conectando_dc8abc" formatted="false">Conectando…</string>
+    <string name="ui_conectar_spotify_ed2de8" formatted="false">Conectar Spotify</string>
+    <string name="ui_conectar_y_compartir_escuchas_e0adeb" formatted="false">Conectar y compartir escuchas</string>
+    <string name="ui_conexion_y_herramientas_baa597" formatted="false">CONEXIÓN Y HERRAMIENTAS</string>
+    <string name="ui_conservar_primero_y_retirar_duplicados_cc1514" formatted="false">Conservar primero y retirar duplicados</string>
+    <string name="ui_contrasena_opcional_de_restauracion_11812d" formatted="false">Contraseña opcional / de restauración</string>
+    <string name="ui_copia_tus_canciones_y_biblioteca_a_un_archivo_e5b8a0" formatted="false">Copia tus canciones y biblioteca a un archivo de migración. Guárdalo fuera de la carpeta de la app y mantén debug instalada hasta comprobar la release.</string>
+    <string name="ui_crea_la_playlist_ahora_y_agrega_canciones_cuan_7b25d5" formatted="false">Crea la playlist ahora y agrega canciones cuando quieras.</string>
+    <string name="ui_crear_48a068" formatted="false">Crear</string>
+    <string name="ui_crear_nuevo_album_5d97f7" formatted="false">Crear nuevo álbum</string>
+    <string name="ui_crear_nuevo_album_ee0a30" formatted="false">+  Crear nuevo álbum</string>
+    <string name="ui_crear_paquete_para_release_010a71" formatted="false">Crear paquete para release</string>
+    <string name="ui_crear_playlist_6fadc4" formatted="false">Crear playlist</string>
+    <string name="ui_crear_y_agregar_d4727e" formatted="false">Crear y agregar</string>
+    <string name="ui_crossfade_00acfc" formatted="false">Crossfade</string>
+    <string name="ui_cuenta_conectada_en_este_dispositivo_0995f6" formatted="false">Cuenta conectada en este dispositivo</string>
+    <string name="ui_cuota_total_de_audio_en_mb_f192e8" formatted="false">Cuota total de audio en MB</string>
+    <string name="ui_desactivar_programacion_18daae" formatted="false">Desactivar programación</string>
+    <string name="ui_descargada_c000cf" formatted="false">Descargada</string>
+    <string name="ui_descargar_8b98cb" formatted="false">Descargar</string>
+    <string name="ui_descargar_album_fac210" formatted="false">Descargar álbum</string>
+    <string name="ui_descargar_solo_por_wi_fi_76a32b" formatted="false">Descargar solo por Wi-Fi</string>
+    <string name="ui_descargas_2b98b7" formatted="false">DESCARGAS</string>
+    <string name="ui_descargas_automaticas_595e7f" formatted="false">Descargas automáticas</string>
+    <string name="ui_descargas_fc3ae1" formatted="false">Descargas</string>
+    <string name="ui_desconectar_spotify_547c56" formatted="false">Desconectar Spotify</string>
+    <string name="ui_desconectar_y_borrar_cola_bad6da" formatted="false">Desconectar y borrar cola</string>
+    <string name="ui_desfase_en_milisegundos_30000_4332e7" formatted="false">Desfase en milisegundos (±30000)</string>
+    <string name="ui_deshacer_retiradas_2886c6" formatted="false">Deshacer retiradas</string>
+    <string name="ui_detectar_audio_duplicado_f7c3a5" formatted="false">Detectar audio duplicado</string>
+    <string name="ui_diagnostico_guardado_fd5898" formatted="false">Diagnóstico guardado</string>
+    <string name="ui_diagnostico_local_051e59" formatted="false">Diagnóstico local</string>
+    <string name="ui_disco_giratorio_con_brazo_control_de_rpm_y_har_6f62f0" formatted="false">Disco giratorio con brazo, control de RPM y hardware del deck.</string>
+    <string name="ui_diseno_de_la_aplicacion_c99ac9" formatted="false">Diseño de la aplicación</string>
+    <string name="ui_dispositivo_conectado_870755" formatted="false">Dispositivo conectado</string>
+    <string name="ui_duracion_desconocida_ab5898" formatted="false">Duración desconocida</string>
+    <string name="ui_editar_letras_ajustar_desfase_4ed496" formatted="false">Editar letras / ajustar desfase</string>
+    <string name="ui_ejecutar_respaldo_programado_cb7db5" formatted="false">Ejecutar respaldo programado</string>
+    <string name="ui_el_audio_compartido_se_cuenta_una_sola_vez_ret_9e5c76" formatted="false">El audio compartido se cuenta una sola vez. Retirar audio guarda los archivos privados en la papelera y conserva playlists/favoritos. Libera espacio vaciándola. Archivos ajenos a la app y audio compartido con otras colecciones se conservan.</string>
+    <string name="ui_el_audio_retirado_se_eliminara_definitivamente_d67107" formatted="false">El audio retirado se eliminará definitivamente. Las referencias de biblioteca permanecen.</string>
+    <string name="ui_el_reloj_puede_controlar_la_sesion_multimedia_c7fb52" formatted="false">El reloj puede controlar la sesión multimedia activa del teléfono desde su control de medios. La música se reproduce en el teléfono.</string>
+    <string name="ui_elegir_carpeta_6df387" formatted="false">Elegir carpeta</string>
+    <string name="ui_elegir_dispositivo_chromecast_ba334c" formatted="false">Elegir dispositivo Chromecast</string>
+    <string name="ui_elige_que_canciones_quieres_traer_a_music_vaul_76dd85" formatted="false">Elige qué canciones quieres traer a Music Vault</string>
+    <string name="ui_elige_un_dispositivo_en_la_misma_red_wi_fi_da60a0" formatted="false">Elige un dispositivo en la misma red Wi-Fi.</string>
+    <string name="ui_eliminar_54e140" formatted="false">Eliminar</string>
+    <string name="ui_eliminar_album_8f78a0" formatted="false">Eliminar álbum</string>
+    <string name="ui_eliminar_cancion_d65308" formatted="false">Eliminar canción</string>
+    <string name="ui_eliminar_cancion_descargada_8c5b0a" formatted="false">Eliminar canción descargada</string>
+    <string name="ui_eliminar_definitivamente_191f15" formatted="false">Eliminar definitivamente</string>
+    <string name="ui_eliminar_este_album_de_musicvault_las_cancione_33f05c" formatted="false">¿Eliminar este álbum de MusicVault? Las canciones no se borrarán.</string>
+    <string name="ui_eliminar_playlist_12e613" formatted="false">Eliminar playlist</string>
+    <string name="ui_enviar_cancion_actual_fcccbb" formatted="false">Enviar canción actual</string>
+    <string name="ui_espacio_en_el_dispositivo_b6ef3c" formatted="false">ESPACIO EN EL DISPOSITIVO</string>
+    <string name="ui_estilo_del_reproductor_43172e" formatted="false">Estilo del reproductor</string>
+    <string name="ui_eventos_locales_borrados_4c5bfa" formatted="false">Eventos locales borrados</string>
+    <string name="ui_exporta_playlists_favoritos_canciones_y_ajuste_ec0bd1" formatted="false">Exporta playlists, favoritos, canciones y ajustes. Al importar se combinan con tu biblioteca actual y se restauran los ajustes incluidos.</string>
+    <string name="ui_exporta_version_api_de_android_y_eventos_tecni_521d52" formatted="false">Exporta versión, API de Android y eventos técnicos recientes. No incluye cookies, cuentas, títulos de canciones, rutas ni enlaces de audio. Solo se guarda en el documento que elijas.</string>
+    <string name="ui_exportar_9a8523" formatted="false">Exportar</string>
+    <string name="ui_exportar_diagnostico_2ddcb8" formatted="false">Exportar diagnóstico</string>
+    <string name="ui_exportar_paquete_con_audio_para_release_e36010" formatted="false">Exportar paquete con audio para release</string>
+    <string name="ui_extractor_yt_dlp_de6407" formatted="false">Extractor yt-dlp</string>
+    <string name="ui_guardar_a0b626" formatted="false">Guardar</string>
+    <string name="ui_guardar_descargas_automaticas_420b85" formatted="false">Guardar descargas automáticas</string>
+    <string name="ui_guardar_respaldo_ahora_139c46" formatted="false">Guardar respaldo ahora</string>
+    <string name="ui_hibrido_9cb40a" formatted="false">Híbrido</string>
+    <string name="ui_ignorar_enlace_e789df" formatted="false">Ignorar enlace</string>
+    <string name="ui_importar_b28a54" formatted="false">Importar</string>
+    <string name="ui_importar_paquete_de_debug_6cbf97" formatted="false">Importar paquete de debug</string>
+    <string name="ui_importar_playlist_76abda" formatted="false">Importar playlist</string>
+    <string name="ui_incluye_biblioteca_orden_favoritos_y_ajustes_p_e8f7c7" formatted="false">Incluye biblioteca, orden, favoritos y ajustes portables. No incluye audio, cookies ni permisos SAF. Contraseña opcional (mínimo 8 caracteres); necesaria para restaurar en otro dispositivo.</string>
+    <string name="ui_iniciar_radio_de_esta_cancion_cc8ac4" formatted="false">Iniciar radio de esta canción</string>
+    <string name="ui_iniciar_radio_ec118d" formatted="false">Iniciar radio</string>
+    <string name="ui_inicio_4f70d8" formatted="false">Inicio</string>
+    <string name="ui_inicio_a9dec9" formatted="false">INICIO</string>
+    <string name="ui_intervalo_en_dias_130_5bddb4" formatted="false">Intervalo en días (1–30)</string>
+    <string name="ui_introduce_un_desfase_entre_30000_y_30000_b37390" formatted="false">Introduce un desfase entre -30000 y 30000.</string>
+    <string name="ui_la_cache_acelera_el_streaming_las_canciones_de_69b689" formatted="false">La caché acelera el streaming. Las canciones descargadas se guardan por separado.</string>
+    <string name="ui_la_cola_esta_vacia_8ed5c4" formatted="false">La cola está vacía.</string>
+    <string name="ui_la_comprobacion_automatica_ocurre_cada_24_hora_ea62e9" formatted="false">La comprobación automática ocurre cada 24 horas. La actualización espera a que terminen las extracciones y conserva el extractor anterior si falla.</string>
+    <string name="ui_la_musica_se_pausara_al_terminar_el_tiempo_c19ec2" formatted="false">La música se pausará al terminar el tiempo.</string>
+    <string name="ui_la_playlist_desaparecera_pero_las_canciones_de_6dbca0" formatted="false">La playlist desaparecerá, pero las canciones descargadas seguirán en tu biblioteca.</string>
+    <string name="ui_label_698a87" formatted="false">✓</string>
+    <string name="ui_las_pendientes_se_recuperan_al_volver_la_conex_7fa97b" formatted="false">Las pendientes se recuperan al volver la conexión. Tras forzar el cierre de la app, vuelve a abrirla para continuar.</string>
+    <string name="ui_letra_6e7c6f" formatted="false">Letra</string>
+    <string name="ui_letra_no_disponible_fb58a1" formatted="false">Letra no disponible</string>
+    <string name="ui_letras_c1d0bf" formatted="false">Letras</string>
+    <string name="ui_limite_de_cache_actualizado_aaff0c" formatted="false">Límite de caché actualizado.</string>
+    <string name="ui_limite_de_cache_ee5364" formatted="false">Límite de caché</string>
+    <string name="ui_limpiar_busqueda_493ecd" formatted="false">Limpiar búsqueda</string>
+    <string name="ui_listas_2a4d9a" formatted="false">Listas</string>
+    <string name="ui_listenbrainz_dbc0b3" formatted="false">ListenBrainz</string>
+    <string name="ui_listenbrainz_desconectado_6b06cf" formatted="false">ListenBrainz desconectado</string>
+    <string name="ui_los_archivos_de_audio_y_las_sesiones_de_spotif_4c3bd3" formatted="false">Los archivos de audio y las sesiones de Spotify no se incluyen.</string>
+    <string name="ui_mas_claro_compacto_y_facil_de_recorrer_c1cb4d" formatted="false">Más claro, compacto y fácil de recorrer.</string>
+    <string name="ui_mas_opciones_977c75" formatted="false">Más opciones</string>
+    <string name="ui_me_gusta_f3b81e" formatted="false">Me gusta</string>
+    <string name="ui_medir_fluidez_localmente_c66d9a" formatted="false">Medir fluidez localmente</string>
+    <string name="ui_mejor_calidad_disponible_719e83" formatted="false">Mejor calidad disponible</string>
+    <string name="ui_migrar_de_debug_a_release_5dd37f" formatted="false">MIGRAR DE DEBUG A RELEASE</string>
+    <string name="ui_modo_sin_conexion_f73a84" formatted="false">Modo sin conexión</string>
+    <string name="ui_musicvault_87c6d6" formatted="false">MUSICVAULT</string>
+    <string name="ui_no_disponible_sin_conexion_04cfee" formatted="false">No disponible sin conexión</string>
+    <string name="ui_no_encontramos_esa_cancion_b8bdfe" formatted="false">No encontramos esa canción</string>
+    <string name="ui_no_hay_archivos_disponibles_para_esta_busqueda_09ef87" formatted="false">No hay archivos disponibles para esta búsqueda.</string>
+    <string name="ui_no_hay_artistas_relacionados_disponibles_compr_5bd400" formatted="false">No hay artistas relacionados disponibles. Comprueba la conexión y reintenta.</string>
+    <string name="ui_no_hay_descargas_en_esta_seccion_364597" formatted="false">No hay descargas en esta sección.</string>
+    <string name="ui_no_se_encontraron_canciones_para_este_album_61a7be" formatted="false">No se encontraron canciones para este álbum.</string>
+    <string name="ui_no_se_pudo_completar_la_operacion_5f98e8" formatted="false">No se pudo completar la operación.</string>
+    <string name="ui_no_se_pudo_conectar_comprueba_tu_conexion_y_to_3a4e1a" formatted="false">No se pudo conectar. Comprueba tu conexión y token.</string>
+    <string name="ui_no_se_pudo_conservar_el_permiso_de_musica_75380d" formatted="false">No se pudo conservar el permiso de música.</string>
+    <string name="ui_no_se_pudo_guardar_vuelve_a_elegir_un_document_58452f" formatted="false">No se pudo guardar. Vuelve a elegir un documento.</string>
+    <string name="ui_no_tienes_albumes_creados_6edecb" formatted="false">No tienes álbumes creados.</string>
+    <string name="ui_nombre_al_importar_c75b5b" formatted="false">Nombre al importar</string>
+    <string name="ui_nombre_e68491" formatted="false">Nombre</string>
+    <string name="ui_nuevo_album_029960" formatted="false">Nuevo álbum</string>
+    <string name="ui_obten_tu_token_en_listenbrainz_org_settings_e_e6cd0c" formatted="false">Obtén tu token en listenbrainz.org/settings/ e introdúcelo aquí.</string>
+    <string name="ui_opcional_guarda_conteos_de_frames_lentos_y_dur_55bb83" formatted="false">Opcional: guarda conteos de frames lentos y duración agregada por pantalla mientras la app está visible. No guarda contenido ni trazas de cada frame y no envía datos. El informe puede incluir la clase del último cierre inesperado y símbolos del código, sin el mensaje del error.</string>
+    <string name="ui_operacion_cancelada_los_cambios_de_restauracio_9cdc6d" formatted="false">Operación cancelada; los cambios de restauración pendientes se revirtieron.</string>
+    <string name="ui_otro_ada1c1" formatted="false">Otro</string>
+    <string name="ui_para_ti_3d70f6" formatted="false">Para ti</string>
+    <string name="ui_pausa_la_reproduccion_antes_de_vaciar_la_cache_31af89" formatted="false">Pausa la reproducción antes de vaciar la caché.</string>
+    <string name="ui_pausada_144ffd" formatted="false">Pausada</string>
+    <string name="ui_pausar_8e0f5e" formatted="false">Pausar</string>
+    <string name="ui_personalizacion_inicial_886231" formatted="false">PERSONALIZACIÓN INICIAL</string>
+    <string name="ui_playlist_importada_473e02" formatted="false">Playlist importada</string>
+    <string name="ui_playlists_m3u_m3u8_3f7c46" formatted="false">Playlists M3U / M3U8</string>
+    <string name="ui_podcast_bafb6e" formatted="false">Podcast</string>
+    <string name="ui_portada_central_rodeada_por_anillos_de_graves_f92ccd" formatted="false">Portada central rodeada por anillos de graves, medios y agudos.</string>
+    <string name="ui_prefiero_configurarlo_despues_fc6294" formatted="false">Prefiero configurarlo después</string>
+    <string name="ui_preparando_tu_boveda_6ed08a" formatted="false">PREPARANDO TU BÓVEDA</string>
+    <string name="ui_proveedores_fallos_y_listenbrainz_801ea2" formatted="false">Proveedores, fallos y ListenBrainz</string>
+    <string name="ui_proveedores_y_privacidad_d73ba0" formatted="false">Proveedores y privacidad</string>
+    <string name="ui_prueba_con_el_titulo_o_el_nombre_del_artista_b1aaf7" formatted="false">Prueba con el título o el nombre del artista.</string>
+    <string name="ui_puedes_volver_al_diseno_anterior_en_cualquier_3556d6" formatted="false">Puedes volver al diseño anterior en cualquier momento. Tus canciones y ajustes no cambian.</string>
+    <string name="ui_quitar_de_esta_playlist_d34f9e" formatted="false">Quitar de esta playlist</string>
+    <string name="ui_quitar_de_la_playlist_ef39b8" formatted="false">Quitar de la playlist</string>
+    <string name="ui_quitar_de_me_gusta_d81660" formatted="false">Quitar de Me gusta</string>
+    <string name="ui_quitar_seleccion_ee7571" formatted="false">Quitar selección</string>
+    <string name="ui_radio_de_esta_cancion_fb5780" formatted="false">Radio de esta canción</string>
+    <string name="ui_recomendaciones_para_ti_b135e5" formatted="false">Recomendaciones para ti</string>
+    <string name="ui_reiniciar_cancion_en_chromecast_d3e6a4" formatted="false">Reiniciar canción en Chromecast</string>
+    <string name="ui_reintentar_adec7b" formatted="false">Reintentar</string>
+    <string name="ui_reintentar_fallidas_dad5b6" formatted="false">Reintentar fallidas</string>
+    <string name="ui_replaygain_nivel_local_494134" formatted="false">ReplayGain / nivel local</string>
+    <string name="ui_reproduccion_5e88a8" formatted="false">REPRODUCCIÓN</string>
+    <string name="ui_reproduccion_y_chromecast_1abd2c" formatted="false">Reproducción y Chromecast</string>
+    <string name="ui_reproduccion_y_dispositivos_5dfd22" formatted="false">Reproducción y dispositivos</string>
+    <string name="ui_reproduciendo_2d20e2" formatted="false">Reproduciendo</string>
+    <string name="ui_reproducir_cancion_e47bd3" formatted="false">Reproducir canción</string>
+    <string name="ui_reproducir_d1a188" formatted="false">Reproducir</string>
+    <string name="ui_reproducir_pausar_6f5752" formatted="false">Reproducir / pausar</string>
+    <string name="ui_respaldo_anadido_a_trabajos_en_segundo_plano_ef33cc" formatted="false">Respaldo añadido a trabajos en segundo plano.</string>
+    <string name="ui_respaldo_de_biblioteca_b8f7e1" formatted="false">RESPALDO DE BIBLIOTECA</string>
+    <string name="ui_respaldo_guardado_conserva_la_contrasena_para_6dc2a8" formatted="false">Respaldo guardado. Conserva la contraseña para otro dispositivo.</string>
+    <string name="ui_respaldo_guardado_incluye_biblioteca_playlists_54cdcd" formatted="false">Respaldo guardado. Incluye biblioteca, playlists, favoritos y ajustes; los archivos de audio se conservan aparte.</string>
+    <string name="ui_respaldo_portable_60eec3" formatted="false">Respaldo portable</string>
+    <string name="ui_respaldo_programado_desactivado_d7808d" formatted="false">Respaldo programado desactivado.</string>
+    <string name="ui_respaldo_programado_guarda_la_contrasena_fuera_a6f508" formatted="false">Respaldo programado. Guarda la contraseña fuera de este dispositivo.</string>
+    <string name="ui_respaldos_a_conservar_130_f76142" formatted="false">Respaldos a conservar (1–30)</string>
+    <string name="ui_restaura_la_apariencia_anterior_de_musicvault_f239b1" formatted="false">Restaura la apariencia anterior de MusicVault.</string>
+    <string name="ui_restaurar_paquete_con_audio_de_debug_ef76de" formatted="false">Restaurar paquete con audio de debug</string>
+    <string name="ui_restaurar_respaldo_823a44" formatted="false">Restaurar respaldo</string>
+    <string name="ui_retirar_a8e196" formatted="false">Retirar</string>
+    <string name="ui_retirar_audio_f8fdd5" formatted="false">Retirar audio</string>
+    <string name="ui_ruta_de_descargas_5cb409" formatted="false">Ruta de descargas</string>
+    <string name="ui_rutas_relativas_selecciona_su_carpeta_de_music_af41e2" formatted="false">Rutas relativas: selecciona su carpeta de música. Se importan archivos accesibles; no se descargan URLs remotas. Las URIs exportadas requieren permisos en el dispositivo de destino.</string>
+    <string name="ui_saltar_silencios_0d406c" formatted="false">Saltar silencios</string>
+    <string name="ui_se_aplica_a_nuevas_descargas_y_reintentos_d4b60e" formatted="false">Se aplica a nuevas descargas y reintentos.</string>
+    <string name="ui_se_borrara_el_audio_temporal_tus_canciones_des_7d63e3" formatted="false">Se borrará el audio temporal. Tus canciones descargadas y playlists se conservarán.</string>
+    <string name="ui_se_guardara_el_audio_privado_seleccionado_en_l_15def6" formatted="false">Se guardará el audio privado seleccionado en la papelera. Puedes recuperarlo hasta vaciarla.</string>
+    <string name="ui_seleccion_de_descargas_guardada_e78b19" formatted="false">Selección de descargas guardada.</string>
+    <string name="ui_selecciona_el_paquete_creado_en_debug_se_copia_c33db5" formatted="false">Selecciona el paquete creado en debug. Se copiarán las canciones a esta instalación y se combinarán playlists, favoritos y ajustes.</string>
+    <string name="ui_seleccionada_ec2675" formatted="false">Seleccionada</string>
+    <string name="ui_seleccionar_2b8319" formatted="false">Seleccionar</string>
+    <string name="ui_seleccionar_carpeta_de_musica_378000" formatted="false">Seleccionar carpeta de música</string>
+    <string name="ui_seleccionar_carpeta_y_programar_933499" formatted="false">Seleccionar carpeta y programar</string>
+    <string name="ui_siguiente_c4d83a" formatted="false">Siguiente</string>
+    <string name="ui_sin_ejecucion_todavia_668e6a" formatted="false">Sin ejecución todavía</string>
+    <string name="ui_sin_seleccionar_31b887" formatted="false">Sin seleccionar</string>
+    <string name="ui_solo_con_wi_fi_y_cargando_la_seleccion_se_revi_b74ede" formatted="false">Solo con Wi-Fi y cargando. La selección se revisa cada 6 horas y mantiene las descargas existentes al desactivarla. Cuota estimada conservadora a 320 kbps; incluye audio local y trabajos pendientes.</string>
+    <string name="ui_solo_urls_http_https_accesibles_por_el_recepto_30591e" formatted="false">Solo URLs HTTP/HTTPS accesibles por el receptor. Los archivos locales permanecen en el teléfono.</string>
+    <string name="ui_spotify_d41904" formatted="false">SPOTIFY</string>
+    <string name="ui_spotify_no_devolvio_canciones_para_esta_playli_942c17" formatted="false">Spotify no devolvió canciones para esta playlist.</string>
+    <string name="ui_spotify_no_esta_conectado_cdb07a" formatted="false">Spotify no está conectado</string>
+    <string name="ui_temporizador_de_apagado_e3aefc" formatted="false">Temporizador de apagado</string>
+    <string name="ui_texto_o_lrc_mm_ss_xx_un_desfase_positivo_retra_0ea6ad" formatted="false">Texto o LRC [mm:ss.xx]. Un desfase positivo retrasa las líneas.</string>
+    <string name="ui_token_de_listenbrainz_08fb14" formatted="false">Token de ListenBrainz</string>
+    <string name="ui_tornamesa_vinilo_d11d6f" formatted="false">Tornamesa / Vinilo</string>
+    <string name="ui_tu_biblioteca_todavia_esta_vacia_a3c989" formatted="false">Tu biblioteca todavía está vacía</string>
+    <string name="ui_usa_las_etiquetas_replaygain_de_la_cancion_con_cae69d" formatted="false">Usa las etiquetas ReplayGain de la canción, con límite de pico y sin amplificación. Sin etiquetas, mide el nivel RMS local y atenúa hasta -18 dBFS; las transmisiones sin etiquetas conservan su volumen.</string>
+    <string name="ui_usar_carpeta_interna_782032" formatted="false">Usar carpeta interna</string>
+    <string name="ui_vaciar_40a9e5" formatted="false">Vaciar</string>
+    <string name="ui_vaciar_cache_d6ee09" formatted="false">Vaciar caché</string>
+    <string name="ui_vaciar_cache_de_streaming_003106" formatted="false">Vaciar caché de streaming</string>
+    <string name="ui_vaciar_papelera_da0939" formatted="false">Vaciar papelera</string>
+    <string name="ui_vault_hv_01_side_a_7dca31" formatted="false">VAULT HV-01  ·  SIDE A</string>
+    <string name="ui_visualizador_circular_9a3ecc" formatted="false">Visualizador circular</string>
+    <string name="ui_volver_84a715" formatted="false">Volver</string>
+    <string name="ui_volver_a_generos_5bf2d6" formatted="false">Volver a géneros</string>
+    <string name="ui_volver_al_telefono_3935ed" formatted="false">Volver al teléfono</string>
+    <string name="ui_wear_os_5f0aef" formatted="false">Wear OS</string>
+    <string name="ui_youtube_558865" formatted="false">YouTube</string>
+
+    <string name="dj_title">DJ</string>
+    <string name="dj_subtitle">Una mezcla que aprende de lo que escuchas</string>
+    <string name="dj_reason_learning">Escucha tus canciones favoritas: DJ aprende de tus reproducciones, repeticiones y saltos.</string>
+    <string name="dj_reason_offline">Sin conexión: mezcla personalizada con canciones disponibles en tu dispositivo.</string>
+    <string name="dj_reason_artists">Inspirado en tus escuchas de %1$s</string>
+    <string name="dj_up_next">EN TU MEZCLA</string>
+    <string name="dj_no_candidates">No hay más canciones disponibles para esta mezcla. Escucha más música o inicia otra mezcla cuando tengas conexión.</string>
+    <string name="dj_unavailable">No se pudo preparar la mezcla. Reintenta cuando haya conexión.</string>
+    <string name="dj_start">Iniciar DJ</string>
+    <string name="dj_new_mix">Otra mezcla</string>
+    <string name="dj_stop">Detener</string>
+</resources>

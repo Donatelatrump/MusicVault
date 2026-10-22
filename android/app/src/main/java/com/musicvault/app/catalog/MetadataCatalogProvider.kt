@@ -37,7 +37,7 @@ class MetadataCatalogProvider(
     )
 
     private suspend fun <T> safeCall(block: suspend () -> List<T>): List<T> = try {
-        block()
+        if (com.musicvault.app.providers.Providers.isOffline()) emptyList() else block()
     } catch (e: kotlinx.coroutines.CancellationException) {
         throw e
     } catch (_: Exception) {
@@ -283,6 +283,7 @@ class MetadataCatalogProvider(
         searchAlbumsMerged(query, limit)
 
     suspend fun tracksForAlbum(album: CatalogAlbum, limit: Int = 50): List<CatalogTrack> {
+        if (com.musicvault.app.providers.Providers.isOffline()) return emptyList()
         if (!album.isValid()) return emptyList()
 
         val preferred = providers.firstOrNull { itName(it) == album.provider }
@@ -292,13 +293,10 @@ class MetadataCatalogProvider(
         }
 
         // First use the exact provider/id returned by the search.
-        for (source in ordered) {
+        for (source in ordered.filter { itName(it) == album.provider }) {
             try {
                 val exact = source.albumTracks(album.id, limit).filterValidTracks()
-                if (exact.isNotEmpty()) return SearchScorer.mergeAndRank(
-                    "${album.title} ${album.artistName}",
-                    listOf(exact)
-                ).take(limit)
+                if (exact.isNotEmpty()) return exact.take(limit)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (_: Exception) {

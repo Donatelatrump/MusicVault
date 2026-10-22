@@ -2,9 +2,7 @@ package com.musicvault.app.lyrics
 
 import java.util.Locale
 import org.json.JSONObject
-import java.net.HttpURLConnection
 import java.net.URLEncoder
-import java.net.URL
 import java.text.Normalizer
 import kotlin.math.abs
 import kotlin.math.max
@@ -13,13 +11,13 @@ import kotlin.math.max
 data class LyricLine(val timeMs: Long, val text: String)
 
 /** Plain and/or synced lyrics for a track. */
-data class Lyrics(val plain: String?, val synced: List<LyricLine>) {
+data class Lyrics(val plain: String?, val synced: List<LyricLine>, val origin: String? = null) {
     val isEmpty: Boolean get() = plain.isNullOrBlank() && synced.isEmpty()
 }
 
 /**
  * Lyrics via LRCLib (https://lrclib.net) — free, no API key, plain + synced LRC.
- * Blocking network I/O: call from a background dispatcher.
+ * Cancellable network requests with a shared connection pool and bounded waits.
  */
 object LyricsProvider {
     private val lrcTimestamp = Regex("""\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]""")
@@ -110,43 +108,55 @@ object LyricsProvider {
         )
     }
 
-    fun buildLrc(lyrics: Lyrics): String = when {
-        lyrics.synced.isNotEmpty() -> buildString {
-            lyrics.synced.forEach { line ->
-                val totalMs = line.timeMs.coerceAtLeast(0L)
-                val minutes = totalMs / 60_000L
-                val seconds = (totalMs % 60_000L) / 1000L
-                val centiseconds = ((totalMs % 1000L) / 10L).coerceIn(0L, 99L)
-                append('[')
-                append(String.format(Locale.US, "%02d:%02d.%02d", minutes, seconds, centiseconds))
-                append("] ")
-                append(line.text)
-                append('\n')
+    fun buildLrc(lyrics: Lyrics): String {
+        val body = when {
+            lyrics.synced.isNotEmpty() -> buildString {
+                lyrics.synced.forEach { line ->
+                    val totalMs = line.timeMs.coerceAtLeast(0L)
+                    val minutes = totalMs / 60_000L
+                    val seconds = (totalMs % 60_000L) / 1000L
+                    val centiseconds = ((totalMs % 1000L) / 10L).coerceIn(0L, 99L)
+                    append('[')
+                    append(String.format(Locale.US, "%02d:%02d.%02d", minutes, seconds, centiseconds))
+                    append("] ")
+                    append(line.text)
+                    append('\n')
+                }
             }
+            !lyrics.plain.isNullOrBlank() -> lyrics.plain.trimEnd()
+            else -> ""
         }
-        !lyrics.plain.isNullOrBlank() -> lyrics.plain.trimEnd()
-        else -> ""
+        return if (body.isNotBlank() && lyrics.origin in setOf("youtube", "lrclib"))
+            "[musicvault-source:${lyrics.origin}]\n$body" else body
     }
 
     fun parseStoredLrc(raw: String): Lyrics? {
-        val synced = parseLrc(raw)
-        if (synced.isNotEmpty()) return Lyrics(plain = null, synced = synced)
-        val plain = raw.trim()
-        return plain.takeIf { it.isNotBlank() }?.let { Lyrics(plain = it, synced = emptyList()) }
+        val marker = Regex("(?m)^\\[musicvault-source:(youtube|lrclib)]\\r?$")
+        val origin = marker.find(raw)?.groupValues?.get(1)
+        val body = raw.replace(marker, "").trim()
+        val synced = parseLrc(body)
+        if (synced.isNotEmpty()) return Lyrics(plain = null, synced = synced, origin = origin)
+        return body.takeIf { it.isNotBlank() }?.let { Lyrics(plain = it, synced = emptyList(), origin = origin) }
     }
 
-    fun fetch(artist: String, title: String, album: String? = null, durationMs: Long = 0L): Lyrics? {
+    suspend fun fetch(
+        artist: String,
+        title: String,
+        album: String? = null,
+        durationMs: Long = 0L,
+        requestBody: suspend (String) -> String? = LyricsRequest::get
+    ): Lyrics? {
         val durationSeconds = (durationMs / 1000L).takeIf { it > 0 }
         // 1. Try exact match query (with exact duration filter if available)
-        val exact = runCatching {
+        val exact = lyricsAttempt {
             val query = buildString {
                 append("https://lrclib.net/api/get?artist_name=").append(URLEncoder.encode(artist.trim(), "UTF-8"))
                 append("&track_name=").append(URLEncoder.encode(title.trim(), "UTF-8"))
                 if (!album.isNullOrBlank()) append("&album_name=").append(URLEncoder.encode(album.trim(), "UTF-8"))
                 if (durationSeconds != null) append("&duration=").append(durationSeconds)
             }
-            getBody(query)
-        }.getOrNull()
+            requestBody(query)
+        }
         val direct = exact?.let { body ->
             runCatching { keepOnlyTrustedSync(toLyrics(JSONObject(body)) ?: return@runCatching null, durationMs) }.getOrNull()
         }
@@ -155,13 +165,13 @@ object LyricsProvider {
         // 2. Search fallback without strict duration constraint, to find official studio lyrics
         val searchQuery = "https://lrclib.net/api/search?q=" +
             URLEncoder.encode("${title.trim()} ${artist.trim()}".trim(), "UTF-8")
-        val candidates = runCatching {
-            val body = getBody(searchQuery) ?: return@runCatching null
+        val candidates = lyricsAttempt {
+            val body = requestBody(searchQuery) ?: return@lyricsAttempt null
             val array = org.json.JSONArray(body)
             (0 until array.length()).mapNotNull { i ->
                 runCatching { array.getJSONObject(i) }.getOrNull()
             }
-        }.getOrNull() ?: emptyList()
+        } ?: emptyList()
 
         val best = candidates
             .asSequence()
@@ -228,19 +238,4 @@ object LyricsProvider {
         return lines.sortedBy { it.timeMs }
     }
 
-    private fun getBody(url: String): String? {
-        val connection = URL(url).openConnection() as HttpURLConnection
-        return try {
-            connection.requestMethod = "GET"
-            connection.connectTimeout = 8_000
-            connection.readTimeout = 10_000
-            // LRCLib asks clients for an identifiable User-Agent.
-            connection.setRequestProperty("User-Agent", "MusicVault/1.0 (lyrics client)")
-            connection.setRequestProperty("Accept", "application/json")
-            val code = connection.responseCode
-            if (code !in 200..299) null else connection.inputStream.bufferedReader().use { it.readText() }
-        } finally {
-            connection.disconnect()
-        }
-    }
 }

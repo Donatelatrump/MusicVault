@@ -1,5 +1,8 @@
 package com.musicvault.app.ui
 
+import com.musicvault.app.R
+import androidx.compose.ui.res.stringResource
+
 import android.content.Context
 import android.content.res.ColorStateList
 import android.graphics.Canvas
@@ -81,7 +84,7 @@ internal sealed interface HomeFeedItem {
     data object Greeting : HomeFeedItem
     data object RecommendedTracks : HomeFeedItem
     data object RecommendedAlbums : HomeFeedItem
-    data class SongsHeader(val title: String) : HomeFeedItem
+    data class SongsHeader(@androidx.annotation.StringRes val title: Int) : HomeFeedItem
     data class TrackItem(val track: Track) : HomeFeedItem
 }
 
@@ -216,10 +219,10 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
         val newItems = buildList {
             add(HomeFeedItem.Greeting)
             if (recommendedTracks.isNotEmpty()) add(HomeFeedItem.RecommendedTracks)
-            if (recommendedAlbums.isNotEmpty()) add(HomeFeedItem.RecommendedAlbums)
+            add(HomeFeedItem.RecommendedAlbums)
             val discoveryList = recommendations.drop(quickPickCount)
             if (discoveryList.isNotEmpty()) {
-                add(HomeFeedItem.SongsHeader("Recomendaciones para ti"))
+                add(HomeFeedItem.SongsHeader(R.string.ui_recomendaciones_para_ti_b135e5))
                 discoveryList.forEach { add(HomeFeedItem.TrackItem(it)) }
             }
         }
@@ -274,7 +277,7 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
                         HorizontalDivider(color = VaultColors.Divider)
                         Spacer(Modifier.height(14.dp))
                     }
-                    SectionTitle(item.title, hybridDesign)
+                    SectionTitle(stringResource(item.title), hybridDesign)
                 }
             }
             is HomeFeedItem.TrackItem -> (holder as NativeTrackHolder).bind(
@@ -319,7 +322,7 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
                 HorizontalDivider(color = VaultColors.Divider)
                 Spacer(Modifier.height(14.dp))
             }
-            Text("Para ti", color = VaultColors.TextPrimary, fontSize = if (hybridDesign) 19.sp else 20.sp, fontWeight = FontWeight.Bold)
+            Text(stringResource(R.string.ui_para_ti_3d70f6), color = VaultColors.TextPrimary, fontSize = if (hybridDesign) 19.sp else 20.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(10.dp))
             // Lazy row: only visible cards are composed/collected. The old
             // horizontalScroll Row composed every card even when offscreen, which
@@ -342,15 +345,21 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
 
     @Composable private fun RecommendedAlbumsRow(vm: MusicVaultViewModel, albumDownloads: Set<String>) {
         val albums = recommendedAlbumsCache
-        if (albums.isEmpty()) return
         Column(Modifier.fillMaxWidth().clipToBounds()) {
             if (hybridDesign) {
                 HorizontalDivider(color = VaultColors.Divider)
                 Spacer(Modifier.height(14.dp))
             }
-            Text("Álbumes para ti", color = VaultColors.TextPrimary, fontSize = if (hybridDesign) 19.sp else 20.sp, fontWeight = FontWeight.Bold)
+            Text(stringResource(R.string.ui_albumes_para_ti_9c66e7), color = VaultColors.TextPrimary, fontSize = if (hybridDesign) 19.sp else 20.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(10.dp))
             LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                item(key = DJ_MIX_ID) {
+                    AlbumCard(
+                        album = Album(DJ_MIX_ID, stringResource(R.string.dj_title), "dj", stringResource(R.string.dj_subtitle), 0),
+                        onClick = vm::openDjAlbum,
+                        hybrid = hybridDesign
+                    )
+                }
                 items(albums, key = { it.id }) { album ->
                     AlbumCard(
                         album = album,
@@ -457,11 +466,13 @@ internal class NativeTrackHolder(
     private var progressFlow: Flow<Int?>? = null
     private var currentProgress: Int? = null
     private var playableNow: Boolean = true
+    private var playingNow: Boolean = false
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     init {
         installTrackPressFeedback(itemView)
         actions.setOnClickListener { showActionsMenu(it) }
+        NativeAccessibility.button(actions, itemView.context.getString(R.string.ui_mas_opciones_977c75))
         itemView.setOnClickListener {
             if (playableNow) track?.let { t -> (onRowClick ?: vm::selectTrack).invoke(t) }
         }
@@ -488,9 +499,11 @@ internal class NativeTrackHolder(
         currentPlaylists = playlists
         this.selectedId = selectedId
         playableNow = isOnline || value.id in offlinePlayableIds
-        itemView.isEnabled = playableNow
+        itemView.isEnabled = true
+        play.isEnabled = playableNow
+        playingNow = playing
         itemView.alpha = if (playableNow) 1f else 0.38f
-        itemView.contentDescription = if (playableNow) null else "${value.title}, no disponible sin conexión"
+
         title.text = value.title
         subtitle.text = "${value.artistName} · ${value.albumTitle}"
         if (!coverBound || boundCoverUrl != value.coverUri) {
@@ -517,6 +530,7 @@ internal class NativeTrackHolder(
                     // for local and online tracks, including active downloads.
                     play.visibility = View.GONE
                     actions.visibility = View.VISIBLE
+                    updateAccessibility()
                 }
             }
         }
@@ -525,6 +539,7 @@ internal class NativeTrackHolder(
         // - tap row -> play (local file or streaming)
         // - trailing 3-dot -> actions, including Download for online tracks
         applyActionState(value, false)
+        updateAccessibility()
     }
 
     private fun applyActionState(value: Track, downloading: Boolean) {
@@ -536,23 +551,25 @@ internal class NativeTrackHolder(
     private fun showActionsMenu(anchor: View) {
         val current = track ?: return
         PopupMenu(anchor.context, anchor, Gravity.END).apply {
-            menu.add(0, MENU_QUEUE, 0, "Agregar a cola de reproducción")
-            menu.add(0, MENU_FAVORITE, 1, if (vm.isFavorite(current.id)) "Quitar de Me gusta" else "Me gusta")
-            menu.add(0, MENU_ALBUM, 2, "Agregar a álbum")
-            if (onRemoveFromPlaylist != null) menu.add(0, MENU_REMOVE_FROM_PLAYLIST, 3, "Quitar de esta playlist")
+            menu.add(0, MENU_QUEUE, 0, itemView.context.getString(R.string.ui_agregar_a_cola_de_reproduccion_f8c617))
+            menu.add(0, MENU_FAVORITE, 1, if (vm.isFavorite(current.id)) itemView.context.getString(R.string.ui_quitar_de_me_gusta_d81660) else itemView.context.getString(R.string.ui_me_gusta_f3b81e))
+            menu.add(0, MENU_ALBUM, 2, itemView.context.getString(R.string.ui_agregar_a_album_7c4ad3))
+            menu.add(0, MENU_RADIO, 3, itemView.context.getString(R.string.ui_iniciar_radio_de_esta_cancion_cc8ac4))
+            if (onRemoveFromPlaylist != null) menu.add(0, MENU_REMOVE_FROM_PLAYLIST, 3, itemView.context.getString(R.string.ui_quitar_de_esta_playlist_d34f9e))
             when {
                 current.isDownloaded && !current.audioUri.isNullOrBlank() ->
-                    menu.add(0, MENU_DELETE, 4, "Eliminar canción descargada")
+                    menu.add(0, MENU_DELETE, 4, itemView.context.getString(R.string.ui_eliminar_cancion_descargada_8c5b0a))
                 currentProgress != null ->
-                    menu.add(0, MENU_CANCEL_DOWNLOAD, 4, "Cancelar descarga")
+                    menu.add(0, MENU_CANCEL_DOWNLOAD, 4, itemView.context.getString(R.string.ui_cancelar_descarga_f42d93))
                 else ->
-                    menu.add(0, MENU_DOWNLOAD, 4, "Descargar")
+                    menu.add(0, MENU_DOWNLOAD, 4, itemView.context.getString(R.string.ui_descargar_8b98cb))
             }
             setOnMenuItemClickListener { item ->
                 when (item.itemId) {
                     MENU_QUEUE -> vm.addToQueue(current)
                     MENU_FAVORITE -> vm.toggleFavorite(current)
                     MENU_ALBUM -> showAlbumChooser(current)
+                    MENU_RADIO -> vm.startRadio(current)
                     MENU_REMOVE_FROM_PLAYLIST -> confirmPlaylistRemoval(current)
                     MENU_DOWNLOAD -> vm.requestDownload(current)
                     MENU_CANCEL_DOWNLOAD -> vm.cancelDownload(current.id)
@@ -572,12 +589,14 @@ internal class NativeTrackHolder(
             setPadding(dp(8), dp(4), dp(8), dp(8))
         }
         val dialog = android.app.AlertDialog.Builder(context)
-            .setTitle("Agregar a álbum")
+            .setTitle(itemView.context.getString(R.string.ui_agregar_a_album_7c4ad3))
             .setView(ScrollView(context).apply { addView(list) })
-            .setNegativeButton("Cancelar", null)
+            .setNegativeButton(itemView.context.getString(R.string.ui_cancelar_c111e0), null)
             .create()
         list.addView(TextView(context).apply {
-            text = "+  Crear nuevo álbum"
+            text = itemView.context.getString(R.string.ui_crear_nuevo_album_ee0a30)
+            minimumHeight = dp(48)
+            NativeAccessibility.button(this, itemView.context.getString(R.string.ui_crear_nuevo_album_5d97f7))
             textSize = 16f
             setPadding(dp(16), dp(14), dp(16), dp(14))
             setOnClickListener { dialog.dismiss(); showCreateAlbum(current) }
@@ -589,6 +608,8 @@ internal class NativeTrackHolder(
             }
             row.addView(TextView(context).apply {
                 text = playlist.title
+                minimumHeight = dp(48)
+                NativeAccessibility.button(this, "Agregar a ${playlist.title}")
                 textSize = 16f
                 setPadding(dp(16), dp(14), dp(8), dp(14))
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
@@ -602,10 +623,10 @@ internal class NativeTrackHolder(
                     layoutParams = LinearLayout.LayoutParams(dp(48), dp(48))
                     setOnClickListener {
                         android.app.AlertDialog.Builder(context)
-                            .setTitle("Eliminar álbum")
+                            .setTitle(itemView.context.getString(R.string.ui_eliminar_album_8f78a0))
                             .setMessage("¿Quieres eliminar \"${playlist.title}\"?")
-                            .setPositiveButton("Eliminar") { _, _ -> vm.deletePlaylist(playlist.id); dialog.dismiss() }
-                            .setNegativeButton("Cancelar", null)
+                            .setPositiveButton(itemView.context.getString(R.string.ui_eliminar_54e140)) { _, _ -> vm.deletePlaylist(playlist.id); dialog.dismiss() }
+                            .setNegativeButton(itemView.context.getString(R.string.ui_cancelar_c111e0), null)
                             .show()
                     }
                 })
@@ -617,12 +638,12 @@ internal class NativeTrackHolder(
 
     private fun showCreateAlbum(current: Track) {
         val context = itemView.context
-        val input = EditText(context).apply { hint = "Nombre"; isSingleLine = true }
+        val input = EditText(context).apply { hint = itemView.context.getString(R.string.ui_nombre_e68491); isSingleLine = true }
         val dialog = android.app.AlertDialog.Builder(context)
-            .setTitle("Crear nuevo álbum")
+            .setTitle(itemView.context.getString(R.string.ui_crear_nuevo_album_5d97f7))
             .setView(input)
-            .setPositiveButton("Crear y agregar", null)
-            .setNegativeButton("Cancelar", null)
+            .setPositiveButton(itemView.context.getString(R.string.ui_crear_y_agregar_d4727e), null)
+            .setNegativeButton(itemView.context.getString(R.string.ui_cancelar_c111e0), null)
             .create()
         dialog.setOnShowListener {
             dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
@@ -639,28 +660,61 @@ internal class NativeTrackHolder(
     private fun confirmPlaylistRemoval(current: Track) {
         val remove = onRemoveFromPlaylist ?: return
         android.app.AlertDialog.Builder(itemView.context)
-            .setTitle("Quitar de la playlist")
+            .setTitle(itemView.context.getString(R.string.ui_quitar_de_la_playlist_ef39b8))
             .setMessage("¿Quieres quitar \"${current.title}\" de esta playlist? El archivo descargado no se borrará del dispositivo.")
             .setPositiveButton("Quitar") { _, _ -> remove(current) }
-            .setNegativeButton("Cancelar", null)
+            .setNegativeButton(itemView.context.getString(R.string.ui_cancelar_c111e0), null)
             .show()
     }
 
     private fun confirmTrackDeletion(current: Track) {
         android.app.AlertDialog.Builder(itemView.context)
-            .setTitle("Eliminar canción")
+            .setTitle(itemView.context.getString(R.string.ui_eliminar_cancion_d65308))
             .setMessage("¿Quieres eliminar \"${current.title}\" de las descargas de MusicVault?")
-            .setPositiveButton("Eliminar") { _, _ -> vm.deleteTrack(current) }
-            .setNegativeButton("Cancelar", null)
+            .setPositiveButton(itemView.context.getString(R.string.ui_eliminar_54e140)) { _, _ -> vm.deleteTrack(current) }
+            .setNegativeButton(itemView.context.getString(R.string.ui_cancelar_c111e0), null)
             .show()
     }
 
     fun updatePlaybackState(selectedId: String?, playing: Boolean) {
         this.selectedId = selectedId
+        playingNow = playing
         val current = track ?: return
         val active = playing && selectedId == current.id
         play.mode = if (active) NativePlayButton.Mode.PAUSE else NativePlayButton.Mode.PLAY
         title.setTextColor(if (active) Color.rgb(224, 164, 88) else Color.rgb(241,234,217))
+        updateAccessibility()
+    }
+
+    private fun updateAccessibility() {
+        val current = track ?: return
+        val active = current.id == selectedId && playingNow
+        val playbackLabel = if (active) itemView.context.getString(R.string.ui_pausar_8e0f5e) else itemView.context.getString(R.string.ui_reproducir_d1a188)
+        val ready = current.isDownloaded && !current.audioUri.isNullOrBlank()
+        val state = buildList {
+            if (active) add(itemView.context.getString(R.string.ui_reproduciendo_2d20e2)) else if (current.id == selectedId) add(itemView.context.getString(R.string.ui_pausada_144ffd))
+            if (ready) add(itemView.context.getString(R.string.ui_descargada_c000cf))
+            if (currentProgress != null && !ready) add("Descargando ${currentProgress!!.coerceIn(0, 100)} por ciento")
+            if (!playableNow) add(itemView.context.getString(R.string.ui_no_disponible_sin_conexion_04cfee))
+            if (vm.isFavorite(current.id)) add(itemView.context.getString(R.string.ui_me_gusta_f3b81e))
+        }.joinToString(", ")
+        val custom = buildList {
+            if (playableNow) add(NativeAccessibility.Action(playbackLabel) {
+                if (current.id == selectedId) vm.togglePlayback() else (onPlayNew ?: vm::selectTrack).invoke(current)
+            })
+            add(NativeAccessibility.Action(itemView.context.getString(R.string.ui_agregar_a_cola_ca3388)) { vm.addToQueue(current) })
+            add(NativeAccessibility.Action(if (vm.isFavorite(current.id)) itemView.context.getString(R.string.ui_quitar_de_me_gusta_d81660) else itemView.context.getString(R.string.ui_me_gusta_f3b81e)) { vm.toggleFavorite(current) })
+            if (!ready) add(NativeAccessibility.Action(if (currentProgress != null) itemView.context.getString(R.string.ui_cancelar_descarga_f42d93) else itemView.context.getString(R.string.ui_descargar_8b98cb)) {
+                if (currentProgress != null) vm.cancelDownload(current.id) else vm.requestDownload(current)
+            })
+            add(NativeAccessibility.Action(itemView.context.getString(R.string.ui_iniciar_radio_ec118d)) { vm.startRadio(current) })
+            if (onRemoveFromPlaylist != null) add(NativeAccessibility.Action(itemView.context.getString(R.string.ui_quitar_de_esta_playlist_d34f9e)) { confirmPlaylistRemoval(current) })
+            add(NativeAccessibility.Action(itemView.context.getString(R.string.ui_mas_opciones_977c75)) { showActionsMenu(actions) })
+        }
+        NativeAccessibility.describe(itemView, "${current.title}, ${current.artistName}, ${current.albumTitle}", state,
+            if (playableNow) itemView.context.getString(R.string.ui_reproducir_cancion_e47bd3) else null, actions = custom, decorative = listOf(image, title, subtitle, progress))
+        NativeAccessibility.button(actions, "Más opciones para ${current.title}")
+        play.contentDescription = "$playbackLabel ${current.title}"
     }
 
     fun recycle() {
@@ -678,6 +732,7 @@ internal class NativeTrackHolder(
         const val MENU_REMOVE_FROM_PLAYLIST = 5
         const val MENU_DOWNLOAD = 6
         const val MENU_CANCEL_DOWNLOAD = 7
+        const val MENU_RADIO = 8
     }
 }
 
@@ -751,13 +806,13 @@ private fun makeTrackRow(context: Context, hybrid: Boolean): LinearLayout {
     }
     row.addView(image)
     val text = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_VERTICAL; layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(12) } }
-    text.addView(TextView(context).apply { tag="title"; setTextColor(Color.rgb(241,234,217)); textSize=15f; maxLines=1; ellipsize=android.text.TextUtils.TruncateAt.END; setTypeface(typeface, android.graphics.Typeface.BOLD) })
-    text.addView(TextView(context).apply { tag="subtitle"; setTextColor(Color.rgb(179,169,146)); textSize=12f; maxLines=1; ellipsize=android.text.TextUtils.TruncateAt.END })
+    text.addView(TextView(context).apply { tag="title"; setTextColor(Color.rgb(241,234,217)); textSize=15f; maxLines=2; ellipsize=android.text.TextUtils.TruncateAt.END; setTypeface(typeface, android.graphics.Typeface.BOLD) })
+    text.addView(TextView(context).apply { tag="subtitle"; setTextColor(Color.rgb(179,169,146)); textSize=12f; maxLines=2; ellipsize=android.text.TextUtils.TruncateAt.END })
     text.addView(ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal).apply { tag="progress"; visibility=View.GONE; max=100; layoutParams=LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(2)).apply { topMargin=dp(3) } })
     row.addView(text)
     row.addView(NativePlayButton(context).apply { tag="play"; layoutParams=LinearLayout.LayoutParams(dp(48), dp(48)) })
     row.addView(NativeMoreButton(context).apply {
-        tag="actions"; layoutParams=LinearLayout.LayoutParams(dp(44), dp(48))
+        tag="actions"; layoutParams=LinearLayout.LayoutParams(dp(48), dp(48))
     })
     return row
 }
@@ -879,7 +934,8 @@ internal class LocalAlbumDetailAdapter(private val vm: MusicVaultViewModel, priv
  *  so big playlists scroll with the same per-row cost as the Library. */
 internal class PlaylistDetailAdapter(
     private val vm: MusicVaultViewModel,
-    private val hybridDesign: Boolean = false
+    private val hybridDesign: Boolean = false,
+    private val allowRemoval: Boolean = true
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
     companion object {
@@ -936,8 +992,8 @@ internal class PlaylistDetailAdapter(
             hybridDesign,
             onRowClick = { track -> rowClick?.invoke(track) },
             onPlayNew = { track -> playNew?.invoke(track) },
-            onRemoveFromPlaylist = { track -> removeFromPlaylist?.invoke(track) },
-            allowMissingTrackLongPressRemoval = true
+            onRemoveFromPlaylist = if (allowRemoval) ({ track -> removeFromPlaylist?.invoke(track) }) else null,
+            allowMissingTrackLongPressRemoval = allowRemoval
         )
 
     override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
@@ -1053,6 +1109,8 @@ private class LocalAlbumHeaderHolder(context: Context, hybrid: Boolean) : Recycl
         if (album == null) return
         callback = onBack
         title.text = album.title
+        NativeAccessibility.heading(title)
+        cover.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         artist.text = album.artistName
         year.text = if (album.year > 0) album.year.toString() else ""
         year.visibility = if (album.year > 0) View.VISIBLE else View.GONE
@@ -1075,8 +1133,20 @@ private fun makeLocalAlbumHeader(context: Context, hybrid: Boolean): LinearLayou
         layoutParams = RecyclerView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
     }
     root.addView(ImageButton(context).apply {
-        tag = "back"; background = null; setImageResource(android.R.drawable.ic_media_previous); setColorFilter(Color.rgb(241,234,217))
-        contentDescription = "Atrás"; layoutParams = LinearLayout.LayoutParams(dp(48), dp(48))
+        tag = "back"
+        setImageResource(R.drawable.ic_vault_back)
+        setColorFilter(Color.rgb(241, 234, 217))
+        setPadding(dp(12), dp(12), dp(12), dp(12))
+        val shape = android.graphics.drawable.GradientDrawable().apply {
+            cornerRadius = dp(16).toFloat()
+            setColor(Color.rgb(30, 27, 24))
+            setStroke(dp(1), Color.rgb(50, 44, 37))
+        }
+        background = android.graphics.drawable.RippleDrawable(
+            ColorStateList.valueOf(Color.argb(50, 224, 164, 88)), shape, null
+        )
+        contentDescription = context.getString(R.string.ui_atras_0e715a)
+        layoutParams = LinearLayout.LayoutParams(dp(48), dp(48)).apply { bottomMargin = dp(12) }
     })
     val info = LinearLayout(context).apply {
         orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
@@ -1091,7 +1161,7 @@ private fun makeLocalAlbumHeader(context: Context, hybrid: Boolean): LinearLayou
         layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(16) }
     }
     text.addView(TextView(context).apply { tag="title"; setTextColor(Color.rgb(241,234,217)); textSize=24f; setTypeface(typeface, android.graphics.Typeface.BOLD); maxLines=2; ellipsize=android.text.TextUtils.TruncateAt.END })
-    text.addView(TextView(context).apply { tag="artist"; setTextColor(Color.rgb(179,169,146)); textSize=14f; maxLines=1; ellipsize=android.text.TextUtils.TruncateAt.END; layoutParams=LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin=dp(4) } })
+    text.addView(TextView(context).apply { tag="artist"; setTextColor(Color.rgb(179,169,146)); textSize=14f; maxLines=2; ellipsize=android.text.TextUtils.TruncateAt.END; layoutParams=LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin=dp(4) } })
     text.addView(TextView(context).apply { tag="year"; setTextColor(Color.rgb(126,118,102)); textSize=12f; layoutParams=LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin=dp(2) } })
     info.addView(text)
     root.addView(info)
@@ -1175,11 +1245,11 @@ private fun makeAlbumHeader(context: Context, hybrid: Boolean): LinearLayout {
         layoutParams = RecyclerView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
     }
     val text = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f) }
-    text.addView(TextView(context).apply { this.text = "Álbumes"; setTextColor(Color.rgb(241,234,217)); textSize = if (hybrid) 24f else 28f; setTypeface(typeface, android.graphics.Typeface.BOLD) })
+    text.addView(TextView(context).apply { this.text = context.getString(R.string.ui_albumes_797807); setTextColor(Color.rgb(241,234,217)); textSize = if (hybrid) 24f else 28f; setTypeface(typeface, android.graphics.Typeface.BOLD) })
     root.addView(text)
     root.addView(ImageButton(context).apply {
         tag = "addAlbum"; background = null; setImageResource(android.R.drawable.ic_input_add); setColorFilter(Color.rgb(241,234,217));
-        contentDescription = "Nuevo álbum"; layoutParams = LinearLayout.LayoutParams(dp(48), dp(48))
+        contentDescription = context.getString(R.string.ui_nuevo_album_029960); layoutParams = LinearLayout.LayoutParams(dp(48), dp(48))
     })
     return root
 }
@@ -1203,6 +1273,9 @@ private class AlbumCardHolder(context: Context, private val vm: MusicVaultViewMo
         this.onDelete = onDelete
         title.text = value.title
         description.text = value.description
+        NativeAccessibility.describe(itemView, "${value.title}, ${value.description}", clickLabel = itemView.context.getString(R.string.ui_abrir_playlist_b7a8ce),
+            decorative = listOf(cover, title, description))
+        NativeAccessibility.button(more, "Eliminar playlist ${value.title}")
         more.visibility = if (value.id == "playlist:favorites") View.GONE else View.VISIBLE
         if (value.id == "playlist:favorites") {
             cover.setImageDrawable(HeartDrawable())
@@ -1236,7 +1309,7 @@ private fun makeAlbumCard(context: Context, hybrid: Boolean): LinearLayout {
     }
     root.addView(ImageView(context).apply { tag="albumCover"; layoutParams=LinearLayout.LayoutParams(dp(92), dp(92)); scaleType=ImageView.ScaleType.CENTER_INSIDE })
     val text=LinearLayout(context).apply { orientation=LinearLayout.VERTICAL; gravity=Gravity.CENTER_VERTICAL; layoutParams=LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart=dp(14); marginEnd=dp(12) } }
-    text.addView(TextView(context).apply { tag="albumTitle"; setTextColor(Color.rgb(241,234,217)); textSize=16f; setTypeface(typeface, android.graphics.Typeface.BOLD); maxLines=1; ellipsize=android.text.TextUtils.TruncateAt.END })
+    text.addView(TextView(context).apply { tag="albumTitle"; setTextColor(Color.rgb(241,234,217)); textSize=16f; setTypeface(typeface, android.graphics.Typeface.BOLD); maxLines=2; ellipsize=android.text.TextUtils.TruncateAt.END })
     text.addView(TextView(context).apply { tag="albumDescription"; setTextColor(Color.rgb(179,169,146)); textSize=13f; maxLines=2; ellipsize=android.text.TextUtils.TruncateAt.END })
     root.addView(text)
     root.addView(ImageButton(context).apply {
@@ -1244,7 +1317,7 @@ private fun makeAlbumCard(context: Context, hybrid: Boolean): LinearLayout {
         background = null
         setImageResource(android.R.drawable.ic_menu_delete)
         setColorFilter(Color.WHITE)
-        contentDescription = "Eliminar playlist"
+        contentDescription = context.getString(R.string.ui_eliminar_playlist_12e613)
         layoutParams = LinearLayout.LayoutParams(dp(48), dp(48))
         isFocusable = true
     })
@@ -1264,7 +1337,7 @@ private fun loadCover(context: Context, image: ImageView, url: String?, sizePx: 
 
 
 /**
- * Native, fixed-height picker used by the create-playlist dialog.
+ * Native picker used by the create-playlist dialog, with heights that accommodate large fonts.
  *
  * The old Compose scrolling list was convenient but each fast fling could compose
  * image/checkbox rows while Coil was also starting cover requests. RecyclerView
@@ -1345,6 +1418,7 @@ internal class PlaylistTrackPickerAdapter(
             // listener churn when RecyclerView rebinds a recycled checkbox.
             check.isClickable = false
             check.isFocusable = false
+            check.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         }
 
         fun bind(track: Track, checked: Boolean) {
@@ -1352,6 +1426,7 @@ internal class PlaylistTrackPickerAdapter(
             title.text = track.title
             artist.text = track.artistName
             check.isChecked = checked
+            bindChecked(checked)
 
             cover.dispose()
             cover.setColorFilter(null)
@@ -1365,6 +1440,9 @@ internal class PlaylistTrackPickerAdapter(
 
         fun bindChecked(checked: Boolean) {
             check.isChecked = checked
+            current?.let { NativeAccessibility.describe(itemView, "${it.title}, ${it.artistName}",
+                if (checked) itemView.context.getString(R.string.ui_seleccionada_ec2675) else itemView.context.getString(R.string.ui_sin_seleccionar_31b887), if (checked) itemView.context.getString(R.string.ui_quitar_seleccion_ee7571) else itemView.context.getString(R.string.ui_seleccionar_2b8319), checked,
+                decorative = listOf(cover, title, artist, check)) }
         }
     }
 
@@ -1389,7 +1467,7 @@ private fun makePlaylistPickerRow(context: Context): LinearLayout {
         setPadding(dp(10), dp(6), dp(8), dp(6))
         layoutParams = RecyclerView.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            dp(64)
+            ViewGroup.LayoutParams.WRAP_CONTENT
         )
         background = android.graphics.drawable.GradientDrawable().apply {
             setColor(Color.TRANSPARENT)
@@ -1411,7 +1489,7 @@ private fun makePlaylistPickerRow(context: Context): LinearLayout {
         addView(LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
                 marginStart = dp(11)
                 marginEnd = dp(8)
             }
@@ -1419,7 +1497,7 @@ private fun makePlaylistPickerRow(context: Context): LinearLayout {
                 tag = "pickerTitle"
                 setTextColor(Color.rgb(241, 234, 217))
                 textSize = 14f
-                maxLines = 1
+                maxLines = 2
                 ellipsize = android.text.TextUtils.TruncateAt.END
                 setTypeface(typeface, android.graphics.Typeface.BOLD)
             })
@@ -1427,14 +1505,14 @@ private fun makePlaylistPickerRow(context: Context): LinearLayout {
                 tag = "pickerArtist"
                 setTextColor(Color.rgb(179, 169, 146))
                 textSize = 12f
-                maxLines = 1
+                maxLines = 2
                 ellipsize = android.text.TextUtils.TruncateAt.END
             })
         })
 
         addView(CheckBox(context).apply {
             tag = "pickerCheck"
-            layoutParams = LinearLayout.LayoutParams(dp(42), dp(42))
+            layoutParams = LinearLayout.LayoutParams(dp(48), dp(48))
             gravity = Gravity.CENTER
             buttonTintList = ColorStateList(
                 arrayOf(
@@ -1511,6 +1589,7 @@ internal class SpotifyImportTrackPickerAdapter(
             itemView.setOnClickListener { current?.let(onToggle) }
             check.isClickable = false
             check.isFocusable = false
+            check.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         }
 
         fun bind(track: com.musicvault.app.spotify.SpotifyTrack, checked: Boolean) {
@@ -1518,6 +1597,7 @@ internal class SpotifyImportTrackPickerAdapter(
             title.text = track.title
             artist.text = track.artist
             check.isChecked = checked
+            bindChecked(checked)
             cover.dispose()
             cover.setColorFilter(null)
             cover.scaleType = ImageView.ScaleType.CENTER_CROP
@@ -1525,7 +1605,12 @@ internal class SpotifyImportTrackPickerAdapter(
             else loadCover(itemView.context, cover, track.coverUrl, 104)
         }
 
-        fun bindChecked(checked: Boolean) { check.isChecked = checked }
+        fun bindChecked(checked: Boolean) {
+            check.isChecked = checked
+            current?.let { NativeAccessibility.describe(itemView, "${it.title}, ${it.artist}",
+                if (checked) itemView.context.getString(R.string.ui_seleccionada_ec2675) else itemView.context.getString(R.string.ui_sin_seleccionar_31b887), if (checked) itemView.context.getString(R.string.ui_quitar_seleccion_ee7571) else itemView.context.getString(R.string.ui_seleccionar_2b8319), checked,
+                decorative = listOf(cover, title, artist, check)) }
+        }
     }
 
     private companion object { const val PAYLOAD_CHECK = "spotify-picker-check" }

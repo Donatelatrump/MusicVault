@@ -16,6 +16,9 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
@@ -46,15 +49,12 @@ data class StreamResolution(
 // local to this boundary instead of forcing every Providers caller to opt in.
 @SuppressLint("UnsafeOptInUsageError")
 object Providers {
-    private const val UPDATE_PREFS = "musicvault_provider"
-    private const val LAST_UPDATE_CHECK = "last_ytdlp_update_check"
-    private const val UPDATE_INTERVAL_MS = 24L * 60L * 60L * 1000L
     // User-selected download destination (SAF tree), shared with the settings UI.
     const val SETTINGS_PREFS = "musicvault.settings"
     const val DOWNLOAD_TREE_PREF = "download_tree_uri"
 
     private fun prefs(context: Context) =
-        context.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
+        com.musicvault.app.settings.AppPreferences.prefs(context)
 
     private fun mimeFor(extension: String): String = when (extension) {
         "mp3" -> "audio/mpeg"
@@ -69,6 +69,7 @@ object Providers {
 
     @Volatile
     private var appContext: Context? = null
+    fun isOffline(): Boolean = appContext?.let { prefs(it).getBoolean("offline_mode", false) } ?: false
 
     @Volatile
     private var youtubeInitialized = false
@@ -82,7 +83,8 @@ object Providers {
     // Three concurrent yt-dlp/FFmpeg jobs improve album download throughput
     // while keeping CPU/RAM usage reasonable on typical Android devices.
     private val downloadSlots = Semaphore(Runtime.getRuntime().availableProcessors().coerceIn(1, 3))
-    private val updateLock = Any()
+    private val mutableFailure = MutableStateFlow<ProviderFailure?>(null)
+    val lastFailure = mutableFailure.asStateFlow()
     private val updateStarted = AtomicBoolean(false)
     private val providerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -120,7 +122,7 @@ object Providers {
                 runCatching { ensureYoutubeInitialized(app) }.onFailure { error ->
                     android.util.Log.e("MusicVaultDownload", "yt-dlp initialization failed", error)
                 }
-                runCatching { synchronized(updateLock) { updateYtDlpIfNeeded(app) } }
+                ProviderMaintenance.check(app, force = false)
             }
         }
     }
@@ -139,7 +141,10 @@ object Providers {
         try {
             ensureYoutubeInitialized(context)
             true
+        } catch (error: CancellationException) {
+            throw error
         } catch (_: Exception) {
+            currentCoroutineContext().ensureActive()
             false
         }
     }
@@ -157,6 +162,11 @@ object Providers {
         forceRefresh: Boolean = false
     ): StreamResolution? = withContext(Dispatchers.IO) {
         val context = appContext ?: return@withContext null
+        if (prefs(context).getBoolean("offline_mode", false)) {
+            mutableFailure.value = ProviderFailure(ProviderErrorKind.OFFLINE,
+                "Modo sin conexión activo. Desactívalo en Ajustes para buscar audio en línea.", ProviderAction.RECONNECT, false)
+            return@withContext null
+        }
         val key = streamResolutionKey(cacheKey, sourceUrl, name, author)
         val lock = streamResolutionLocks.getOrPut(key) { Mutex() }
 
@@ -190,6 +200,7 @@ object Providers {
                     direct = try {
                         NewPipeStreamResolver.findYoutubeMatch(name, author)
                     } catch (error: Exception) {
+                        if (error is CancellationException) throw error
                         // runInterruptible/OkHttp may surface cancellation as an
                         // IOException("interrupted"). Never reinterpret a canceled
                         // speculative warmup as a real extractor failure and fall
@@ -214,6 +225,7 @@ object Providers {
                     val newPipe = try {
                         NewPipeStreamResolver.resolveAudio(direct!!, cacheKey)
                     } catch (error: Exception) {
+                        if (error is CancellationException) throw error
                         currentCoroutineContext().ensureActive()
                         android.util.Log.d(
                             "MusicVaultStreamPerf",
@@ -230,6 +242,7 @@ object Providers {
                             "MusicVaultStreamPerf",
                             "resolver=newpipe total=${SystemClock.elapsedRealtime() - totalStarted}ms key=$key"
                         )
+                        mutableFailure.value = null
                         return@withLock newPipe
                     }
                 }
@@ -244,6 +257,7 @@ object Providers {
                 val fast = try {
                     executeStreamRequest(query, fast = true)
                 } catch (error: Exception) {
+                    if (error is CancellationException) throw error
                     currentCoroutineContext().ensureActive()
                     android.util.Log.d("MusicVaultStreamPerf", "fast resolver failed key=$key: ${error.message}")
                     null
@@ -251,6 +265,7 @@ object Providers {
                 val robust = fast ?: try {
                     executeStreamRequest(query, fast = false)
                 } catch (error: Exception) {
+                    if (error is CancellationException) throw error
                     currentCoroutineContext().ensureActive()
                     android.util.Log.d("MusicVaultStreamPerf", "robust resolver failed key=$key: ${error.message}")
                     null
@@ -258,7 +273,9 @@ object Providers {
                 val resolved = robust ?: try {
                     executeStreamUrlOnlyRequest(query)
                 } catch (error: Exception) {
+                    if (error is CancellationException) throw error
                     currentCoroutineContext().ensureActive()
+                    mutableFailure.value = ProviderErrors.classify(error)
                     android.util.Log.w("MusicVaultStreamPerf", "url-only resolver failed key=$key", error)
                     null
                 }
@@ -276,11 +293,15 @@ object Providers {
                         "resolver=ytdlp-${if (fast != null) "fast" else if (robust != null) "fallback" else "url-only"} total=${SystemClock.elapsedRealtime() - totalStarted}ms key=$key"
                     )
                 }
+                mutableFailure.value = if (resolved != null) null else mutableFailure.value ?: ProviderErrors.classify(IllegalStateException("YouTube extractor returned no audio"))
                 resolved
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
+                if (error is CancellationException) throw error
                 currentCoroutineContext().ensureActive()
+                mutableFailure.value = ProviderErrors.classify(error)
+                com.musicvault.app.diagnostics.LocalDiagnostics.record(context, "stream", mutableFailure.value!!.kind.name)
                 android.util.Log.w("MusicVaultStreamPerf", "resolveStream failed key=$key", error)
                 null
             }
@@ -293,7 +314,7 @@ object Providers {
      * for [resolveStream]. The result is stable enough to cache much longer than
      * a signed googlevideo URL.
      */
-    private fun executeYoutubeMatchRequest(name: String, author: String): String? {
+    private suspend fun executeYoutubeMatchRequest(name: String, author: String): String? {
         val search = listOf(name.trim(), author.trim()).filter { it.isNotBlank() }.joinToString(" ")
         if (search.isBlank()) return null
         val request = YoutubeDLRequest("ytsearch1:$search").apply {
@@ -308,7 +329,7 @@ object Providers {
             addOption("--print", "%(id)s\t%(webpage_url)s")
         }
         val processId = "musicvault-match-${System.nanoTime()}"
-        val response = YoutubeDL.getInstance().execute(request, processId, false)
+        val response = runInterruptible { ProviderMaintenance.execute(request, processId) }
         val line = response.out.lineSequence().map { it.trim() }.firstOrNull { it.isNotBlank() } ?: return null
         val fields = line.split('\t', limit = 2)
         val id = fields.getOrNull(0)?.trim().orEmpty()
@@ -329,6 +350,7 @@ object Providers {
     ): Boolean = withContext(Dispatchers.IO) {
         if (youtubeUrl(sourceUrl) != null) return@withContext true
         val context = appContext ?: return@withContext false
+        if (prefs(context).getBoolean("offline_mode", false)) return@withContext false
         val key = streamResolutionKey(cacheKey, sourceUrl, name, author)
         val now = SystemClock.elapsedRealtime()
         youtubeMatches[key]?.takeIf { it.expiresAtMs > now }?.let { return@withContext true }
@@ -346,6 +368,7 @@ object Providers {
                     true
                 } else false
             } catch (error: Exception) {
+                if (error is CancellationException) throw error
                 currentCoroutineContext().ensureActive()
                 android.util.Log.d("MusicVaultStreamPerf", "prewarm-newpipe-match failed key=$key: ${error.message}")
                 false
@@ -353,7 +376,7 @@ object Providers {
         }
     }
 
-    private fun executeStreamRequest(query: String, fast: Boolean): StreamResolution? {
+    private suspend fun executeStreamRequest(query: String, fast: Boolean): StreamResolution? {
         val request = YoutubeDLRequest(query).apply {
             // youtubedl-android 0.18.1 injects its bundled QuickJS runtime
             // with the native absolute path before executing this request.
@@ -370,12 +393,12 @@ object Providers {
             addOption("--print", "%(ext)s\t%(url)s")
         }
         val processId = "musicvault-stream-${System.nanoTime()}"
-        val response = YoutubeDL.getInstance().execute(request, processId, false)
+        val response = runInterruptible { ProviderMaintenance.execute(request, processId) }
         return parseStreamResponse(response.out)
     }
 
     /** Last-resort resolver using yt-dlp's direct get-url output. */
-    private fun executeStreamUrlOnlyRequest(query: String): StreamResolution? {
+    private suspend fun executeStreamUrlOnlyRequest(query: String): StreamResolution? {
         val request = YoutubeDLRequest(query).apply {
             addOption("--no-playlist")
             addOption("--no-warnings")
@@ -387,7 +410,7 @@ object Providers {
             addOption("--get-url")
         }
         val processId = "musicvault-stream-url-${System.nanoTime()}"
-        val response = YoutubeDL.getInstance().execute(request, processId, false)
+        val response = runInterruptible { ProviderMaintenance.execute(request, processId) }
         val url = response.out.lineSequence()
             .map { it.trim() }
             .firstOrNull { it.startsWith("https://") || it.startsWith("http://") }
@@ -454,32 +477,6 @@ object Providers {
     }
 
 
-    /**
-     * Updates the embedded yt-dlp binary at most once every 24 hours.
-     * youtubedl-android bundles a copy, but its README explicitly supports
-     * updating that binary through updateYoutubeDL().
-     */
-    private fun updateYtDlpIfNeeded(context: Context): String? {
-        val prefs = context.getSharedPreferences(UPDATE_PREFS, Context.MODE_PRIVATE)
-        val lastCheck = prefs.getLong(LAST_UPDATE_CHECK, 0L)
-        val now = System.currentTimeMillis()
-
-        if (now - lastCheck < UPDATE_INTERVAL_MS) {
-            return YoutubeDL.getInstance().versionName(context)
-        }
-
-        return try {
-            YoutubeDL.getInstance().updateYoutubeDL(context, UpdateChannel.STABLE)
-            prefs.edit().putLong(LAST_UPDATE_CHECK, now).apply()
-            YoutubeDL.getInstance().versionName(context)
-        } catch (e: Exception) {
-            // Do not make the whole provider unusable just because GitHub's
-            // update endpoint is temporarily unavailable. The bundled binary
-            // remains available as a fallback.
-            null
-        }
-    }
-
     suspend fun download(
         name: String,
         author: String,
@@ -487,7 +484,9 @@ object Providers {
         requestId: String? = null,
         sourceUrl: String? = null,
         quality: DownloadQuality = DownloadQuality.BEST,
-        cacheKey: String? = requestId
+        cacheKey: String? = requestId,
+        albumTitle: String? = null,
+        coverUri: String? = null
     ): ProviderResult = downloadSlots.withPermit {
         withContext(Dispatchers.IO) {
             val context = appContext
@@ -503,7 +502,7 @@ object Providers {
                 // then the same cached bytes are materialized as the offline file.
                 if (quality.reuseStreamingCache) requestId?.let { taskId ->
                     val cachedId = cacheKey ?: taskId
-                    promoteCompleteStreamCache(context, cachedId, name, onProgress)?.let {
+                    promoteCompleteStreamCache(context, cachedId, AudioTags(name, author, albumTitle, coverUri), requestId, onProgress)?.let {
                         return@withContext it
                     }
                     if (StreamingCache.cachedBytes(context, cachedId) > 0L) {
@@ -514,7 +513,7 @@ object Providers {
                             cacheKey = cachedId
                         )
                         if (cancelledRequests.remove(taskId)) {
-                            return@withContext ProviderResult.Error("Descarga cancelada")
+                            throw CancellationException("Descarga cancelada")
                         }
                         if (stream != null) {
                             StreamingCache.rememberFormat(
@@ -539,7 +538,9 @@ object Providers {
                             activeCacheWriters[taskId] = writer
                             try {
                                 writer.cache()
-                            } catch (_: Exception) {
+                            } catch (error: Exception) {
+                                if (error is CancellationException) throw error
+                                currentCoroutineContext().ensureActive()
                                 // A CDN URL can occasionally expire while filling
                                 // the cache. Unless the user cancelled, fall back
                                 // to the existing yt-dlp downloader below.
@@ -547,17 +548,19 @@ object Providers {
                                 activeCacheWriters.remove(taskId, writer)
                             }
                             if (cancelledRequests.remove(taskId)) {
-                                return@withContext ProviderResult.Error("Descarga cancelada")
+                                throw CancellationException("Descarga cancelada")
                             }
-                            promoteCompleteStreamCache(context, cachedId, name, onProgress)?.let {
+                            promoteCompleteStreamCache(context, cachedId, AudioTags(name, author, albumTitle, coverUri), requestId, onProgress)?.let {
                                 return@withContext it
                             }
                         }
                     }
                 }
                 currentCoroutineContext().ensureActive()
+                if (prefs(context).getBoolean("offline_mode", false)) return@withContext ProviderResult.Error(
+                    "Modo sin conexión activo. Tu descarga sigue pendiente hasta desactivarlo.",
+                    ProviderFailure(ProviderErrorKind.OFFLINE, "Modo sin conexión activo", ProviderAction.RECONNECT, false))
                 ensureYoutubeInitialized(context)
-                val ytDlpVersion = runCatching { YoutubeDL.getInstance().versionName(context) }.getOrNull()
 
                 val externalMusic = context.getExternalFilesDir("Music")
                 val rootDir = when {
@@ -585,11 +588,9 @@ object Providers {
 
                 request.addOption("--no-playlist")
                 request.addOption("--no-part")
-                // Keep the provider's native audio container instead of forcing
-                // an FFmpeg MP3 transcode. This removes the long post-download
-                // CPU phase and preserves the source audio without an extra
-                // lossy conversion. Media3 can play the common m4a/opus/webm
-                // audio containers directly.
+                // Fetch native audio first. Tagging remuxes MP3/AAC/M4A; other
+                // containers become AAC/M4A so MP4 metadata and cover art work
+                // consistently in other players and cache promotions.
                 request.addOption("-f", quality.format)
                 request.addOption("--no-mtime")
                 request.addOption("-N", "8")
@@ -598,25 +599,21 @@ object Providers {
                 val processId = "musicvault-$requestKey"
                 if (requestId != null && cancelledRequests.remove(requestId)) {
                     stagingDir.deleteRecursively()
-                    return@withContext ProviderResult.Error("Descarga cancelada")
+                    throw CancellationException("Descarga cancelada")
                 }
                 requestId?.let { activeProcesses[it] = processId }
                 val response = try {
-                    YoutubeDL.getInstance().execute(
-                        request,
-                        processId,
-                        false
-                    ) { progress, _, _ ->
+                    runInterruptible { ProviderMaintenance.execute(request, processId) { progress, _, _ ->
                         // yt-dlp can report 100 before FFmpeg/rename/FileProvider
                         // finalization has finished. Reserve 100 for the actual
                         // saved-file state so the UI never lies to the user.
                         onProgress(progress.coerceIn(0f, 99f).toInt())
-                    }
+                    } }
                 } finally {
                     requestId?.let { activeProcesses.remove(it) }
                 }
 
-                val downloadedFile = stagingDir.listFiles()
+                var downloadedFile = stagingDir.listFiles()
                     ?.filter { it.isFile && it.extension.lowercase(Locale.ROOT) in AUDIO_EXTENSIONS }
                     ?.maxByOrNull(File::lastModified)
 
@@ -625,9 +622,14 @@ object Providers {
                     val detail = response.err.trim().takeIf { it.isNotBlank() }
                         ?: response.out.trim().takeIf { it.isNotBlank() }
                         ?: "El proveedor terminó sin generar un archivo de audio"
-                    return@withContext ProviderResult.Error(
-                        "No se pudo encontrar el audio descargado${ytDlpVersion?.let { " (yt-dlp $it)" } ?: ""}: $detail"
-                    )
+                    val failure = ProviderErrors.classify(IllegalStateException(detail))
+                    return@withContext ProviderResult.Error(failure.message, failure)
+                }
+
+                downloadedFile = AudioTagger.embed(context, downloadedFile, AudioTags(name, author, albumTitle, coverUri), requestId)
+                if (requestId != null && cancelledRequests.remove(requestId)) {
+                    stagingDir.deleteRecursively()
+                    throw CancellationException("Descarga cancelada")
                 }
 
                 // Finalization happens off the UI thread and is deliberately
@@ -665,10 +667,12 @@ object Providers {
                             ?: throw IllegalStateException("La URI persistida no es válida en este dispositivo")
                         val doc = tree.createFile(mime, finalFile.nameWithoutExtension)
                             ?: throw IllegalStateException("No se pudo crear el archivo en la carpeta seleccionada")
-                        val out = context.contentResolver.openOutputStream(doc.uri)
-                            ?: throw IllegalStateException("No se pudo abrir el archivo en la carpeta seleccionada")
-                        out.use { finalFile.inputStream().use { input -> input.copyTo(it) } }
-                        doc
+                        try {
+                            val out = context.contentResolver.openOutputStream(doc.uri)
+                                ?: throw IllegalStateException("No se pudo abrir el archivo en la carpeta seleccionada")
+                            out.use { finalFile.inputStream().use { input -> input.copyTo(it) } }
+                            doc
+                        } catch (failure: Throwable) { doc.delete(); throw failure }
                     }
                     safResult.fold(
                         onSuccess = { document ->
@@ -683,10 +687,7 @@ object Providers {
                         },
                         onFailure = {
                             prefs(context).edit().remove(DOWNLOAD_TREE_PREF).apply()
-                            return@withContext ProviderResult.Error(
-                                "La carpeta de descargas seleccionada ya no es válida. " +
-                                    "Se restauró la carpeta interna de la app. Vuelve a elegir una carpeta."
-                            )
+                            com.musicvault.app.diagnostics.LocalDiagnostics.record(context, "download_destination", "private_folder_fallback")
                         }
                     )
                 }
@@ -702,18 +703,15 @@ object Providers {
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
+                currentCoroutineContext().ensureActive()
                 if (requestId != null && cancelledRequests.remove(requestId)) {
-                    return@withContext ProviderResult.Error("Descarga cancelada")
+                    throw CancellationException("Descarga cancelada")
                 }
-                android.util.Log.e("MusicVaultDownload", "Download failed", e)
-                val version = runCatching { YoutubeDL.getInstance().versionName(context) }.getOrNull()
-                val suffix = version?.let { " (yt-dlp $it)" }.orEmpty()
-                val detail = e.message?.trim().takeIf { !it.isNullOrBlank() }
-                    ?: e.javaClass.simpleName
-                unavailableReason(detail)?.let { return@withContext ProviderResult.Unavailable(it) }
-                ProviderResult.Error(
-                    "No se pudo descargar$suffix. ${detail.take(700)}"
-                )
+                val failure = ProviderErrors.classify(e)
+                mutableFailure.value = failure
+                com.musicvault.app.diagnostics.LocalDiagnostics.record(context, "download", failure.kind.name)
+                if (failure.kind == ProviderErrorKind.UNAVAILABLE) ProviderResult.Unavailable(failure.message)
+                else ProviderResult.Error(failure.message, failure)
             }
         }
     }
@@ -727,72 +725,58 @@ object Providers {
         author = track.artistName,
         onProgress = onProgress,
         requestId = requestId,
-        sourceUrl = track.url ?: track.sourceId?.let { "https://www.youtube.com/watch?v=$it" }
+        sourceUrl = track.url ?: track.sourceId?.let { "https://www.youtube.com/watch?v=$it" },
+        albumTitle = track.albumTitle, coverUri = track.coverUri
     )
 
-    private fun promoteCompleteStreamCache(
-        context: Context,
-        trackId: String,
-        name: String,
-        onProgress: (Int) -> Unit
+    private suspend fun promoteCompleteStreamCache(
+        context: Context, trackId: String, tags: AudioTags, requestId: String?, onProgress: (Int) -> Unit
     ): ProviderResult.Success? {
         if (!StreamingCache.isComplete(context, trackId)) return null
         val format = StreamingCache.cachedFormat(context, trackId)
-        val externalMusic = context.getExternalFilesDir("Music")
-        val rootDir = (externalMusic?.let { File(it, "downloads") } ?: File(context.filesDir, "downloads"))
-            .apply { mkdirs() }
-        val safeTitle = sanitizeFileName(name).ifBlank { "MusicVault Track" }
-        val finalFile = uniqueFile(rootDir, safeTitle, format.extension)
+        val rootDir = (context.getExternalFilesDir("Music")?.let { File(it, "downloads") }
+            ?: File(context.filesDir, "downloads")).apply { mkdirs() }
+        val stage = File(rootDir, ".pending/cache-${System.nanoTime()}").apply { mkdirs() }
+        val raw = File(stage, "audio.${format.extension}")
+        var finalFile: File? = null
         try {
             onProgress(20)
-            if (!StreamingCache.exportComplete(context, trackId, finalFile)) {
-                finalFile.delete()
-                return null
-            }
-            onProgress(85)
-            val treeUri = prefs(context).getString(DOWNLOAD_TREE_PREF, null)
-                ?.takeIf { it.isNotBlank() }?.let(android.net.Uri::parse)
+            if (!StreamingCache.exportComplete(context, trackId, raw)) return null
+            currentCoroutineContext().ensureActive()
+            val tagged = AudioTagger.embed(context, raw, tags, requestId)
+            if (requestId != null && cancelledRequests.remove(requestId)) throw CancellationException("Descarga cancelada")
+            val destination = uniqueFile(rootDir, sanitizeFileName(tags.title).ifBlank { "MusicVault Track" }, tagged.extension)
+            finalFile = destination
+            if (!tagged.renameTo(destination)) tagged.copyTo(destination)
+            val mime = mimeFor(destination.extension)
+            val treeUri = prefs(context).getString(DOWNLOAD_TREE_PREF, null)?.takeIf { it.isNotBlank() }?.let(android.net.Uri::parse)
             if (treeUri != null) {
-                val tree = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, treeUri) ?: run {
-                    finalFile.delete()
-                    return null
-                }
-                val doc = tree.createFile(format.mimeType, finalFile.nameWithoutExtension) ?: run {
-                    finalFile.delete()
-                    return null
-                }
-                val output = context.contentResolver.openOutputStream(doc.uri) ?: run {
-                    finalFile.delete()
-                    return null
-                }
-                output.use { out -> finalFile.inputStream().use { input -> input.copyTo(out) } }
-                finalFile.delete()
+                val tree = checkNotNull(androidx.documentfile.provider.DocumentFile.fromTreeUri(context, treeUri))
+                val doc = checkNotNull(tree.createFile(mime, destination.nameWithoutExtension))
+                try {
+                    checkNotNull(context.contentResolver.openOutputStream(doc.uri)).use { out -> destination.inputStream().use { it.copyTo(out) } }
+                } catch (failure: Throwable) { doc.delete(); throw failure }
+                destination.delete()
                 onProgress(100)
-                return ProviderResult.Success(
-                    audioUri = doc.uri.toString(),
-                    fileName = doc.name ?: "$safeTitle.${format.extension}",
-                    mimeType = format.mimeType,
-                    localPath = doc.uri.toString()
-                )
+                return ProviderResult.Success(doc.uri.toString(), doc.name ?: destination.name, mime, doc.uri.toString())
             }
-
-            val audioUri = FileProvider.getUriForFile(
-                context,
-                "${context.packageName}.fileprovider",
-                finalFile
-            ).toString()
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", destination).toString()
             onProgress(100)
-            return ProviderResult.Success(audioUri, finalFile.name, format.mimeType, finalFile.absolutePath)
-        } catch (_: Exception) {
-            finalFile.delete()
+            return ProviderResult.Success(uri, destination.name, mime, destination.absolutePath)
+        } catch (cancelled: CancellationException) { finalFile?.delete(); throw cancelled }
+        catch (failure: Exception) {
+            currentCoroutineContext().ensureActive()
+            finalFile?.delete()
             return null
         } finally {
-            releaseFileReservation(finalFile)
+            finalFile?.let(::releaseFileReservation)
+            stage.deleteRecursively()
         }
     }
 
     fun cancel(requestId: String) {
         cancelledRequests.add(requestId)
+        AudioTagger.cancel(requestId)
         activeCacheWriters.remove(requestId)?.let { runCatching { it.cancel() } }
         activeProcesses.remove(requestId)?.let { processId ->
             runCatching { YoutubeDL.getInstance().destroyProcessById(processId) }
@@ -850,5 +834,5 @@ sealed interface ProviderResult {
     ) : ProviderResult
 
     data class Unavailable(val reason: String) : ProviderResult
-    data class Error(val message: String) : ProviderResult
+    data class Error(val message: String, val failure: ProviderFailure? = null) : ProviderResult
 }

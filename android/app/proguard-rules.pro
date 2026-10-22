@@ -90,3 +90,6 @@
 # Preserve all classes in the data package for debug
 -keep class com.musicvault.app.data.** { *; }
 -keepclassmembers class com.musicvault.app.data.** { *; }
+
+# Cast instantiates this provider from the string in AndroidManifest metadata.
+-keep class com.musicvault.app.cast.MusicVaultCastOptionsProvider { public <init>(); public *; }

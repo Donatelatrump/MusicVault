@@ -21,6 +21,12 @@ object CoverImageCache {
         if (existing != null) return existing
         return synchronized(this) {
             loader ?: ImageLoader.Builder(context.applicationContext)
+                .okHttpClient {
+                    okhttp3.OkHttpClient.Builder().addNetworkInterceptor { chain ->
+                        if (com.musicvault.app.providers.Providers.isOffline()) throw java.io.IOException("Offline mode")
+                        chain.proceed(chain.request())
+                    }.build()
+                }
                 .memoryCache {
                     val runtime = Runtime.getRuntime()
                     val maxMemory = runtime.maxMemory()

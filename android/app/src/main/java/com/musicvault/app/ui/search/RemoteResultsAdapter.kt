@@ -1,5 +1,7 @@
 package com.musicvault.app.ui.search
 
+import com.musicvault.app.R
+
 import android.content.Context
 import android.graphics.Color
 import android.graphics.Canvas
@@ -25,6 +27,7 @@ import com.musicvault.app.catalog.CatalogAlbum
 import com.musicvault.app.catalog.CatalogPlaylist
 import com.musicvault.app.catalog.CatalogTrack
 import com.musicvault.app.catalog.CoverImageCache
+import com.musicvault.app.ui.NativeAccessibility
 import kotlin.math.roundToInt
 
 sealed interface RemoteResultItem {
@@ -43,7 +46,7 @@ sealed interface RemoteResultItem {
     }
 }
 
-enum class MoreAction { QUEUE, ALBUM, DOWNLOAD, CANCEL_DOWNLOAD, DELETE }
+enum class MoreAction { QUEUE, ALBUM, DOWNLOAD, CANCEL_DOWNLOAD, DELETE, RADIO }
 
 class RemoteResultsAdapter(
     private val onAlbumClick: (CatalogAlbum) -> Unit,
@@ -198,7 +201,7 @@ class RemoteResultsAdapter(
             ViewGroup.LayoutParams.WRAP_CONTENT
         )
     }) {
-        fun bind(value: String) { (itemView as TextView).text = value }
+        fun bind(value: String) { (itemView as TextView).text = value; NativeAccessibility.heading(itemView) }
     }
 
     private class AlbumHolder(
@@ -216,6 +219,8 @@ class RemoteResultsAdapter(
             album = value
             title.text = value.title
             subtitle.text = value.artistName + (value.year?.let { " · $it" } ?: "")
+            NativeAccessibility.describe(itemView, "${value.title}, ${subtitle.text}", clickLabel = itemView.context.getString(R.string.ui_abrir_album_bdccd1),
+                decorative = listOf(image, title, subtitle))
             loadCover(itemView.context, image, value.coverUri, 56)
         }
     }
@@ -238,9 +243,11 @@ class RemoteResultsAdapter(
             playlist = value
             title.text = value.title
             subtitle.text = buildString {
-                append(value.uploaderName.ifBlank { "YouTube" })
+                append(value.uploaderName.ifBlank { itemView.context.getString(R.string.ui_youtube_558865) })
                 if (value.trackCount > 0) append(" · ${value.trackCount} elementos")
             }
+            NativeAccessibility.describe(itemView, "${value.title}, ${subtitle.text}", clickLabel = itemView.context.getString(R.string.ui_abrir_playlist_b7a8ce),
+                decorative = listOf(image, title, subtitle))
             loadCover(itemView.context, image, value.coverUri, 56)
         }
     }
@@ -318,6 +325,25 @@ class RemoteResultsAdapter(
             more.setDotsColor(Color.parseColor("#F1EAD9"))
             play.mode = if (isPlaying && selectedTrackId == localId) StyledPlayButton.Mode.PAUSE else StyledPlayButton.Mode.PLAY
             title.setTextColor(if (isPlaying && selectedTrackId == localId) Color.parseColor("#E0A458") else Color.parseColor("#F1EAD9"))
+            val active = isPlaying && selectedTrackId == localId
+            val playbackLabel = if (active) itemView.context.getString(R.string.ui_pausar_8e0f5e) else itemView.context.getString(R.string.ui_reproducir_d1a188)
+            val state = buildList {
+                if (active) add(itemView.context.getString(R.string.ui_reproduciendo_2d20e2)) else if (selectedTrackId == localId) add(itemView.context.getString(R.string.ui_pausada_144ffd))
+                if (downloaded) add(itemView.context.getString(R.string.ui_descargada_c000cf))
+                if (downloading) add("Descargando ${(p ?: 0).coerceIn(0, 100)} por ciento")
+            }.joinToString(", ")
+            NativeAccessibility.describe(itemView, "${value.title}, ${buildSubtitle(value)}", state,
+                clickLabel = itemView.context.getString(R.string.ui_reproducir_cancion_e47bd3), actions = buildList {
+                    add(NativeAccessibility.Action(playbackLabel) { onPlayToggle(value) })
+                    add(NativeAccessibility.Action(itemView.context.getString(R.string.ui_agregar_a_cola_ca3388)) { onMoreAction(value, MoreAction.QUEUE) })
+                    if (!downloaded) add(NativeAccessibility.Action(if (downloading) itemView.context.getString(R.string.ui_cancelar_descarga_f42d93) else itemView.context.getString(R.string.ui_descargar_8b98cb)) {
+                        if (downloading) onCancel(localId) else onMoreAction(value, MoreAction.DOWNLOAD)
+                    })
+                    add(NativeAccessibility.Action(itemView.context.getString(R.string.ui_iniciar_radio_ec118d)) { onMoreAction(value, MoreAction.RADIO) })
+                    add(NativeAccessibility.Action(itemView.context.getString(R.string.ui_mas_opciones_977c75)) { showMoreMenu(more, value) })
+                }, decorative = listOf(image, title, subtitle, description, progressBar))
+            NativeAccessibility.button(more, "Más opciones para ${value.title}")
+            play.contentDescription = "$playbackLabel ${value.title}"
         }
 
         private fun buildSubtitle(value: CatalogTrack): String {
@@ -325,11 +351,11 @@ class RemoteResultsAdapter(
                 if (value.artistName.isNotBlank()) add(value.artistName)
                 when (value.contentType) {
                     com.musicvault.app.catalog.CatalogContentType.MUSIC -> Unit
-                    com.musicvault.app.catalog.CatalogContentType.PODCAST -> add("Podcast")
-                    com.musicvault.app.catalog.CatalogContentType.ASMR -> add("ASMR")
-                    com.musicvault.app.catalog.CatalogContentType.OTHER -> add("Otro")
+                    com.musicvault.app.catalog.CatalogContentType.PODCAST -> add(itemView.context.getString(R.string.ui_podcast_bafb6e))
+                    com.musicvault.app.catalog.CatalogContentType.ASMR -> add(itemView.context.getString(R.string.ui_asmr_11ddb2))
+                    com.musicvault.app.catalog.CatalogContentType.OTHER -> add(itemView.context.getString(R.string.ui_otro_ada1c1))
                 }
-                add(formatDuration(value.durationMs))
+                add(formatDuration(value.durationMs, itemView.context))
             }.filter { it.isNotBlank() }
             val base = parts.joinToString(" · ")
             val source = value.source?.takeIf { it.isNotBlank() } ?: value.provider
@@ -415,7 +441,11 @@ class RemoteResultsAdapter(
                 textSize = 14f
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(dp(14), 0, dp(14), 0)
-                layoutParams = LinearLayout.LayoutParams(dp(220), dp(48))
+                minimumHeight = dp(48)
+                layoutParams = LinearLayout.LayoutParams(dp(220), ViewGroup.LayoutParams.WRAP_CONTENT)
+                maxLines = 3
+                setPadding(dp(14), dp(10), dp(14), dp(10))
+                NativeAccessibility.button(this, text)
                 isClickable = true
                 setOnClickListener {
                     onMoreAction(track, action)
@@ -423,13 +453,14 @@ class RemoteResultsAdapter(
                 }
             })
         }
-        addItem("Agregar a cola de reproducción", MoreAction.QUEUE)
-        addItem("Agregar a álbum", MoreAction.ALBUM)
+        addItem(context.getString(R.string.ui_agregar_a_cola_de_reproduccion_f8c617), MoreAction.QUEUE)
+        addItem(context.getString(R.string.ui_agregar_a_album_7c4ad3), MoreAction.ALBUM)
+        addItem(context.getString(R.string.ui_iniciar_radio_de_esta_cancion_cc8ac4), MoreAction.RADIO)
         val localId = "${track.provider}:recording:${track.id}"
         when {
-            localId in downloadedIds -> addItem("Eliminar canción descargada", MoreAction.DELETE)
-            progress.containsKey(localId) -> addItem("Cancelar descarga", MoreAction.CANCEL_DOWNLOAD)
-            else -> addItem("Descargar", MoreAction.DOWNLOAD)
+            localId in downloadedIds -> addItem(context.getString(R.string.ui_eliminar_cancion_descargada_8c5b0a), MoreAction.DELETE)
+            progress.containsKey(localId) -> addItem(context.getString(R.string.ui_cancelar_descarga_f42d93), MoreAction.CANCEL_DOWNLOAD)
+            else -> addItem(context.getString(R.string.ui_descargar_8b98cb), MoreAction.DOWNLOAD)
         }
 
         popup = PopupWindow(container, dp(220), ViewGroup.LayoutParams.WRAP_CONTENT, true).apply {
@@ -508,30 +539,26 @@ class RemoteResultsAdapter(
                 gravity = Gravity.CENTER_VERTICAL
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(context, 12) }
             }
-            text.addView(TextView(context).apply { tag = "title"; setTextColor(Color.parseColor("#F1EAD9")); textSize = 15f; maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END; setTypeface(typeface, android.graphics.Typeface.BOLD) })
-            text.addView(TextView(context).apply { tag = "subtitle"; setTextColor(Color.parseColor("#B3A992")); textSize = 12f; maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END })
+            text.addView(TextView(context).apply { tag = "title"; setTextColor(Color.parseColor("#F1EAD9")); textSize = 15f; maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END; setTypeface(typeface, android.graphics.Typeface.BOLD) })
+            text.addView(TextView(context).apply { tag = "subtitle"; setTextColor(Color.parseColor("#B3A992")); textSize = 12f; maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END })
             row.addView(text)
-            row.addView(TextView(context).apply { this.text = "›"; textSize = 28f; setTextColor(Color.parseColor("#7E7666")); gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(dp(context, 28), dp(context, 48)) })
+            row.addView(TextView(context).apply { importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO; this.text = "›"; textSize = 28f; setTextColor(Color.parseColor("#7E7666")); gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(dp(context, 28), dp(context, 48)) })
             return row
         }
 
         private fun makeTrackRow(context: Context): LinearLayout {
             val row = makeRow(context, 84)
-            // Search rows used to be WRAP_CONTENT. A two-line description could
-            // make one row taller than the next, so the centered 48dp play box
-            // appeared to wander vertically down the right edge. Give every song
-            // row one deterministic height and width so all play buttons share the
-            // exact same right-hand column and vertical center.
+            // Keep a consistent minimum while allowing enlarged accessibility fonts to grow the row.
             row.layoutParams = RecyclerView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(context, 84)
+                ViewGroup.LayoutParams.WRAP_CONTENT
             )
             row.minimumHeight = dp(context, 84)
             row.gravity = Gravity.CENTER_VERTICAL
             row.removeViewAt(2)
             val text = row.getChildAt(1) as LinearLayout
             text.layoutParams = (text.layoutParams as LinearLayout.LayoutParams).apply {
-                height = ViewGroup.LayoutParams.MATCH_PARENT
+                height = ViewGroup.LayoutParams.WRAP_CONTENT
                 gravity = Gravity.CENTER_VERTICAL
             }
             text.gravity = Gravity.CENTER_VERTICAL
@@ -550,7 +577,7 @@ class RemoteResultsAdapter(
                 tag = "description"
                 setTextColor(Color.parseColor("#9C927F"))
                 textSize = 11f
-                maxLines = 1
+                maxLines = 2
                 ellipsize = android.text.TextUtils.TruncateAt.END
                 visibility = View.GONE
             })
@@ -582,8 +609,8 @@ class RemoteResultsAdapter(
             return row
         }
 
-        private fun formatDuration(durationMs: Long): String {
-            if (durationMs <= 0L) return "Duración desconocida"
+        private fun formatDuration(durationMs: Long, context: Context): String {
+            if (durationMs <= 0L) return context.getString(R.string.ui_duracion_desconocida_ab5898)
             val totalSeconds = durationMs / 1000L
             val hours = totalSeconds / 3600L
             val minutes = (totalSeconds % 3600L) / 60L

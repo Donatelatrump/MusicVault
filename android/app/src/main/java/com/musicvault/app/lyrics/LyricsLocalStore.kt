@@ -52,7 +52,8 @@ object LyricsLocalStore {
             lrcFile.parentFile?.mkdirs()
             if (lrcFile.exists()) {
                 val existing = lrcFile.readText()
-                if (LyricsProvider.parseStoredLrc(existing) != null) return true
+                val stored = LyricsProvider.parseStoredLrc(existing)
+                if (stored != null && (lyricsOrigin(text) == null || stored.origin == lyricsOrigin(text))) return true
             }
             lrcFile.writeText(text)
             true
@@ -83,7 +84,8 @@ object LyricsLocalStore {
                     input.bufferedReader().use { it.readText() }
                 }
             }.getOrNull()
-            if (current?.let(LyricsProvider::parseStoredLrc) != null) return true
+            val stored = current?.let(LyricsProvider::parseStoredLrc)
+            if (stored != null && (lyricsOrigin(text) == null || stored.origin == lyricsOrigin(text))) return true
             runCatching { existing.delete() }
         }
 
@@ -101,6 +103,8 @@ object LyricsLocalStore {
         val parent = parentFile ?: return File("$base.lrc")
         return File(parent, "$base.lrc")
     }
+
+    private fun lyricsOrigin(text: String): String? = LyricsProvider.parseStoredLrc(text)?.origin
 
     private fun String.baseName(): String {
         val dot = lastIndexOf('.')

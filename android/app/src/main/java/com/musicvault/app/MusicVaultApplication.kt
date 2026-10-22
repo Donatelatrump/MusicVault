@@ -17,6 +17,8 @@ class MusicVaultApplication : Application(), ImageLoaderFactory {
 
     override fun onCreate() {
         super.onCreate()
+        com.musicvault.app.diagnostics.PerformanceDiagnostics.initialize(this)
+        com.musicvault.app.diagnostics.LocalCrashRecorder.install(this)
         Providers.init(this)
         // Open the Media3 cache DB and install/warm the preferred HTTP stack
         // before the user taps Play. This removes first-stream setup work from

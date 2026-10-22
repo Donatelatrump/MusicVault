@@ -1,5 +1,8 @@
 package com.musicvault.app.ui.onboarding
 
+import com.musicvault.app.R
+import androidx.compose.ui.res.stringResource
+
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -258,7 +261,7 @@ private fun GenreSelectionPage(
                 modifier = Modifier.align(Alignment.CenterHorizontally)
             ) {
                 Text(
-                    "Prefiero configurarlo después",
+                    stringResource(R.string.ui_prefiero_configurarlo_despues_fc6294),
                     color = VaultColors.TextTertiary,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Medium
@@ -311,7 +314,7 @@ private fun ArtistSelectionPage(
                 IconButton(onClick = onBack, modifier = Modifier.size(42.dp)) {
                     Icon(
                         Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Volver a géneros",
+                        contentDescription = stringResource(R.string.ui_volver_a_generos_5bf2d6),
                         tint = VaultColors.TextPrimary
                     )
                 }
@@ -343,13 +346,13 @@ private fun ArtistSelectionPage(
                 onValueChange = { artistInput = it.take(48) },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                placeholder = { Text("Buscar o añadir otro artista") },
+                placeholder = { Text(stringResource(R.string.ui_buscar_o_anadir_otro_artista_2d29df)) },
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                 keyboardActions = KeyboardActions(onDone = { addCustomArtist() }),
                 trailingIcon = {
                     if (artistInput.isNotBlank()) {
                         TextButton(onClick = { addCustomArtist() }) {
-                            Text("Añadir", color = VaultColors.Accent, fontWeight = FontWeight.Bold)
+                            Text(stringResource(R.string.ui_anadir_41261d), color = VaultColors.Accent, fontWeight = FontWeight.Bold)
                         }
                     }
                 },
@@ -472,7 +475,7 @@ private fun OnboardingTopBar(step: Int, modifier: Modifier = Modifier) {
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
             Text(
-                "MUSICVAULT",
+                stringResource(R.string.ui_musicvault_87c6d6),
                 color = VaultColors.TextPrimary,
                 fontFamily = VaultFonts.Display,
                 fontWeight = FontWeight.Bold,
@@ -480,7 +483,7 @@ private fun OnboardingTopBar(step: Int, modifier: Modifier = Modifier) {
                 letterSpacing = 0.5.sp
             )
             Text(
-                "PERSONALIZACIÓN INICIAL",
+                stringResource(R.string.ui_personalizacion_inicial_886231),
                 color = VaultColors.TextTertiary,
                 fontFamily = VaultFonts.Mono,
                 fontSize = 8.sp,
@@ -523,7 +526,7 @@ private fun GenreChip(
             verticalAlignment = Alignment.CenterVertically
         ) {
             if (selected) {
-                Text("✓", color = VaultColors.Accent, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Text(stringResource(R.string.ui_label_698a87), color = VaultColors.Accent, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.width(7.dp))
             }
             Text(
@@ -612,7 +615,7 @@ private fun ArtistCard(
                         .background(VaultColors.Accent),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text("✓", color = VaultColors.OnAccent, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                    Text(stringResource(R.string.ui_label_698a87), color = VaultColors.OnAccent, fontSize = 9.sp, fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -769,7 +772,7 @@ fun RecommendationLoadingScreen(
 
             Spacer(Modifier.height(20.dp))
             Text(
-                "PREPARANDO TU BÓVEDA",
+                stringResource(R.string.ui_preparando_tu_boveda_6ed08a),
                 color = VaultColors.Accent,
                 fontFamily = VaultFonts.Mono,
                 fontSize = 10.sp,

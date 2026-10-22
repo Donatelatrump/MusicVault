@@ -35,3 +35,12 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+
+## MusicVault Android y NewPipeExtractor
+
+El código propio de MusicVault Android se distribuye bajo GPL-3.0-or-later.
+NewPipeExtractor 0.26.5: Copyright Team NewPipe, GPL-3.0-or-later.
+El texto GPLv3 se incluye en LICENSE-GPL-3.0.txt.
+Fuente de NewPipeExtractor: https://github.com/TeamNewPipe/NewPipeExtractor/tree/v0.26.5
+Los avisos MIT anteriores se conservan para las adaptaciones de terceros.

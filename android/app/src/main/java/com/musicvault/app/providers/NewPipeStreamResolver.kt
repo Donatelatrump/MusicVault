@@ -3,6 +3,8 @@ package com.musicvault.app.providers
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.withTimeoutOrNull
 import org.schabi.newpipe.extractor.NewPipe
 import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.downloader.Downloader
@@ -91,6 +93,7 @@ internal object NewPipeStreamResolver {
      */
     suspend fun searchYoutube(query: String, limit: Int): List<NewPipeSearchItem> =
         runInterruptible(Dispatchers.IO) {
+            if (Providers.isOffline()) return@runInterruptible emptyList()
             init()
             val clean = query.trim()
             if (clean.isBlank()) return@runInterruptible emptyList()
@@ -136,6 +139,7 @@ internal object NewPipeStreamResolver {
     /** Search YouTube playlists directly; no Deezer/yt-dlp detour. */
     suspend fun searchYoutubePlaylists(query: String, limit: Int): List<NewPipePlaylistSearchItem> =
         runInterruptible(Dispatchers.IO) {
+            if (Providers.isOffline()) return@runInterruptible emptyList()
             init()
             val clean = query.trim()
             if (clean.isBlank()) return@runInterruptible emptyList()
@@ -178,6 +182,7 @@ internal object NewPipeStreamResolver {
     /** Load playlist entries, following NewPipe continuation pages up to a safe UI/import cap. */
     suspend fun loadYoutubePlaylist(url: String, maxItems: Int = 500): NewPipePlaylistContent? =
         runInterruptible(Dispatchers.IO) {
+            if (Providers.isOffline()) return@runInterruptible null
             init()
             val safeMax = maxItems.coerceIn(1, 1000)
             val started = android.os.SystemClock.elapsedRealtime()
@@ -231,6 +236,7 @@ internal object NewPipeStreamResolver {
 
     suspend fun findYoutubeMatch(name: String, author: String): String? =
         runInterruptible(Dispatchers.IO) {
+            if (Providers.isOffline()) return@runInterruptible null
             init()
             val query = listOf(name.trim(), author.trim())
                 .filter { it.isNotBlank() }
@@ -254,6 +260,7 @@ internal object NewPipeStreamResolver {
 
     suspend fun resolveAudio(youtubeUrl: String, captionCacheKey: String? = null): StreamResolution? =
         runInterruptible(Dispatchers.IO) {
+            if (Providers.isOffline()) return@runInterruptible null
             init()
             val started = android.os.SystemClock.elapsedRealtime()
             val info = StreamInfo.getInfo(ServiceList.YouTube, youtubeUrl)
@@ -293,25 +300,75 @@ internal object NewPipeStreamResolver {
         return synchronized(captionCache) { captionCache[key]?.videoId }
     }
 
-    suspend fun cachedYoutubeLyrics(videoId: String?): Lyrics? = runInterruptible(Dispatchers.IO) {
-        val id = videoId?.takeIf { it.isNotBlank() } ?: return@runInterruptible null
-        val cached = synchronized(captionCache) { captionCache[id] } ?: return@runInterruptible null
+    suspend fun cachedYoutubeLyrics(videoId: String?): Lyrics? = withTimeoutOrNull(12_000L) {
+        runInterruptible(Dispatchers.IO) {
+            if (Providers.isOffline()) return@runInterruptible null
+            lyricsDeadlineNanos.set(System.nanoTime() + TimeUnit.SECONDS.toNanos(12))
+            try {
+                fetchYoutubeLyrics(videoId, discover = { id ->
+                    init()
+                    val extractor = ServiceList.YouTube.getStreamExtractor("https://www.youtube.com/watch?v=$id")
+                    extractor.fetchPage()
+                    extractor.subtitlesDefault.mapNotNull(::captionTrack)
+                }, load = ::loadCaptionLyrics)
+            } finally { lyricsDeadlineNanos.remove() }
+        }
+    }
+
+    internal fun fetchYoutubeLyrics(
+        videoId: String?,
+        discover: (String) -> List<CaptionTrack>,
+        load: (CaptionTrack) -> Lyrics?
+    ): Lyrics? {
+        val id = videoId?.takeIf { it.isNotBlank() } ?: return null
+        synchronized(parsedCaptionCache) { parsedCaptionCache[id] }?.let { return it }
+        val cached = synchronized(captionCache) { captionCache[id] } ?: run {
+            if (!Regex("[A-Za-z0-9_-]{11}").matches(id)) return null
+            CachedCaptions(id, discover(id)).also {
+                synchronized(captionCache) { captionCache[id] = it }
+            }
+        }
         synchronized(parsedCaptionCache) { parsedCaptionCache[cached.videoId] }
-            ?.let { return@runInterruptible it }
+            ?.let { return it }
         val tracks = cached.tracks
-        val selected = selectCaptionTrack(tracks) ?: return@runInterruptible null
+        var parsed: Lyrics? = null
+        try {
+            // A broken manual track must not hide working captions on the same video.
+            for (selected in tracks.sortedBy(::captionPriority).distinctBy { it.url }.take(3)) {
+                if (Thread.currentThread().isInterrupted) throw InterruptedException()
+                val loaded = try { load(selected) } catch (error: CancellationException) {
+                    throw error
+                } catch (error: IOException) {
+                    if (Thread.currentThread().isInterrupted) throw InterruptedException()
+                    null
+                } ?: continue
+                if (loaded.isEmpty) continue
+                parsed = loaded
+                synchronized(parsedCaptionCache) { parsedCaptionCache[cached.videoId] = loaded }
+                return loaded
+            }
+            return null
+        } finally {
+            // Failed/expired URLs and empty subtitle lists must be rediscovered on Retry.
+            if (parsed == null) synchronized(captionCache) {
+                captionCache.entries.removeAll { it.value.videoId == cached.videoId }
+            }
+        }
+    }
+
+    private fun loadCaptionLyrics(selected: CaptionTrack): Lyrics? {
         val request = okhttp3.Request.Builder()
             .url(selected.url)
             .header("User-Agent", "MusicVault/1.0 (YouTube captions)")
             .build()
         val call = captionHttpClient.newCall(request)
+        limitLyricsCall(call)
         try {
             call.execute().use { response ->
-                if (!response.isSuccessful) return@runInterruptible null
+                if (!response.isSuccessful) return null
                 val parsed = response.body?.string()?.let(YouTubeCaptionParser::parse)
-                    ?: return@runInterruptible null
-                synchronized(parsedCaptionCache) { parsedCaptionCache[cached.videoId] = parsed }
-                parsed
+                    ?: return null
+                return parsed
             }
         } catch (error: IOException) {
             if (Thread.currentThread().isInterrupted) call.cancel()
@@ -338,9 +395,10 @@ internal object NewPipeStreamResolver {
     }
 
     internal fun selectCaptionTrack(tracks: List<CaptionTrack>): CaptionTrack? =
-        tracks.minByOrNull { track ->
-            (if (track.translated) 2 else 0) + (if (track.autoGenerated) 1 else 0)
-        }
+        tracks.minByOrNull(::captionPriority)
+
+    private fun captionPriority(track: CaptionTrack): Int =
+        (if (track.translated) 2 else 0) + (if (track.autoGenerated) 1 else 0)
 
     private fun selectAudioStream(streams: List<AudioStream>): AudioStream? {
         val direct = streams.filter { stream ->
@@ -435,10 +493,23 @@ private val sharedYouTubeHttpClient = OkHttpClient.Builder()
 // Derived clients share YouTube's connection pool and threads. Captions remain
 // latency-bounded without forcing stream extraction onto the shorter timeout.
 private val captionHttpClient = sharedYouTubeHttpClient.newBuilder()
+    .callTimeout(5, TimeUnit.SECONDS)
     .connectTimeout(4, TimeUnit.SECONDS)
     .readTimeout(6, TimeUnit.SECONDS)
     .writeTimeout(6, TimeUnit.SECONDS)
     .build()
+
+// NewPipe may make several requests to discover captions. Share one deadline
+// across those requests without shortening normal playback extraction.
+private val lyricsDeadlineNanos = ThreadLocal<Long>()
+
+private fun limitLyricsCall(call: okhttp3.Call) {
+    if (Thread.currentThread().isInterrupted) throw java.io.InterruptedIOException("Lyrics canceled")
+    val deadline = lyricsDeadlineNanos.get() ?: return
+    val remaining = deadline - System.nanoTime()
+    if (remaining <= 0L) throw java.io.InterruptedIOException("Lyrics deadline reached")
+    call.timeout().timeout(minOf(remaining, TimeUnit.SECONDS.toNanos(5)), TimeUnit.NANOSECONDS)
+}
 
 /** Minimal NewPipe downloader backed by OkHttp. */
 private class MusicVaultNewPipeDownloader : Downloader() {
@@ -473,6 +544,7 @@ private class MusicVaultNewPipeDownloader : Downloader() {
         }
 
         val call = sharedYouTubeHttpClient.newCall(builder.build())
+        limitLyricsCall(call)
         try {
             call.execute().use { response ->
                 val body = if (method == "HEAD") "" else response.body?.string().orEmpty()
