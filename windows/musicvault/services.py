@@ -23,10 +23,14 @@ from .models import Track, data_dir, parse_lrc, stable_id
 from .songmirror import import_spotify_playlist, import_spotify_track
 from .streaming import (youtube_search as fast_youtube_search, youtube_playlist_search,
                         youtube_playlist_tracks, StreamCancelled)
+from .catalog import SearchScorer, CoverImageCache, MusicBrainzProvider, SearchResult, sort_results
 
 USER_AGENT = "MusicVault/0.9.7 (Windows desktop music library)"
 MUSICBRAINZ_LOCK = threading.Lock()
 MUSICBRAINZ_LAST = 0.0
+
+COVER_CACHE = CoverImageCache()
+MUSICBRAINZ = MusicBrainzProvider()
 
 
 def get_bytes(url, maximum=12 * 1024 * 1024, retries=3):
@@ -162,9 +166,15 @@ class Catalog:
             errors.append(f"Deezer: {exc}")
         if cancel and cancel.is_set():
             return []
-        # Same active sources as Android: Deezer metadata and a separate
-        # YouTube search/refinement job in Window. Keep legacy album readers
-        # below so already saved iTunes albums remain usable.
+        # Ordenar por relevancia usando SearchScorer (mismo modelo que Android)
+        scorer = SearchScorer(query)
+        scored = []
+        for t in tracks:
+            d = t if isinstance(t, dict) else t.to_dict()
+            score = scorer.score(d.get("title", ""), "", d.get("artist", ""))
+            scored.append((score, d))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        tracks = [d for _, d in scored]
         if not tracks and errors:
             stale = self.db.cache_get(key, ttl=None)
             if stale is not None:
@@ -188,6 +198,24 @@ class Catalog:
             errors.append(f"Deezer: {exc}")
         if cancel and cancel.is_set():
             return []
+        # MusicBrainz como proveedor adicional (mismo modelo que Android)
+        try:
+            mb_albums = MUSICBRAINZ.search_albums(query, limit=12)
+            for a in mb_albums:
+                albums.append({"id": a["id"], "title": a["title"], "artist": a["artist"],
+                               "cover": a.get("cover", ""), "source": "musicbrainz"})
+        except Exception as exc:
+            errors.append(f"MusicBrainz: {exc}")
+        if cancel and cancel.is_set():
+            return []
+        # Ordenar por relevancia (título exacto primero, luego contiene, artista, etc.)
+        scorer = SearchScorer(query)
+        scored = []
+        for a in albums:
+            score = scorer.score(a.get("title", ""), "", a.get("artist", ""))
+            scored.append((score, a))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        albums = [a for _, a in scored]
         if not albums and errors:
             stale = self.db.cache_get(key, ttl=None)
             if stale is not None:
@@ -241,6 +269,29 @@ class Catalog:
         while len(self._album_memory) > 12:
             self._album_memory.popitem(last=False)
         return tracks
+
+    def search_artists(self, query, cancel=None):
+        """Busca artistas mediante MusicBrainz (nuevo proveedor, igual que Android)."""
+        query = query.strip()
+        key = "search:artists:v1:" + query.casefold()
+        cached = self.db.cache_get(key)
+        if cached is not None:
+            return cached
+        try:
+            artists = MUSICBRAINZ.search_artists(query, limit=12)
+        except Exception as exc:
+            stale = self.db.cache_get(key, ttl=None)
+            if stale is not None:
+                return stale
+            raise RuntimeError(f"MusicBrainz: {exc}")
+        if cancel and cancel.is_set():
+            return []
+        scorer = SearchScorer(query)
+        scored = [(scorer.score(a.get("title", ""), a.get("subtitle", "")), a) for a in artists]
+        scored.sort(key=lambda x: x[0], reverse=True)
+        artists = [a for _, a in scored]
+        self.db.cache_put(key, artists)
+        return artists
 
     def search_playlists(self, query, cancel=None):
         query = query.strip()
@@ -321,44 +372,11 @@ def youtube_search(query, cancel=None):
 def cover_file(url):
     if not url or not url.startswith(("https://", "http://", "//")):
         return url
-    url = "https:" + url if url.startswith("//") else url.replace("http://", "https://", 1)
-    path = data_dir() / "covers" / (stable_id(url) + ".img")
-    def valid(candidate):
-        reader = QImageReader(str(candidate))
-        reader.setDecideFormatFromContent(True)
-        return not reader.read().isNull()
-
-    if path.exists() and not valid(path):
-        path.unlink()
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        candidates = [url]
-        parsed = urlsplit(url)
-        parts = parsed.path.split('/')
-        if parsed.hostname in ('i.ytimg.com', 'img.youtube.com') and len(parts) >= 4 and parts[1] in ('vi', 'vi_webp'):
-            fallback = f"https://i.ytimg.com/vi/{parts[2]}/hqdefault.jpg"
-            if fallback != url:
-                candidates.append(fallback)
-        last_error = None
-        for candidate in candidates:
-            temporary = None
-            try:
-                body = get_bytes(candidate)
-                with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as file:
-                    file.write(body)
-                    temporary = Path(file.name)
-                if not valid(temporary):
-                    raise ValueError("El proveedor no devolvio una imagen de caratula valida.")
-                os.replace(temporary, path)
-                break
-            except Exception as error:
-                last_error = error
-            finally:
-                if temporary:
-                    temporary.unlink(missing_ok=True)
-        else:
-            raise last_error
-    return str(path)
+    cached = COVER_CACHE.get(url)
+    if cached:
+        return cached
+    downloaded = COVER_CACHE.put(url)
+    return downloaded or url
 
 
 def fetch_lyrics(track, db):
