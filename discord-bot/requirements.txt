@@ -1,0 +1,4 @@
+discord.py[voice]==2.7.1
+python-dotenv==1.2.4
+imageio-ffmpeg==0.7.0
+nodejs-wheel-binaries==24.19.0

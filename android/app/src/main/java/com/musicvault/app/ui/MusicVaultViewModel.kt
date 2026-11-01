@@ -536,17 +536,6 @@ class MusicVaultViewModel(
     private suspend fun fastestLyrics(track: Track, localReference: String?) =
         com.musicvault.app.lyrics.DownloadLyrics.fetch(appContext, track, localReference)
 
-    private var originalLyrics: com.musicvault.app.lyrics.Lyrics? = null
-    fun editorLyrics(): com.musicvault.app.lyrics.Lyrics? = _lyrics.value.let {
-        if (it.plain == null && it.synced.isEmpty()) null
-        else com.musicvault.app.lyrics.Lyrics(plain = it.plain, synced = it.synced)
-    }
-    fun reloadLyrics(track: Track) {
-        lyricsJob?.cancel()
-        lyricsCache.clear()
-        _lyrics.value = LyricsUiState()
-        loadLyrics(track)
-    }
     fun loadLyrics(track: Track) {
         if (_lyrics.value.trackId == track.id && (_lyrics.value.loading ||
                 _lyrics.value.plain != null || _lyrics.value.synced.isNotEmpty())
@@ -561,24 +550,20 @@ class MusicVaultViewModel(
         lyricsJob = viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 com.musicvault.app.lyrics.lyricsAttempt {
-                    val edited = com.musicvault.app.lyrics.LyricsEdits.read(appContext, track.id)
                     val localReference = database.downloadRecordDao().get(track.id)?.path ?: track.audioUri
                     val local = com.musicvault.app.lyrics.lyricsAttempt {
                         LyricsLocalStore.read(appContext, localReference)
                     }?.takeIf {
                         com.musicvault.app.lyrics.DownloadLyrics.canUseStoredLyrics(track.source, it) && !it.isEmpty
                     }
-                    if (edited != null) edited
-                    else if (local != null) LyricsProvider.keepOnlyTrustedSync(local, track.durationMs, exactTimeline = true)
+                    if (local != null) LyricsProvider.keepOnlyTrustedSync(local, track.durationMs, exactTimeline = true)
                     else if (isOnline.value) fastestLyrics(track, localReference) else null
                 }
             }
             // A canceled lookup must never publish over the next song.
             ensureActive()
-            originalLyrics = result
-            val adjusted = result?.let { com.musicvault.app.lyrics.LyricsEdits.applyOffset(appContext, track.id, it) }
-            val state = if (adjusted == null || adjusted.isEmpty) LyricsUiState(trackId = track.id, notFound = true)
-                else LyricsUiState(trackId = track.id, plain = adjusted.plain, synced = adjusted.synced)
+            val state = if (result == null || result.isEmpty) LyricsUiState(trackId = track.id, notFound = true)
+                else LyricsUiState(trackId = track.id, plain = result.plain, synced = result.synced)
             if (lyricsCache.size >= 40) lyricsCache.clear()
             if (!state.notFound) lyricsCache[cacheKey] = state
             _lyrics.value = state

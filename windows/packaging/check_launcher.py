@@ -8,7 +8,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 EXE = ROOT / 'dist/MusicVault-Windows-x64-0.9.7/MusicVault.exe'
 WINE = '/opt/wine-staging/bin/wine'
-environment = dict(os.environ, WINEPREFIX='/tmp/musicvault-windows-wine', WINEDEBUG='-all')
+environment = dict(os.environ, WINEPREFIX=os.environ.get('WINEPREFIX', str(ROOT / 'build/wine-home/prefix')), WINEDEBUG='-all')
 
 with tempfile.TemporaryDirectory(prefix='musicvault-launcher-') as directory:
     def run(*args):
@@ -16,7 +16,7 @@ with tempfile.TemporaryDirectory(prefix='musicvault-launcher-') as directory:
                                 capture_output=True, text=True, timeout=120)
         assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
         return result.stdout
-    assert '0.8.0' in run('--version')
+    assert '0.9.7' in run('--version')
     checks = json.loads(run('--doctor'))
     assert all(checks.values()), checks
     data = 'Z:' + directory.replace('/', '\\') + '\\Biblioteca con acentos á'

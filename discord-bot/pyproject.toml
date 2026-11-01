@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "musicvault-discord"
+version = "0.1.0"
+description = "Bot musical de Discord con el motor de streaming de MusicVault"
+requires-python = ">=3.10"
+dependencies = ["discord.py[voice]>=2.7,<3", "python-dotenv>=1.0,<2", "imageio-ffmpeg>=0.6,<0.8", "nodejs-wheel-binaries>=22,<25"]
+
+[project.scripts]
+musicvault-discord = "musicvault_discord.bot:main"
+
+[tool.setuptools.packages.find]
+include = ["musicvault_discord*"]

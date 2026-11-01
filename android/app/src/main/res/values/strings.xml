@@ -81,7 +81,6 @@
     <string name="ui_descargas_fc3ae1" formatted="false">Descargas</string>
     <string name="ui_desconectar_spotify_547c56" formatted="false">Desconectar Spotify</string>
     <string name="ui_desconectar_y_borrar_cola_bad6da" formatted="false">Desconectar y borrar cola</string>
-    <string name="ui_desfase_en_milisegundos_30000_4332e7" formatted="false">Desfase en milisegundos (±30000)</string>
     <string name="ui_deshacer_retiradas_2886c6" formatted="false">Deshacer retiradas</string>
     <string name="ui_detectar_audio_duplicado_f7c3a5" formatted="false">Detectar audio duplicado</string>
     <string name="ui_diagnostico_guardado_fd5898" formatted="false">Diagnóstico guardado</string>
@@ -90,7 +89,6 @@
     <string name="ui_diseno_de_la_aplicacion_c99ac9" formatted="false">Diseño de la aplicación</string>
     <string name="ui_dispositivo_conectado_870755" formatted="false">Dispositivo conectado</string>
     <string name="ui_duracion_desconocida_ab5898" formatted="false">Duración desconocida</string>
-    <string name="ui_editar_letras_ajustar_desfase_4ed496" formatted="false">Editar letras / ajustar desfase</string>
     <string name="ui_ejecutar_respaldo_programado_cb7db5" formatted="false">Ejecutar respaldo programado</string>
     <string name="ui_el_audio_compartido_se_cuenta_una_sola_vez_ret_9e5c76" formatted="false">El audio compartido se cuenta una sola vez. Retirar audio guarda los archivos privados en la papelera y conserva playlists/favoritos. Libera espacio vaciándola. Archivos ajenos a la app y audio compartido con otras colecciones se conservan.</string>
     <string name="ui_el_audio_retirado_se_eliminara_definitivamente_d67107" formatted="false">El audio retirado se eliminará definitivamente. Las referencias de biblioteca permanecen.</string>
@@ -130,7 +128,6 @@
     <string name="ui_inicio_4f70d8" formatted="false">Inicio</string>
     <string name="ui_inicio_a9dec9" formatted="false">INICIO</string>
     <string name="ui_intervalo_en_dias_130_5bddb4" formatted="false">Intervalo en días (1–30)</string>
-    <string name="ui_introduce_un_desfase_entre_30000_y_30000_b37390" formatted="false">Introduce un desfase entre -30000 y 30000.</string>
     <string name="ui_la_cache_acelera_el_streaming_las_canciones_de_69b689" formatted="false">La caché acelera el streaming. Las canciones descargadas se guardan por separado.</string>
     <string name="ui_la_cola_esta_vacia_8ed5c4" formatted="false">La cola está vacía.</string>
     <string name="ui_la_comprobacion_automatica_ocurre_cada_24_hora_ea62e9" formatted="false">La comprobación automática ocurre cada 24 horas. La actualización espera a que terminen las extracciones y conserva el extractor anterior si falla.</string>
@@ -240,7 +237,6 @@
     <string name="ui_spotify_no_devolvio_canciones_para_esta_playli_942c17" formatted="false">Spotify no devolvió canciones para esta playlist.</string>
     <string name="ui_spotify_no_esta_conectado_cdb07a" formatted="false">Spotify no está conectado</string>
     <string name="ui_temporizador_de_apagado_e3aefc" formatted="false">Temporizador de apagado</string>
-    <string name="ui_texto_o_lrc_mm_ss_xx_un_desfase_positivo_retra_0ea6ad" formatted="false">Texto o LRC [mm:ss.xx]. Un desfase positivo retrasa las líneas.</string>
     <string name="ui_token_de_listenbrainz_08fb14" formatted="false">Token de ListenBrainz</string>
     <string name="ui_tornamesa_vinilo_d11d6f" formatted="false">Tornamesa / Vinilo</string>
     <string name="ui_tu_biblioteca_todavia_esta_vacia_a3c989" formatted="false">Tu biblioteca todavía está vacía</string>

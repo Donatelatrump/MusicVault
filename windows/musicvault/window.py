@@ -80,8 +80,9 @@ class Window(QMainWindow):
         self.download_progress_values = {}
         self.cover_pending, self.cover_cache = {}, OrderedDict()
         self.cover_failures = {}
+        self.cover_attempts = {}
         self.cover_jobs = Jobs(self)
-        self.cover_jobs.pool.setMaxThreadCount(2)
+        self.cover_jobs.pool.setMaxThreadCount(4)
         self.home_signature = None
         self.stream_prepare_job = None
         self.stream_prepare_track_id = None
@@ -437,6 +438,8 @@ class Window(QMainWindow):
             self.schedule_visible_stream_warm(initial=True)
 
     def load_visible_covers(self):
+        if self._quitting:
+            return
         sources = {self.shown_tracks[row].cover for row in self.table.visible_rows()}
         for source in sources - self.track_model.covers.keys():
             if source:
@@ -752,8 +755,8 @@ class Window(QMainWindow):
 
     @staticmethod
     def _youtube_first_query(query):
-        terms = ("asmr", "podcast", "audiolibro", "audiobook", "entrevista", "interview",
-                 "charla", "conferencia", "mix", "lofi", "lo-fi", "live set", "dj set")
+        terms = ("asmr", "podcast", "audiolibro", "audiobook", "entrevista",
+                 "charla", "conferencia", "talk")
         lowered = query.casefold()
         return any(term in lowered for term in terms)
 
@@ -765,9 +768,7 @@ class Window(QMainWindow):
         return clean(track.title), clean(track.artist)
 
     def merge_remote_search_tracks(self, query):
-        ordered = ((self.remote_youtube_tracks + self.remote_catalog_tracks)
-                   if self._youtube_first_query(query)
-                   else (self.remote_catalog_tracks + self.remote_youtube_tracks))
+        ordered = self.remote_youtube_tracks + self.remote_catalog_tracks
         result, seen_ids, seen_names = [], set(), set()
         for track in ordered:
             signature = self._track_signature(track)
@@ -1917,6 +1918,8 @@ class Window(QMainWindow):
                     self.lyrics.scrollToItem(self.lyrics.item(index), QAbstractItemView.ScrollHint.PositionAtCenter)
 
     def load_cover(self, source, callback):
+        if self._quitting:
+            return
         def deliver(path):
             if not self._quitting:
                 try:
@@ -1924,16 +1927,19 @@ class Window(QMainWindow):
                 except RuntimeError:
                     pass  # Qt receiver was removed by a newer search or route.
 
-        if not source or not source.startswith("https://"):
+        if not source or not source.startswith(("https://", "http://", "//")):
             deliver(source)
             return
         if source in self.cover_cache:
             self.cover_cache.move_to_end(source)
             deliver(self.cover_cache[source])
             return
-        if time.monotonic() - self.cover_failures.get(source, -60) < 30:
+        since_failure = time.monotonic() - self.cover_failures.get(source, -60)
+        if since_failure < 1 or (since_failure < 30 and self.cover_attempts.get(source, 0) >= 3):
             deliver("")
             return
+        if since_failure >= 30:
+            self.cover_attempts.pop(source, None)
         if source in self.cover_pending:
             self.cover_pending[source].append(deliver)
             return
@@ -1941,13 +1947,20 @@ class Window(QMainWindow):
 
         def ready(path):
             if path:
+                self.cover_failures.pop(source, None)
+                self.cover_attempts.pop(source, None)
                 self.cover_cache[source] = path
                 while len(self.cover_cache) > 256:
                     self.cover_cache.popitem(last=False)
             else:
                 self.cover_failures[source] = time.monotonic()
+                self.cover_attempts[source] = self.cover_attempts.get(source, 0) + 1
                 if len(self.cover_failures) > 256:
-                    self.cover_failures.pop(next(iter(self.cover_failures)))
+                    expired = next(iter(self.cover_failures))
+                    self.cover_failures.pop(expired)
+                    self.cover_attempts.pop(expired, None)
+                if self.cover_attempts.get(source, 0) < 3:
+                    QTimer.singleShot(1500, self.load_visible_covers)
             for consumer in self.cover_pending.pop(source, []):
                 consumer(path)
 

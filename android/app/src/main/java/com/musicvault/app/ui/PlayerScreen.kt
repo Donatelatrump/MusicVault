@@ -356,8 +356,6 @@ internal fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean
     val position = progress.positionMs.coerceIn(0L, duration)
     var sliderPosition by remember(track.id) { mutableFloatStateOf(position.toFloat()) }
     var sliderDragging by remember(track.id) { mutableStateOf(false) }
-    var showLyricsEditor by remember(track.id) { mutableStateOf(false) }
-    if (showLyricsEditor) com.musicvault.app.lyrics.LyricsEditorDialog(track, vm.editorLyrics(), { showLyricsEditor = false }, { vm.reloadLyrics(track) })
     var showRelated by remember(track.id) { mutableStateOf(false) }
     if (showRelated) RelatedArtistsDialog(track, vm) { showRelated = false }
     var showQueue by remember { mutableStateOf(false) }
@@ -395,7 +393,6 @@ internal fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean
             Spacer(Modifier.width(6.dp))
         }
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
-            TextButton(onClick = { showLyricsEditor = true }) { Text(stringResource(R.string.ui_editar_letras_ajustar_desfase_4ed496)) }
             TextButton(onClick = { vm.startRadio(track) }) { Text(stringResource(R.string.ui_radio_de_esta_cancion_fb5780)) }
             TextButton(onClick = { showRelated = true }) { Text(stringResource(R.string.ui_artistas_relacionados_8ac47b)) }
         }

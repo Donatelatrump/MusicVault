@@ -11,6 +11,18 @@ class LocalAudioScanner(
 ) {
     companion object {
         const val MIN_MUSIC_DURATION_MS = 90_000L
+
+        private val voiceMessageName = Regex("^AUD[-_]?\\d{8}(?:[-_]WA\\d+)?$", RegexOption.IGNORE_CASE)
+
+        internal fun shouldIgnoreFile(fileName: String): Boolean {
+            val base = fileName.substringBeforeLast('.', fileName).trim()
+            if (voiceMessageName.matches(base)) return true
+            // Keep the existing exclusion of numeric/date-only filenames, but
+            // allow song titles containing dates and artists such as Audioslave.
+            return base.isNotEmpty() && base.all {
+                it.isDigit() || it == '-' || it == '_' || it == '.' || it == '/'
+            }
+        }
     }
 
     suspend fun scan(): List<TrackEntity> = withContext(Dispatchers.IO) {
@@ -69,15 +81,4 @@ class LocalAudioScanner(
         result
     }
 
-    private fun shouldIgnoreFile(fileName: String): Boolean {
-        val base = fileName.substringBeforeLast('.', fileName).trim()
-        if (base.startsWith("AUD", ignoreCase = true)) return true
-        if (base.isNotEmpty() && base.all { it.isDigit() || it == '-' || it == '_' || it == '.' || it == '/' }) return true
-        // Common date-only names: YYYY-MM-DD, YYYY_MM_DD, YYYYMMDD, DD-MM-YYYY, etc.
-        val digits = base.filter(Char::isDigit)
-        if (digits.length == 8 && base.count { it.isDigit() } == 8) return true
-        if (Regex("^\\d{4}[-_.]\\d{2}[-_.]\\d{2}$").matches(base)) return true
-        if (Regex("^\\d{2}[-_.]\\d{2}[-_.]\\d{4}$").matches(base)) return true
-        return false
-    }
 }

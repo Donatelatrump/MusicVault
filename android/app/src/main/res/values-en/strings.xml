@@ -81,7 +81,6 @@
     <string name="ui_descargas_fc3ae1" formatted="false">Downloads</string>
     <string name="ui_desconectar_spotify_547c56" formatted="false">Disconnect Spotify</string>
     <string name="ui_desconectar_y_borrar_cola_bad6da" formatted="false">Disconnect and clear queue</string>
-    <string name="ui_desfase_en_milisegundos_30000_4332e7" formatted="false">Offset in milliseconds (±30000)</string>
     <string name="ui_deshacer_retiradas_2886c6" formatted="false">Undo removals</string>
     <string name="ui_detectar_audio_duplicado_f7c3a5" formatted="false">Find duplicate audio</string>
     <string name="ui_diagnostico_guardado_fd5898" formatted="false">Diagnostics saved</string>
@@ -90,7 +89,6 @@
     <string name="ui_diseno_de_la_aplicacion_c99ac9" formatted="false">App layout</string>
     <string name="ui_dispositivo_conectado_870755" formatted="false">Device connected</string>
     <string name="ui_duracion_desconocida_ab5898" formatted="false">Unknown duration</string>
-    <string name="ui_editar_letras_ajustar_desfase_4ed496" formatted="false">Edit lyrics / adjust offset</string>
     <string name="ui_ejecutar_respaldo_programado_cb7db5" formatted="false">Run scheduled backup</string>
     <string name="ui_el_audio_compartido_se_cuenta_una_sola_vez_ret_9e5c76" formatted="false">Shared audio is counted once. Removing audio moves private files to trash and preserves playlists and favorites. Empty trash to free space. Files outside the app and audio shared with other collections are kept.</string>
     <string name="ui_el_audio_retirado_se_eliminara_definitivamente_d67107" formatted="false">Removed audio will be permanently deleted. Library references are kept.</string>
@@ -130,7 +128,6 @@
     <string name="ui_inicio_4f70d8" formatted="false">Home</string>
     <string name="ui_inicio_a9dec9" formatted="false">HOME</string>
     <string name="ui_intervalo_en_dias_130_5bddb4" formatted="false">Interval in days (1–30)</string>
-    <string name="ui_introduce_un_desfase_entre_30000_y_30000_b37390" formatted="false">Enter an offset between -30000 and 30000.</string>
     <string name="ui_la_cache_acelera_el_streaming_las_canciones_de_69b689" formatted="false">Cache speeds up streaming. Downloaded songs are stored separately.</string>
     <string name="ui_la_cola_esta_vacia_8ed5c4" formatted="false">The queue is empty.</string>
     <string name="ui_la_comprobacion_automatica_ocurre_cada_24_hora_ea62e9" formatted="false">Automatic checks run every 24 hours. Updates wait for active extractions to finish and preserve the previous extractor if they fail.</string>
@@ -240,7 +237,6 @@
     <string name="ui_spotify_no_devolvio_canciones_para_esta_playli_942c17" formatted="false">Spotify returned no songs for this playlist.</string>
     <string name="ui_spotify_no_esta_conectado_cdb07a" formatted="false">Spotify is disconnected</string>
     <string name="ui_temporizador_de_apagado_e3aefc" formatted="false">Sleep timer</string>
-    <string name="ui_texto_o_lrc_mm_ss_xx_un_desfase_positivo_retra_0ea6ad" formatted="false">Text or LRC [mm:ss.xx]. A positive offset delays the lines.</string>
     <string name="ui_token_de_listenbrainz_08fb14" formatted="false">ListenBrainz token</string>
     <string name="ui_tornamesa_vinilo_d11d6f" formatted="false">Turntable / Vinyl</string>
     <string name="ui_tu_biblioteca_todavia_esta_vacia_a3c989" formatted="false">Your library is empty</string>

@@ -88,3 +88,23 @@ def test_remote_play_starts_stream_without_queuing_download(app, db, monkeypatch
         assert window.search_playlists_tab.text() == "Playlists"
     finally:
         window.quit_app()
+def test_newpipe_search_precedes_ytdlp(monkeypatch):
+    from musicvault import streaming
+    calls = []
+    def newpipe(mode, query, cancel=None, limit=25):
+        calls.append(mode)
+        return [{"id": "video", "title": "Song", "uploader": "Artist", "thumbnail": "https://i.ytimg.com/vi/video/hqdefault.jpg"}]
+    monkeypatch.setattr(streaming, "_newpipe", newpipe)
+    monkeypatch.setattr(streaming, "_yt_base", lambda: (_ for _ in ()).throw(AssertionError("yt-dlp should be fallback only")))
+    result = streaming.youtube_search("Song")
+    assert calls == ["search"]
+    assert result[0].id == "youtube:video" and result[0].cover
+
+
+def test_newpipe_resolves_stream_before_ytdlp(db, monkeypatch):
+    from musicvault import streaming
+    from musicvault.models import Track
+    monkeypatch.setattr(streaming, "_newpipe", lambda *a, **k: {"url": "https://audio.example.test/direct"})
+    monkeypatch.setattr(streaming, "_yt_base", lambda: (_ for _ in ()).throw(AssertionError("Unexpected yt-dlp")))
+    service = streaming.StreamingService(db)
+    assert service.resolve(Track("youtube:v", "Song", source="youtube", source_id="v")) == "https://audio.example.test/direct"

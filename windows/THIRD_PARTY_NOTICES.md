@@ -38,6 +38,17 @@ SOFTWARE.
 
 ## Componentes del paquete Windows
 
+Desde la actualización correctiva de 0.9.7 se incluye NewPipeExtractor 0.26.5
+(GPL-3.0-or-later), la misma versión de Android, y Eclipse Temurin OpenJDK 17
+(GPLv2 con Classpath Exception). Sus versiones, URLs y SHA256 están en
+`runtime/newpipe/newpipe-dependencies.lock.json`; los avisos de Java se incluyen
+en `runtime/newpipe/jre/legal/` y los avisos propios de las bibliotecas dentro
+de sus JAR. El adaptador está en `packaging/newpipe/MusicVaultNewPipe.java`.
+Fuente NewPipe: https://github.com/TeamNewPipe/NewPipeExtractor/tree/v0.26.5
+Fuente Java: https://github.com/adoptium/temurin17-binaries/releases/tag/jdk-17.0.20.1%2B1
+Se incluyen además jsoup (MIT), nanojson (MIT), Rhino (MPL-2.0), protobuf
+(BSD-3-Clause) y jsr305 (Apache-2.0); consultar los JAR y el lockfile.
+
 El paquete incluye Python (licencia PSF, `python/LICENSE.txt`), PyQt6 y
 PyQt6-WebEngine (GPLv3/comercial), Qt (licencias incluidas en los paquetes),
 Mutagen (GPLv2 o posterior), libmpv y sus dependencias, FFmpeg (build GPLv3),

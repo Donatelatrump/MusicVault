@@ -90,6 +90,7 @@ def main():
     for required in ('libmpv-2.dll', 'node.exe', 'ffmpeg.exe', 'ffprobe.exe', 'yt-dlp.exe'):
         if not (runtime / required).is_file():
             raise RuntimeError('Missing runtime: ' + required)
+    subprocess.run([sys.executable, str(ROOT / 'packaging/build_newpipe.py')], check=True)
     lock_path.write_text(json.dumps(manifest, indent=2) + '\n')
     (STAGE / 'dependencies.lock.json').write_text(lock_path.read_text())
     archive = Path(str(STAGE) + '.zip')

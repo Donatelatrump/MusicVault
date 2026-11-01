@@ -33,6 +33,8 @@ with tempfile.TemporaryDirectory(prefix='musicvault-check-') as folder:
     window = Window(db, player)
     keys = MediaKeys(app, player)
     window.show()
+    assert not window.library_badge.isWindow(), 'Library badge became a separate window'
+    assert window.library_badge not in app.topLevelWidgets()
     player.play_queue([read_track(path)])
     result = []
     def finish():

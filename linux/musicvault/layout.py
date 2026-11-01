@@ -134,6 +134,7 @@ def build_window(self):
     header.addWidget(self.import_loading)
     header.addStretch()
     self.library_badge = label("", "mono")
+    header.addWidget(self.library_badge)
     self.library_badge.hide()
     layout.addLayout(header)
     self.search_tabs = QFrame()

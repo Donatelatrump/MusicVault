@@ -44,3 +44,26 @@ No se probó inicio de sesión real en Spotify, descarga real de YouTube, teclas
 - El lanzador nativo ejecutó `--smoke-test` con código de salida 0 y generó una captura. El diagnóstico `--doctor` encontró todas las dependencias y la ventana normal quedó abierta con la biblioteca copiada desde la carpeta anterior.
 - Prueba real de YouTube: la búsqueda devolvió una pista, yt-dlp obtuvo una URL de audio HTTPS y libmpv reprodujo ese stream con salida de audio nula; la posición avanzó 7,53 segundos. Esto confirma decodificación y avance, no sonido audible en los altavoces.
 - El ZIP `MusicVault-Windows-x64-0.9.7.zip` se generó sin `Data/`. No se probó una sesión real de Spotify ni el sonido audible en un dispositivo físico; YouTube sigue dependiendo de la disponibilidad del servicio.
+
+# Reconstrucción para Beta 1.5 — 2026-11-01
+
+- Lanzador x64 recompilado con MinGW-w64; metadatos corregidos a 0.9.7.
+- `packaging/check_windows.py` y `packaging/check_launcher.py` aprobados con Wine: GUI, Qt/WebEngine, diagnóstico, WAV/libmpv con salida nula, descarga simulada, cancelación y rutas con acentos.
+- Instalador NSIS por usuario; conserva Data al desinstalar.
+- `packaging/check_installer.py` aprobado con Wine: instalación silenciosa, SHA256 de todos los archivos instalados, versión/diagnóstico del EXE instalado, captura de la GUI, desinstalación y conservación de un archivo testigo en Data.
+
+## Corrección de ventana auxiliar — 2026-11-01
+
+- El indicador library_badge se incorpora al layout de cabecera; ya no es un QLabel sin padre que Qt muestra como ventana independiente.
+- Regresión Qt offscreen aprobada al navegar Inicio/Buscar/Biblioteca y redimensionar.
+- Wine: check_windows.py aprobado con comprobación de que el indicador no es una ventana superior; enumeración Win32 confirma una sola ventana de aplicación por proceso.
+
+## Actualizador pequeño y búsqueda/carátulas — 2026-11-01
+
+- Actualizador NSIS de aplicación: descubre la instalación, comprueba procesos de esa carpeta, valida manifiesto/SHA256 y aplica cambios con copia de reversión; no incluye runtimes ni Data.
+- Prueba Wine sobre instalación previa: detecta proceso activo sin modificar archivos, aplicación automática del parche, hashes de payload y runtimes, SQLite de datos conservado, rechazo de payload alterado y arranque de GUI actualizada.
+- Nuevas búsquedas: Deezer y YouTube, como las fuentes activas Android; se conservan lectores de colecciones antiguas. Carátulas con fallback grande/miniatura estable, reparación de imagen inválida y reintentos limitados.
+
+- NewPipeExtractor 0.26.5 idéntico al artefacto fijado en Android, con runtime Java privado Windows. Health, búsqueda y playlists reales ejecutados con Wine: códigos 0; búsqueda 2,94 s y playlists 2,61 s en esta ejecución.
+- Búsqueda general real: 56 resultados; primeras 12 filas YouTube con carátula, sin fallos de imagen pendientes. Orden YouTube→Deezer para todas las consultas. 51 pruebas sin ventanas/MPRIS y 3 regresiones Qt aprobaron en Linux.
+- Cadena de proveedor actualizada: NewPipe resolvió un stream real en 4,94 s; libmpv reprodujo 9,23 s con salida nula y cero errores.

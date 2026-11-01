@@ -12,6 +12,68 @@ from musicvault.window import Window
 from test_player import until
 
 
+def test_general_search_always_lists_youtube_before_deezer(app, db, monkeypatch):
+    from musicvault.models import Track
+    db.set_setting("taste_onboarding_complete", True)
+    db.set_setting("auto_scan", False)
+    player = Player(db, audio_output="null")
+    window = Window(db, player)
+    monkeypatch.setattr(window, "refresh_tracks", lambda: None)
+    monkeypatch.setattr(window, "schedule_visible_stream_warm", lambda: None)
+    try:
+        window.remote_youtube_tracks = [Track("youtube:y", "Song", artist="Artist", source="youtube")]
+        window.remote_catalog_tracks = [Track("deezer:duplicate", "Song", artist="Artist", source="deezer"),
+                                        Track("deezer:d", "Other", source="deezer")]
+        for query in ("ordinary music", "Artist", "asmr"):
+            window.merge_remote_search_tracks(query)
+            assert [t.id for t in window.remote_tracks] == ["youtube:y", "deezer:d"]
+    finally:
+        window.quit_app()
+
+
+def test_visible_cover_retries_after_transient_failure(app, db, monkeypatch, tmp_path):
+    db.set_setting("taste_onboarding_complete", True)
+    db.set_setting("auto_scan", False)
+    calls, results = [], []
+    def fetch(source):
+        calls.append(source)
+        if len(calls) == 1:
+            raise OSError("temporary image failure")
+        return str(tmp_path / "cover.png")
+    monkeypatch.setattr("musicvault.window.cover_file", fetch)
+    player = Player(db, audio_output="null")
+    window = Window(db, player)
+    source = "https://example.test/cover.png"
+    monkeypatch.setattr(window, "load_visible_covers", lambda: window.load_cover(source, results.append))
+    try:
+        window.load_cover(source, results.append)
+        until(lambda: len(results) == 2)
+        assert results == ["", str(tmp_path / "cover.png")]
+        assert len(calls) == 2
+        assert source not in window.cover_failures
+    finally:
+        window.quit_app()
+
+
+def test_library_badge_stays_inside_main_window(app, db):
+    db.set_setting("taste_onboarding_complete", True)
+    db.set_setting("auto_scan", False)
+    player = Player(db, audio_output="null")
+    window = Window(db, player)
+    try:
+        window.show()
+        for width in (1440, 920, 1440):
+            window.resize(width, 800)
+            for route in ("Inicio", "Buscar", "Biblioteca"):
+                window.show_route(route)
+                app.processEvents()
+                assert not window.library_badge.isWindow()
+                assert window.isAncestorOf(window.library_badge)
+                assert window.library_badge not in app.topLevelWidgets()
+    finally:
+        window.quit_app()
+
+
 def test_native_window_navigation_player_collections_and_settings(app, db, audio_file, monkeypatch, tmp_path):
     monkeypatch.setattr("musicvault.window.fetch_lyrics", lambda track, db: {"plain": "", "synced": [(0, "Hello"), (1, "World")]})
     tracks = [replace(read_track(audio_file(f"{i}.wav", 5)), album="Test album", artist="Artist") for i in range(3)]
