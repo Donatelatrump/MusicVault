@@ -1,11 +1,11 @@
 """Resolve the application downloader and its JavaScript runtime for desktop launches."""
-from functools import lru_cache
 from pathlib import Path
 import os
 import re
 import shutil
 import subprocess
 import sys
+from .processes import process_options
 
 
 def downloader_command():
@@ -24,29 +24,41 @@ def downloader_command():
     return [binary]
 
 
-@lru_cache(maxsize=1)
 def javascript_runtime():
-    candidates = []
-    for name in ("deno", "node"):
-        found = shutil.which(name)
-        if found:
-            candidates.append((name, Path(found)))
-    # Desktop entries do not load shell profiles or nvm's PATH.
-    candidates.extend(("deno", path) for path in (Path.home()/".deno/bin/deno", Path("/usr/bin/deno")))
-    candidates.extend(("node", path) for path in sorted((Path.home()/".nvm/versions/node").glob("v*/bin/node"), reverse=True))
-    candidates.append(("node", Path("/usr/bin/node")))
-    for name, path in candidates:
-        if not path.is_file():
-            continue
-        try:
-            result = subprocess.run([str(path), "--version"], capture_output=True, text=True, timeout=3)
-            match = re.search(r"(\d+)\.(\d+)\.(\d+)", result.stdout)
-            version = tuple(map(int, match.groups())) if match else (0, 0, 0)
-            if result.returncode == 0 and version >= ((2, 3, 0) if name == "deno" else (22, 0, 0)):
-                return f"{name}:{path}"
-        except (OSError, subprocess.TimeoutExpired):
-            continue
-    return None
+    _javascript_runtime_cache = None
+
+    def _resolve():
+        candidates = []
+        for name in ("deno", "node"):
+            found = shutil.which(name)
+            if found:
+                candidates.append((name, Path(found)))
+        candidates.extend(("deno", path) for path in (Path.home()/".deno/bin/deno", Path("/usr/bin/deno")))
+        candidates.extend(("node", path) for path in sorted((Path.home()/".nvm/versions/node").glob("v*/bin/node"), reverse=True))
+        candidates.append(("node", Path("/usr/bin/node")))
+        for name, path in candidates:
+            if not path.is_file():
+                continue
+            try:
+                result = subprocess.run([str(path), "--version"], capture_output=True, text=True, timeout=3,
+                                        **process_options())
+                match = re.search(r"(\d+)\.(\d+)\.(\d+)", result.stdout)
+                version = tuple(map(int, match.groups())) if match else (0, 0, 0)
+                if result.returncode == 0 and version >= ((2, 3, 0) if name == "deno" else (22, 0, 0)):
+                    return f"{name}:{path}"
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+        return None
+
+    global _javascript_runtime_cache
+    if _javascript_runtime_cache is None:
+        _javascript_runtime_cache = _resolve()
+    return _javascript_runtime_cache
+
+
+def clear_javascript_runtime_cache():
+    global _javascript_runtime_cache
+    _javascript_runtime_cache = None
 
 
 def youtube_arguments():

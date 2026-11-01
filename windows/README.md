@@ -20,11 +20,15 @@ Al actualizar desde una carpeta portable anterior, cierra la versión antigua y 
 
 `python\python.exe launch.py --data-dir "D:\Mi biblioteca"` permite elegir otro directorio. No copies una biblioteca mientras la app está abierta. Las bases de Linux no se migran automáticamente: importa los archivos de audio en Windows.
 
-La sesión Spotify es un archivo local sensible dentro de Data. Desconecta la cuenta antes de compartir la carpeta. El navegador integrado usa un perfil temporal. No se guarda la contraseña.
+La sesión Spotify se almacena como archivo local sin cifrar dentro de Data. Desconecta la cuenta antes de compartir la carpeta o moverla a otro equipo. El navegador integrado usa un perfil temporal. No se guarda la contraseña.
 
 Las teclas multimedia se registran con Windows para reproducir/pausar, detener y cambiar de pista, también desde la bandeja; otro programa puede tenerlas reservadas. MPRIS/D-Bus es exclusivo de Linux y se sustituye por esta integración. No se incluye panel SMTC en la pantalla de bloqueo.
 
 ## Desarrollo y reconstrucción
+
+También se distribuye `MusicVault-Windows-x64-0.9.7-Setup.exe`, un instalador por usuario para Windows x64. Instala en `%LOCALAPPDATA%\Programs\MusicVault`, crea accesos en el menú Inicio y no requiere permisos de administrador. La desinstalación conserva `Data/` con la biblioteca y las preferencias.
+
+Para generar el instalador después del portable, instala NSIS y ejecuta desde `windows/packaging`: `makensis installer.nsi`. Produce `dist/MusicVault-Windows-x64-0.9.7-Setup.exe`.
 
 El código completo está en `windows/musicvault/`; no depende de `linux/`. El lanzador nativo ya está incluido. Para recompilarlo, instala MinGW-w64 y ejecuta `python packaging/build_launcher.py`.
 
@@ -41,3 +45,13 @@ Referencias: [Python embebido](https://docs.python.org/3.12/using/windows.html#t
 ## Verificación
 
 Consulta `VERIFICATION.md` para los resultados y límites de las pruebas realizadas. El diagnóstico no comprueba sonido audible ni la disponibilidad de servicios externos.
+
+## Actualización pequeña para instalaciones existentes
+
+Este parche incorpora NewPipeExtractor 0.26.5, igual que Android, con un Java privado incluido. Las búsquedas generales muestran YouTube primero y Deezer después; yt-dlp queda como respaldo. No necesitas instalar Java por separado. El paquete de actualización incorpora estas dependencias nuevas y reutiliza las demás.
+
+Descarga `MusicVault-Windows-x64-0.9.7-Update1.exe` y ejecútalo. Detecta la instalación del usuario y aplica el parche sin volver a descargar Python, Qt, libmpv, FFmpeg, Node ni yt-dlp; después abre MusicVault. Si está abierto, usa **Salir** en el icono de la bandeja y pulsa Reintentar. Conserva `Data/`.
+
+Para la versión portable, coloca el actualizador junto a `MusicVault.exe` o selecciona la carpeta del paquete cuando se solicite. Requiere la base Windows 0.9.7 con las mismas dependencias; para versiones anteriores utiliza el instalador completo. El actualizador valida los hashes antes de escribir y conserva originales para revertir si falla la copia.
+
+Reconstrucción: genera primero el portable y ejecuta `python packaging/build_update.py` con NSIS disponible en PATH.

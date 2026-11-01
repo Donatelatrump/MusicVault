@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 import json
+import os
 import re
 import sqlite3
 import time
@@ -56,12 +57,13 @@ class Database:
             ):
                 if name not in track_columns:
                     db.execute(f"ALTER TABLE tracks ADD COLUMN {name} {declaration}")
-            # These columns let SQLite filter large libraries before Python
-            # deserializes the comparatively expensive JSON payloads.
-            for row in db.execute("SELECT id,payload FROM tracks WHERE title='' AND artist='' AND album='' AND path='' "):
-                track = Track.from_dict(json.loads(row["payload"]))
-                db.execute("UPDATE tracks SET title=?,artist=?,album=?,path=? WHERE id=?",
-                           (track.title, track.artist, track.album, track.path, track.id))
+            # Backfill de campos indexados solo si nunca se ha hecho (marcado por setting).
+            if not db.execute("SELECT 1 FROM settings WHERE key='backfill_v1'").fetchone():
+                for row in db.execute("SELECT id,payload FROM tracks WHERE title='' AND artist='' AND album='' AND path='' LIMIT 1000"):
+                    track = Track.from_dict(json.loads(row["payload"]))
+                    db.execute("UPDATE tracks SET title=?,artist=?,album=?,path=? WHERE id=?",
+                               (track.title, track.artist, track.album, track.path, track.id))
+                db.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", ("backfill_v1", "1"))
             db.executescript("""
                 CREATE INDEX IF NOT EXISTS tracks_path ON tracks(path);
                 CREATE INDEX IF NOT EXISTS tracks_artist ON tracks(artist COLLATE NOCASE);
@@ -172,7 +174,7 @@ class Database:
         result=[]
         available = availability if availability is not None else {}
         for item in self.tracks(query, recent=recent, favorites=favorites, artist=artist, album=album):
-            local = available.setdefault(item.id, bool(item.path and Path(item.path).is_file()))
+            local = available.setdefault(item.id, bool(item.path and os.path.exists(item.path)))
             if local:
                 result.append(item)
             elif item.id in records:

@@ -1,6 +1,5 @@
 """Native libmpv playback, two independent decks for crossfade, Qt event polling."""
 import ctypes as C
-import locale
 from pathlib import Path
 import random
 import time
@@ -18,7 +17,6 @@ class EndFile(C.Structure):
 
 class Mpv:
     def __init__(self, audio_output=None):
-        locale.setlocale(locale.LC_NUMERIC, "C")
         from .portable import mpv_library
         library = mpv_library()
         if not library:

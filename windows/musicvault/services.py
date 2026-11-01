@@ -10,11 +10,12 @@ import subprocess
 import tempfile
 import threading
 import time
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
+from PyQt6.QtGui import QImageReader
 
 from .library import read_track
 from .downloader import downloader_command, youtube_arguments, explain_download_error
@@ -28,15 +29,23 @@ MUSICBRAINZ_LOCK = threading.Lock()
 MUSICBRAINZ_LAST = 0.0
 
 
-def get_bytes(url, maximum=12 * 1024 * 1024):
+def get_bytes(url, maximum=12 * 1024 * 1024, retries=3):
     if not url.startswith("https://"):
         raise ValueError("El proveedor requiere HTTPS.")
-    request = Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json,image/*"})
-    with urlopen(request, timeout=8) as response:
-        body = response.read(maximum + 1)
-        if len(body) > maximum:
-            raise ValueError("La respuesta del proveedor excede el tamaño permitido.")
-        return body
+    last_error = None
+    for attempt in range(retries):
+        try:
+            request = Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json,image/*"})
+            with urlopen(request, timeout=8) as response:
+                body = response.read(maximum + 1)
+                if len(body) > maximum:
+                    raise ValueError("La respuesta del proveedor excede el tamaño permitido.")
+                return body
+        except (URLError, HTTPError, OSError, TimeoutError) as exc:
+            last_error = exc
+            if attempt < retries - 1:
+                time.sleep(0.5 * (attempt + 1))
+    raise last_error or ValueError("No se pudo obtener la respuesta del proveedor.")
 
 
 def get_json(url, **params):
@@ -107,8 +116,14 @@ def deezer_track(item, album=None):
     album = album or item.get("album", {})
     return Track("deezer:" + str(item["id"]), item.get("title", "Sin título"),
                  item.get("artist", {}).get("name", "Artista desconocido"), album.get("title", "Sin álbum"),
-                 float(item.get("duration", 0)), cover=album.get("cover_medium", ""),
+                 float(item.get("duration", 0)), cover=deezer_cover(album),
                  source="deezer", source_id=str(item["id"]), url=item.get("link", ""))
+
+
+def deezer_cover(album):
+    """Android uses medium artwork, falling back to the large album image."""
+    return next((album.get(key) for key in ("cover_medium", "cover_big", "cover_xl", "cover")
+                 if album.get(key)), "")
 
 
 def itunes_track(item):
@@ -125,7 +140,7 @@ class Catalog:
 
     def search_tracks(self, query, source="catalog", cancel=None):
         query = query.strip()
-        key = "search:tracks:" + ("youtube:" if source == "youtube" else "") + query.casefold()
+        key = "search:tracks:newpipe-v1:" + ("youtube:" if source == "youtube" else "") + query.casefold()
         cached = self.db.cache_get(key)
         if cached is not None:
             return cached
@@ -147,28 +162,9 @@ class Catalog:
             errors.append(f"Deezer: {exc}")
         if cancel and cancel.is_set():
             return []
-        # A healthy Deezer page is published immediately. Slower providers are
-        # fallbacks only, mirroring the Android fast-search path.
-        if not tracks:
-            try:
-                rows = get_json("https://itunes.apple.com/search", term=query, entity="song", limit=40)
-                tracks = [itunes_track(t).to_dict() for t in rows.get("results", []) if "trackId" in t]
-            except Exception as exc:
-                errors.append(f"iTunes: {exc}")
-        if cancel and cancel.is_set():
-            return []
-        if not tracks:
-            try:
-                rows = get_json("https://musicbrainz.org/ws/2/recording/", query=query, fmt="json", limit=25)
-                for row in rows.get("recordings", []):
-                    releases = row.get("releases", [])
-                    album = releases[0] if releases else {}
-                    artist = "".join(a.get("name", "") + a.get("joinphrase", "") for a in row.get("artist-credit", []) if isinstance(a, dict))
-                    tracks.append(Track("mb:" + row["id"], row["title"], artist or "Artista desconocido",
-                                        album.get("title", "Sin álbum"), row.get("length", 0) / 1000,
-                                        source="musicbrainz", source_id=row["id"]).to_dict())
-            except Exception as exc:
-                errors.append(f"MusicBrainz: {exc}")
+        # Same active sources as Android: Deezer metadata and a separate
+        # YouTube search/refinement job in Window. Keep legacy album readers
+        # below so already saved iTunes albums remain usable.
         if not tracks and errors:
             stale = self.db.cache_get(key, ttl=None)
             if stale is not None:
@@ -179,7 +175,7 @@ class Catalog:
 
     def search_albums(self, query, cancel=None):
         query = query.strip()
-        key = "search:albums:" + query.casefold()
+        key = "search:albums:v2:" + query.casefold()
         cached = self.db.cache_get(key)
         if cached is not None:
             return cached
@@ -187,21 +183,11 @@ class Catalog:
         try:
             rows = get_json("https://api.deezer.com/search/album", q=query, limit=18)
             albums = [{"id": str(a["id"]), "title": a["title"], "artist": a["artist"]["name"],
-                       "cover": a.get("cover_medium", ""), "source": "deezer"} for a in rows.get("data", [])]
+                       "cover": deezer_cover(a), "source": "deezer"} for a in rows.get("data", [])]
         except Exception as exc:
             errors.append(f"Deezer: {exc}")
         if cancel and cancel.is_set():
             return []
-        if not albums:
-            try:
-                rows = get_json("https://itunes.apple.com/search", term=query, entity="album", limit=18)
-                albums = [{"id": str(a["collectionId"]), "title": a.get("collectionName", ""),
-                           "artist": a.get("artistName", ""),
-                           "cover": a.get("artworkUrl100", "").replace("100x100", "600x600"),
-                           "source": "itunes"}
-                          for a in rows.get("results", []) if "collectionId" in a]
-            except Exception as exc:
-                errors.append(f"iTunes: {exc}")
         if not albums and errors:
             stale = self.db.cache_get(key, ttl=None)
             if stale is not None:
@@ -333,16 +319,45 @@ def youtube_search(query, cancel=None):
 
 
 def cover_file(url):
-    if not url or not url.startswith("https://"):
+    if not url or not url.startswith(("https://", "http://", "//")):
         return url
+    url = "https:" + url if url.startswith("//") else url.replace("http://", "https://", 1)
     path = data_dir() / "covers" / (stable_id(url) + ".img")
+    def valid(candidate):
+        reader = QImageReader(str(candidate))
+        reader.setDecideFormatFromContent(True)
+        return not reader.read().isNull()
+
+    if path.exists() and not valid(path):
+        path.unlink()
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
-        body = get_bytes(url)
-        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as file:
-            file.write(body)
-            temporary = file.name
-        os.replace(temporary, path)
+        candidates = [url]
+        parsed = urlsplit(url)
+        parts = parsed.path.split('/')
+        if parsed.hostname in ('i.ytimg.com', 'img.youtube.com') and len(parts) >= 4 and parts[1] in ('vi', 'vi_webp'):
+            fallback = f"https://i.ytimg.com/vi/{parts[2]}/hqdefault.jpg"
+            if fallback != url:
+                candidates.append(fallback)
+        last_error = None
+        for candidate in candidates:
+            temporary = None
+            try:
+                body = get_bytes(candidate)
+                with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as file:
+                    file.write(body)
+                    temporary = Path(file.name)
+                if not valid(temporary):
+                    raise ValueError("El proveedor no devolvio una imagen de caratula valida.")
+                os.replace(temporary, path)
+                break
+            except Exception as error:
+                last_error = error
+            finally:
+                if temporary:
+                    temporary.unlink(missing_ok=True)
+        else:
+            raise last_error
     return str(path)
 
 
@@ -391,6 +406,8 @@ def download(track, destination, cancel, progress):
     if cancel.is_set():
         raise DownloadCancelled()
     target = track.url if track.source == "youtube" and track.url.startswith("https://") else f"ytsearch1:{track.artist} {track.title} audio"
+    if track.source == "youtube" and track.url and not track.url.startswith("https://www.youtube.com/watch?v="):
+        raise ValueError(f"URL de YouTube no válida para la descarga: {track.url}")
     with tempfile.TemporaryDirectory(prefix=".musicvault-", dir=destination) as work:
         command = downloader + runtime + ["--encoding", "utf-8", "--ignore-config", "--cache-dir", str(data_dir()/"cache/yt-dlp"), "--no-playlist", "--no-colors", "--newline", "--progress", "--no-simulate",
                    "--socket-timeout", "15", "--retries", "2", "--extract-audio", "--audio-format", "mp3",

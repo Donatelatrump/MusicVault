@@ -10,14 +10,14 @@ def process_options():
     return {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {"start_new_session": True}
 
 
-def stop_process(process, force=False):
+def stop_process(process, force=False, timeout=30):
     if process.poll() is not None:
         return
     if os.name == "nt":
         # Include FFmpeg children, otherwise cancellation leaves files locked.
         subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                       creationflags=subprocess.CREATE_NO_WINDOW, timeout=10)
+                       creationflags=subprocess.CREATE_NO_WINDOW, timeout=timeout)
     else:
         try:
             os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)

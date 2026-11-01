@@ -97,8 +97,26 @@ def _youtube_track(item):
     )
 
 
+def _newpipe(mode, query, cancel=None, limit=25):
+    from .newpipe import command
+    arguments = command(mode, query, limit)
+    if not arguments:
+        return None
+    try:
+        return json.loads(_run(arguments, cancel, timeout=18 if mode != 'playlist' else 50))
+    except StreamCancelled:
+        raise
+    except Exception:
+        return None  # Same compatibility fallback as Android.
+
+
 def youtube_search(query, cancel=None, limit=20):
     """Line-oriented flat search: materially cheaper than one large single JSON document."""
+    rows = _newpipe('search', query, cancel, min(limit, 25))
+    if rows:
+        tracks = [track for item in rows if (track := _youtube_track(item))]
+        if tracks:
+            return tracks[:limit]
     command = _yt_base() + ["--flat-playlist", "--dump-json", "--skip-download",
                             "--playlist-end", str(limit), "--", f"ytsearch{limit}:{query}"]
     output = _run(command, cancel, timeout=24)
@@ -138,6 +156,12 @@ def _playlist_from_item(item):
 def youtube_playlist_search(query, cancel=None, limit=16):
     """Search playlist entities on YouTube. A direct playlist URL is accepted too."""
     query = query.strip()
+    if 'youtube.com/playlist' not in query:
+        rows = _newpipe('playlists', query, cancel, limit)
+        if rows:
+            playlists = [item for row in rows if (item := _playlist_from_item(row))]
+            if playlists:
+                return playlists[:limit]
     if "youtube.com/playlist" in query or "youtu.be/playlist" in query:
         targets = [query]
     else:
@@ -171,6 +195,11 @@ def youtube_playlist_search(query, cancel=None, limit=16):
 
 def youtube_playlist_tracks(playlist, cancel=None, limit=500):
     url = playlist.get("url") or f"https://www.youtube.com/playlist?list={playlist['id']}"
+    rows = _newpipe('playlist', url, cancel, limit)
+    if rows:
+        tracks = [track for item in rows if (track := _youtube_track(item))]
+        if tracks:
+            return tracks[:limit]
     command = _yt_base() + ["--flat-playlist", "--dump-json", "--skip-download", "--ignore-errors",
                             "--playlist-end", str(limit), "--", url]
     output = _run(command, cancel, timeout=55)
@@ -222,6 +251,11 @@ class StreamingService:
         if isinstance(cached, str) and cached.startswith("http"):
             return cached
         query = " ".join(part for part in (track.artist, track.title, "audio") if part).strip()
+        rows = _newpipe('search', query, cancel, 1)
+        if rows and rows[0].get('url', '').startswith('https://'):
+            match = rows[0]['url']
+            self.db.cache_put(cache_key, match)
+            return match
         command = _yt_base() + ["--flat-playlist", "--skip-download", "--print", "%(webpage_url)s",
                                 "--", "ytsearch1:" + query]
         output = _run(command, cancel, timeout=22)
@@ -236,14 +270,19 @@ class StreamingService:
         if cached:
             return cached
         lock = self._lock(self._key(track))
-        while not lock.acquire(timeout=0.1):
+        if not lock.acquire(timeout=5):
             if cancel is not None and cancel.is_set():
                 raise StreamCancelled()
+            raise RuntimeError("No se pudo adquirir el bloqueo de resolución de stream.")
         try:
             cached = self._url_get(track)
             if cached:
                 return cached
             match = self.match(track, cancel)
+            resolved = _newpipe('resolve', match, cancel)
+            if isinstance(resolved, dict) and resolved.get('url', '').startswith('https://'):
+                self._url_put(track, resolved['url'])
+                return resolved['url']
             common = ["--no-playlist", "--skip-download", "-f", "bestaudio/best", "--get-url"]
             errors = []
             for extra in (["--extractor-args", "youtube:skip=hls,dash"], []):
@@ -345,6 +384,10 @@ class StreamingService:
         return True
 
     def prune(self):
+        with self._guard:
+            self._prune_unlocked()
+
+    def _prune_unlocked(self):
         now = time.time()
         files = []
         for path in self.cache_dir.glob("*"):
