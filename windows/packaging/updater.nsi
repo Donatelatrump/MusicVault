@@ -31,6 +31,33 @@ Function .onInit
       StrCpy $INSTDIR $1
     ${ElseIf} ${FileExists} "$EXEDIR\MusicVault.exe"
       StrCpy $INSTDIR $EXEDIR
+    ${Else}
+      ExpandEnvStrings $1 "%USERPROFILE%"
+      ${If} ${FileExists} "$1\MusicVault.exe"
+        StrCpy $INSTDIR $1
+      ${ElseIf} ${FileExists} "$1\MusicVault-Windows-x64-0.9.7\MusicVault.exe"
+        StrCpy $INSTDIR "$1\MusicVault-Windows-x64-0.9.7"
+      ${ElseIf} ${FileExists} "$1\Desktop\MusicVault.exe"
+        StrCpy $INSTDIR "$1\Desktop"
+      ${ElseIf} ${FileExists} "$1\Desktop\MusicVault-Windows-x64-0.9.7\MusicVault.exe"
+        StrCpy $INSTDIR "$1\Desktop\MusicVault-Windows-x64-0.9.7"
+      ${ElseIf} ${FileExists} "$1\Downloads\MusicVault.exe"
+        StrCpy $INSTDIR "$1\Downloads"
+      ${ElseIf} ${FileExists} "$1\Downloads\MusicVault-Windows-x64-0.9.7\MusicVault.exe"
+        StrCpy $INSTDIR "$1\Downloads\MusicVault-Windows-x64-0.9.7"
+      ${ElseIf} ${FileExists} "$1\Documents\MusicVault.exe"
+        StrCpy $INSTDIR "$1\Documents"
+      ${ElseIf} ${FileExists} "$1\Documents\MusicVault-Windows-x64-0.9.7\MusicVault.exe"
+        StrCpy $INSTDIR "$1\Documents\MusicVault-Windows-x64-0.9.7"
+      ${Else}
+        ${If} ${FileExists} "$LOCALAPPDATA\Programs\MusicVault\MusicVault.exe"
+          StrCpy $INSTDIR "$LOCALAPPDATA\Programs\MusicVault"
+        ${ElseIf} ${FileExists} "$LOCALAPPDATA\MusicVault\MusicVault.exe"
+          StrCpy $INSTDIR "$LOCALAPPDATA\MusicVault"
+        ${ElseIf} ${FileExists} "$PROGRAMFILES\MusicVault\MusicVault.exe"
+          StrCpy $INSTDIR "$PROGRAMFILES\MusicVault"
+        ${EndIf}
+      ${EndIf}
     ${EndIf}
   ${EndIf}
   ${IfNot} ${FileExists} "$INSTDIR\python\python.exe"

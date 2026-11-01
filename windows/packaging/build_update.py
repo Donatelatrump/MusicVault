@@ -28,8 +28,8 @@ def main():
     if not compiler:
         raise RuntimeError('Instala NSIS y agrega makensis al PATH.')
     executable = ROOT / 'dist/MusicVault-Windows-x64-0.9.7-Update1.exe'
-    subprocess.run([compiler, '-V2', '-DPAYLOAD_DIR=' + str(output),
-                    '-DOUTPUT_FILE=' + str(executable), str(ROOT / 'packaging/updater.nsi')], check=True)
+    subprocess.run([compiler, '/V2', '/DPAYLOAD_DIR=' + str(output),
+                    '/DOUTPUT_FILE=' + str(executable), str(ROOT / 'packaging/updater.nsi')], check=True)
     print(executable, executable.stat().st_size, 'bytes')
 
 
