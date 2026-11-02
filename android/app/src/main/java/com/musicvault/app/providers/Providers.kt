@@ -7,29 +7,20 @@ import com.musicvault.app.catalog.CatalogTrack
 import com.musicvault.app.player.StreamingCache
 import com.musicvault.app.download.DownloadQuality
 import androidx.media3.datasource.cache.CacheWriter
-import com.yausername.ffmpeg.FFmpeg
-import com.yausername.youtubedl_android.YoutubeDL
-import com.yausername.youtubedl_android.YoutubeDLRequest
-import com.yausername.youtubedl_android.YoutubeDL.UpdateChannel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import java.io.File
+import java.io.IOException
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicBoolean
 import android.os.SystemClock
 
 /**
@@ -71,22 +62,11 @@ object Providers {
     private var appContext: Context? = null
     fun isOffline(): Boolean = appContext?.let { prefs(it).getBoolean("offline_mode", false) } ?: false
 
-    @Volatile
-    private var youtubeInitialized = false
-
-    @Volatile
-    private var ffmpegInitialized = false
-
     private val activeProcesses = ConcurrentHashMap<String, String>()
     private val activeCacheWriters = ConcurrentHashMap<String, CacheWriter>()
     private val cancelledRequests = ConcurrentHashMap.newKeySet<String>()
-    // Three concurrent yt-dlp/FFmpeg jobs improve album download throughput
-    // while keeping CPU/RAM usage reasonable on typical Android devices.
-    private val downloadSlots = Semaphore(Runtime.getRuntime().availableProcessors().coerceIn(1, 3))
     private val mutableFailure = MutableStateFlow<ProviderFailure?>(null)
     val lastFailure = mutableFailure.asStateFlow()
-    private val updateStarted = AtomicBoolean(false)
-    private val providerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     // Signed googlevideo URLs are expensive to resolve but normally remain valid
     // for much longer than a few minutes. Keep only a short-lived in-memory copy:
@@ -96,14 +76,10 @@ object Providers {
     private data class CachedYoutubeMatch(val url: String, val expiresAtMs: Long)
     private const val STREAM_URL_TTL_MS = 10L * 60L * 1000L
     private const val YOUTUBE_MATCH_TTL_MS = 60L * 60L * 1000L
-    // Conservative fast path: skip only HLS/DASH manifest expansion.
-    // Skipping webpage/config/player requests can remove the formats needed for
-    // playback on some YouTube responses, so those aggressive flags are avoided.
-    private const val STREAM_FAST_EXTRACTOR_ARGS = "youtube:skip=hls,dash"
     private val resolvedStreams = ConcurrentHashMap<String, CachedStream>()
     private val youtubeMatches = ConcurrentHashMap<String, CachedYoutubeMatch>()
     // One resolver per logical track. Search/Home warmup and a user tap join the
-    // same extraction instead of starting two expensive yt-dlp processes.
+    // same extraction instead of starting two expensive extractor processes.
     private val streamResolutionLocks = ConcurrentHashMap<String, Mutex>()
 
     fun init(context: Context) {
@@ -112,42 +88,9 @@ object Providers {
         // NewPipe init is local/cheap (no network); make the primary resolver
         // ready before the first tap. Network extraction remains off-main-thread.
         runCatching { NewPipeStreamResolver.init() }
-        // Initialization and yt-dlp maintenance stay off the UI thread.
-        // Both are also kept outside the critical path of individual downloads.
-        if (updateStarted.compareAndSet(false, true)) {
-            providerScope.launch {
-                // Streaming/search only need yt-dlp. FFmpeg is intentionally not
-                // initialized here: its native startup cost must never sit on the
-                // first-play critical path.
-                runCatching { ensureYoutubeInitialized(app) }.onFailure { error ->
-                    android.util.Log.e("MusicVaultDownload", "yt-dlp initialization failed", error)
-                }
-                ProviderMaintenance.check(app, force = false)
-            }
-        }
     }
 
     fun isInitialized(): Boolean = appContext != null
-
-    /**
-     * Makes the embedded yt-dlp runtime ready for metadata-only operations.
-     * Providers.init() intentionally warms it in the background so app startup
-     * stays fast, but Search can be opened before that coroutine has finished.
-     * In that race, calling YoutubeDL.execute() directly looks like a legitimate
-     * empty result. Search uses this gate before invoking the extractor.
-     */
-    suspend fun ensureYoutubeReady(): Boolean = withContext(Dispatchers.IO) {
-        val context = appContext ?: return@withContext false
-        try {
-            ensureYoutubeInitialized(context)
-            true
-        } catch (error: CancellationException) {
-            throw error
-        } catch (_: Exception) {
-            currentCoroutineContext().ensureActive()
-            false
-        }
-    }
 
     /**
      * Resolve an ephemeral direct audio URL without downloading the media.
@@ -184,9 +127,7 @@ object Providers {
             val totalStarted = SystemClock.elapsedRealtime()
             try {
                 // Primary path: NewPipeExtractor. It avoids the Python + QuickJS
-                // startup measured at ~16-20 s on the test phone. A stable
-                // Deezer->YouTube match is cached separately from the signed
-                // googlevideo URL.
+                // startup measured at ~16-20 s on the test phone.
                 var direct = youtubeUrl(sourceUrl)
                 if (direct == null) {
                     youtubeMatches[key]?.takeIf { it.expiresAtMs > now }?.let { cached ->
@@ -201,10 +142,6 @@ object Providers {
                         NewPipeStreamResolver.findYoutubeMatch(name, author)
                     } catch (error: Exception) {
                         if (error is CancellationException) throw error
-                        // runInterruptible/OkHttp may surface cancellation as an
-                        // IOException("interrupted"). Never reinterpret a canceled
-                        // speculative warmup as a real extractor failure and fall
-                        // through to the 15-20 s yt-dlp compatibility path.
                         currentCoroutineContext().ensureActive()
                         android.util.Log.d(
                             "MusicVaultStreamPerf",
@@ -247,54 +184,9 @@ object Providers {
                     }
                 }
 
-                // Compatibility path: keep the battle-tested yt-dlp resolver.
-                // It is intentionally initialized only when NewPipe cannot give
-                // us a playable direct audio stream.
-                android.util.Log.d("MusicVaultStreamPerf", "resolver=newpipe-fallback-ytdlp key=$key")
-                ensureYoutubeInitialized(context)
-                val query = direct ?: "ytsearch1:${name.trim()} ${author.trim()}".trim()
-                val streamStarted = SystemClock.elapsedRealtime()
-                val fast = try {
-                    executeStreamRequest(query, fast = true)
-                } catch (error: Exception) {
-                    if (error is CancellationException) throw error
-                    currentCoroutineContext().ensureActive()
-                    android.util.Log.d("MusicVaultStreamPerf", "fast resolver failed key=$key: ${error.message}")
-                    null
-                }
-                val robust = fast ?: try {
-                    executeStreamRequest(query, fast = false)
-                } catch (error: Exception) {
-                    if (error is CancellationException) throw error
-                    currentCoroutineContext().ensureActive()
-                    android.util.Log.d("MusicVaultStreamPerf", "robust resolver failed key=$key: ${error.message}")
-                    null
-                }
-                val resolved = robust ?: try {
-                    executeStreamUrlOnlyRequest(query)
-                } catch (error: Exception) {
-                    if (error is CancellationException) throw error
-                    currentCoroutineContext().ensureActive()
-                    mutableFailure.value = ProviderErrors.classify(error)
-                    android.util.Log.w("MusicVaultStreamPerf", "url-only resolver failed key=$key", error)
-                    null
-                }
-                android.util.Log.d(
-                    "MusicVaultStreamPerf",
-                    "ytdlp-stream-url ${SystemClock.elapsedRealtime() - streamStarted}ms key=$key"
-                )
-                if (resolved != null) {
-                    resolvedStreams[key] = CachedStream(
-                        value = resolved,
-                        expiresAtMs = SystemClock.elapsedRealtime() + STREAM_URL_TTL_MS
-                    )
-                    android.util.Log.d(
-                        "MusicVaultStreamPerf",
-                        "resolver=ytdlp-${if (fast != null) "fast" else if (robust != null) "fallback" else "url-only"} total=${SystemClock.elapsedRealtime() - totalStarted}ms key=$key"
-                    )
-                }
-                mutableFailure.value = if (resolved != null) null else mutableFailure.value ?: ProviderErrors.classify(IllegalStateException("YouTube extractor returned no audio"))
-                resolved
+                mutableFailure.value = ProviderErrors.classify(IllegalStateException("YouTube extractor returned no audio"))
+                android.util.Log.w("MusicVaultStreamPerf", "newpipe returned no audio key=$key")
+                null
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
@@ -305,39 +197,6 @@ object Providers {
                 android.util.Log.w("MusicVaultStreamPerf", "resolveStream failed key=$key", error)
                 null
             }
-        }
-    }
-
-    /**
-     * Cheap first stage for non-YouTube metadata. It only asks yt-dlp for the
-     * best matching video id/URL; audio format extraction is deliberately left
-     * for [resolveStream]. The result is stable enough to cache much longer than
-     * a signed googlevideo URL.
-     */
-    private suspend fun executeYoutubeMatchRequest(name: String, author: String): String? {
-        val search = listOf(name.trim(), author.trim()).filter { it.isNotBlank() }.joinToString(" ")
-        if (search.isBlank()) return null
-        val request = YoutubeDLRequest("ytsearch1:$search").apply {
-            addOption("--flat-playlist")
-            addOption("--skip-download")
-            addOption("--ignore-errors")
-            addOption("--no-warnings")
-            addOption("--no-progress")
-            addOption("--extractor-retries", "1")
-            addOption("--retries", "1")
-            addOption("--socket-timeout", "6")
-            addOption("--print", "%(id)s\t%(webpage_url)s")
-        }
-        val processId = "musicvault-match-${System.nanoTime()}"
-        val response = runInterruptible { ProviderMaintenance.execute(request, processId) }
-        val line = response.out.lineSequence().map { it.trim() }.firstOrNull { it.isNotBlank() } ?: return null
-        val fields = line.split('\t', limit = 2)
-        val id = fields.getOrNull(0)?.trim().orEmpty()
-        val url = fields.getOrNull(1)?.trim().orEmpty()
-        return when {
-            youtubeUrl(url) != null -> url
-            id.matches(Regex("[A-Za-z0-9_-]{6,}")) -> "https://www.youtube.com/watch?v=$id"
-            else -> null
         }
     }
 
@@ -376,71 +235,6 @@ object Providers {
         }
     }
 
-    private suspend fun executeStreamRequest(query: String, fast: Boolean): StreamResolution? {
-        val request = YoutubeDLRequest(query).apply {
-            // youtubedl-android 0.18.1 injects its bundled QuickJS runtime
-            // with the native absolute path before executing this request.
-            addOption("--no-playlist")
-            addOption("--no-warnings")
-            addOption("--skip-download")
-            addOption("--extractor-retries", "2")
-            addOption("--retries", "2")
-            addOption("--socket-timeout", "8")
-            addOption("-f", "bestaudio/best")
-            if (fast) addOption("--extractor-args", STREAM_FAST_EXTRACTOR_ARGS)
-            // One parseable line gives us both the native container and the signed
-            // media URL selected by yt-dlp.
-            addOption("--print", "%(ext)s\t%(url)s")
-        }
-        val processId = "musicvault-stream-${System.nanoTime()}"
-        val response = runInterruptible { ProviderMaintenance.execute(request, processId) }
-        return parseStreamResponse(response.out)
-    }
-
-    /** Last-resort resolver using yt-dlp's direct get-url output. */
-    private suspend fun executeStreamUrlOnlyRequest(query: String): StreamResolution? {
-        val request = YoutubeDLRequest(query).apply {
-            addOption("--no-playlist")
-            addOption("--no-warnings")
-            addOption("--skip-download")
-            addOption("--extractor-retries", "2")
-            addOption("--retries", "2")
-            addOption("--socket-timeout", "8")
-            addOption("-f", "bestaudio/best")
-            addOption("--get-url")
-        }
-        val processId = "musicvault-stream-url-${System.nanoTime()}"
-        val response = runInterruptible { ProviderMaintenance.execute(request, processId) }
-        val url = response.out.lineSequence()
-            .map { it.trim() }
-            .firstOrNull { it.startsWith("https://") || it.startsWith("http://") }
-            ?: return null
-        return StreamResolution(url, "m4a", "audio/mp4")
-    }
-
-    private fun parseStreamResponse(raw: String): StreamResolution? {
-        val lines = raw.lineSequence().map { it.trim() }.filter { it.isNotBlank() }.toList()
-        // Do not assume the media record is the last line: yt-dlp/native bridge
-        // can append diagnostics. Pick the last line that actually contains an URL.
-        val line = lines.lastOrNull { line ->
-            line.substringAfter('\t', line).trim().let { url ->
-                url.startsWith("http://") || url.startsWith("https://")
-            }
-        } ?: return null
-        val tab = line.indexOf('\t')
-        val ext: String
-        val url: String
-        if (tab > 0) {
-            ext = line.substring(0, tab).trim().ifBlank { "m4a" }
-            url = line.substring(tab + 1).trim()
-        } else {
-            ext = "m4a"
-            url = line.trim()
-        }
-        if (!url.startsWith("http://") && !url.startsWith("https://")) return null
-        return StreamResolution(url, ext, mimeFor(ext.lowercase(Locale.ROOT)))
-    }
-
     fun invalidateStream(cacheKey: String) {
         val prefix = "id:${cacheKey.trim()}"
         resolvedStreams.remove(prefix)
@@ -457,25 +251,6 @@ object Providers {
             it.startsWith("https://youtu.be/", true)
     }
 
-    private fun ensureYoutubeInitialized(context: Context) {
-        if (youtubeInitialized) return
-        synchronized(this) {
-            if (youtubeInitialized) return
-            YoutubeDL.getInstance().init(context.applicationContext)
-            youtubeInitialized = true
-        }
-    }
-
-    /** Kept separate so FFmpeg native startup never slows Search or Streaming. */
-    private fun ensureFfmpegInitialized(context: Context) {
-        if (ffmpegInitialized) return
-        synchronized(this) {
-            if (ffmpegInitialized) return
-            FFmpeg.getInstance().init(context.applicationContext)
-            ffmpegInitialized = true
-        }
-    }
-
 
     suspend fun download(
         name: String,
@@ -487,7 +262,7 @@ object Providers {
         cacheKey: String? = requestId,
         albumTitle: String? = null,
         coverUri: String? = null
-    ): ProviderResult = downloadSlots.withPermit {
+    ): ProviderResult = {
         withContext(Dispatchers.IO) {
             val context = appContext
                 ?: return@withContext ProviderResult.Error("El proveedor no ha sido inicializado")
@@ -560,73 +335,93 @@ object Providers {
                 if (prefs(context).getBoolean("offline_mode", false)) return@withContext ProviderResult.Error(
                     "Modo sin conexión activo. Tu descarga sigue pendiente hasta desactivarlo.",
                     ProviderFailure(ProviderErrorKind.OFFLINE, "Modo sin conexión activo", ProviderAction.RECONNECT, false))
-                ensureYoutubeInitialized(context)
+
+                val stream = resolveStream(
+                    name = name,
+                    author = author,
+                    sourceUrl = sourceUrl,
+                    cacheKey = cacheKey
+                )
+                if (cancelledRequests.remove(requestId ?: "")) {
+                    throw CancellationException("Descarga cancelada")
+                }
 
                 val externalMusic = context.getExternalFilesDir("Music")
                 val rootDir = when {
                     externalMusic != null -> File(externalMusic, "downloads")
-                    // Fallback al almacenamiento interno de la app. Garantiza que
-                    // las descargas nunca fallen por una SD card ausente o
-                    // desmontada (caso común en API ≤ 28 con SD como external).
                     else -> File(context.filesDir, "downloads")
                 }.apply { mkdirs() }
 
-                // Every request gets its own staging directory. This removes the
-                // race where two simultaneous downloads scan the same directory
-                // and one can accidentally claim the other one's output file.
                 val requestKey = requestId?.replace(Regex("[^A-Za-z0-9_-]"), "_")
                     ?: System.nanoTime().toString()
                 val stagingDir = File(rootDir, ".pending/$requestKey").apply { mkdirs() }
-                val outputTemplate = File(stagingDir, "%(id)s.%(ext)s").absolutePath
-                val directUrl = sourceUrl?.trim()?.takeIf {
-                    it.startsWith("https://www.youtube.com/", true) ||
-                        it.startsWith("https://youtube.com/", true) ||
-                        it.startsWith("https://youtu.be/", true)
-                }
-                val query = directUrl ?: "ytsearch1:${name.trim()} ${author.trim()}".trim()
-                val request = YoutubeDLRequest(query)
 
-                request.addOption("--no-playlist")
-                request.addOption("--no-part")
-                // Fetch native audio first. Tagging remuxes MP3/AAC/M4A; other
-                // containers become AAC/M4A so MP4 metadata and cover art work
-                // consistently in other players and cache promotions.
-                request.addOption("-f", quality.format)
-                request.addOption("--no-mtime")
-                request.addOption("-N", "8")
-                request.addOption("-o", outputTemplate)
-
-                val processId = "musicvault-$requestKey"
                 if (requestId != null && cancelledRequests.remove(requestId)) {
                     stagingDir.deleteRecursively()
                     throw CancellationException("Descarga cancelada")
                 }
-                requestId?.let { activeProcesses[it] = processId }
-                val response = try {
-                    runInterruptible { ProviderMaintenance.execute(request, processId) { progress, _, _ ->
-                        // yt-dlp can report 100 before FFmpeg/rename/FileProvider
-                        // finalization has finished. Reserve 100 for the actual
-                        // saved-file state so the UI never lies to the user.
-                        onProgress(progress.coerceIn(0f, 99f).toInt())
-                    } }
+
+                val streamUrl = stream ?: run {
+                    stagingDir.deleteRecursively()
+                    return@withContext ProviderResult.Error(
+                        "No se pudo obtener el stream de audio de YouTube",
+                        ProviderFailure(ProviderErrorKind.UNAVAILABLE, "NewPipe extractor returned no audio", ProviderAction.RETRY, false))
+                }
+
+                val tmpFile = File(stagingDir, "audio.${stream.extension}")
+                val http = okhttp3.OkHttpClient.Builder()
+                    .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                    .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+                    .followRedirects(true)
+                    .followSslRedirects(true)
+                    .retryOnConnectionFailure(true)
+                    .build()
+                val request = okhttp3.Request.Builder().url(streamUrl).build()
+                val call = http.newCall(request)
+                activeProcesses[requestId ?: "no-id"] = call
+                try {
+                    call.execute().use { response ->
+                        if (!response.isSuccessful) {
+                            stagingDir.deleteRecursively()
+                            val detail = "HTTP ${response.code} ${response.message}"
+                            return@withContext ProviderResult.Error(detail, ProviderErrors.classify(IOException(detail)))
+                        }
+                        val body = response.body ?: run {
+                            stagingDir.deleteRecursively()
+                            return@withContext ProviderResult.Error(
+                                "Sin cuerpo de respuesta del stream",
+                                ProviderFailure(ProviderErrorKind.UNAVAILABLE, "Empty stream body", ProviderAction.RETRY, false))
+                        }
+                        val total = response.headers["Content-Length"]?.toLongOrNull() ?: 0L
+                        var bytesRead = 0L
+                        body.byteStream().use { input ->
+                            tmpFile.outputStream().use { output ->
+                                val buffer = ByteArray(8192)
+                                var read: Int
+                                while ({ read = input.read(buffer); read >= 0 }()) {
+                                    if (Thread.currentThread().isInterrupted) throw InterruptedException()
+                                    output.write(buffer, 0, read)
+                                    bytesRead += read
+                                    if (total > 0L) {
+                                        val pct = ((bytesRead * 94L) / total).coerceIn(1L, 94L).toInt()
+                                        onProgress(pct)
+                                    }
+                                }
+                            }
+                        }
+                    }
                 } finally {
                     requestId?.let { activeProcesses.remove(it) }
                 }
 
-                var downloadedFile = stagingDir.listFiles()
-                    ?.filter { it.isFile && it.extension.lowercase(Locale.ROOT) in AUDIO_EXTENSIONS }
-                    ?.maxByOrNull(File::lastModified)
-
-                if (downloadedFile == null || !downloadedFile.exists() || downloadedFile.length() == 0L) {
+                if (tmpFile.length() == 0L) {
                     stagingDir.deleteRecursively()
-                    val detail = response.err.trim().takeIf { it.isNotBlank() }
-                        ?: response.out.trim().takeIf { it.isNotBlank() }
-                        ?: "El proveedor terminó sin generar un archivo de audio"
-                    val failure = ProviderErrors.classify(IllegalStateException(detail))
-                    return@withContext ProviderResult.Error(failure.message, failure)
+                    return@withContext ProviderResult.Error(
+                        "El archivo descargado está vacío",
+                        ProviderFailure(ProviderErrorKind.UNAVAILABLE, "Empty download", ProviderAction.RETRY, false))
                 }
 
-                downloadedFile = AudioTagger.embed(context, downloadedFile, AudioTags(name, author, albumTitle, coverUri), requestId)
+                val tagged = AudioTagger.embed(context, tmpFile, AudioTags(name, author, albumTitle, coverUri), requestId)
                 if (requestId != null && cancelledRequests.remove(requestId)) {
                     stagingDir.deleteRecursively()
                     throw CancellationException("Descarga cancelada")
@@ -634,14 +429,14 @@ object Providers {
 
                 // Finalization happens off the UI thread and is deliberately
                 // excluded from the progress 0..99 range.
-                val extension = downloadedFile.extension.ifBlank { "mp3" }.lowercase(Locale.ROOT)
+                val extension = tagged.extension.ifBlank { "mp3" }.lowercase(Locale.ROOT)
                 val safeTitle = sanitizeFileName(name).ifBlank { "MusicVault Track" }
                 val finalFile = uniqueFile(rootDir, safeTitle, extension)
 
                 try {
-                    if (!downloadedFile.renameTo(finalFile)) {
-                        downloadedFile.copyTo(finalFile, overwrite = false)
-                        if (!downloadedFile.delete()) {
+                    if (!tagged.renameTo(finalFile)) {
+                        tagged.copyTo(finalFile, overwrite = false)
+                        if (!tagged.delete()) {
                             stagingDir.deleteRecursively()
                             return@withContext ProviderResult.Error(
                                 "El audio se descargó, pero no se pudo finalizar el archivo \"${finalFile.name}\""
@@ -778,8 +573,8 @@ object Providers {
         cancelledRequests.add(requestId)
         AudioTagger.cancel(requestId)
         activeCacheWriters.remove(requestId)?.let { runCatching { it.cancel() } }
-        activeProcesses.remove(requestId)?.let { processId ->
-            runCatching { YoutubeDL.getInstance().destroyProcessById(processId) }
+        activeProcesses.remove(requestId)?.let { call ->
+            runCatching { call.cancel() }
         }
     }
 

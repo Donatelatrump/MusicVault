@@ -333,8 +333,28 @@ internal fun SearchScreen(
             Modifier.fillMaxWidth(),
             leadingIcon = { Icon(Icons.Default.Search, null, tint = VaultColors.TextSecondary) },
             trailingIcon = {
-                IconButton(onClick = ::submitCurrentSearch, enabled = searchText.isNotBlank()) {
-                    Icon(Icons.AutoMirrored.Filled.Send, stringResource(R.string.ui_buscar_a62405), tint = VaultColors.Accent)
+                Row(
+                    Modifier
+                        .padding(horizontal = 8.dp)
+                        .widthIn(min = 48.dp),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    if (searchText.isNotBlank()) {
+                        IconButton(
+                            onClick = { searchText = ""; submittedQuery = "" },
+                            enabled = true
+                        ) {
+                            Icon(
+                                Icons.Default.Close,
+                                stringResource(R.string.ui_cerrar_4b0816),
+                                tint = VaultColors.TextSecondary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                    IconButton(onClick = ::submitCurrentSearch, enabled = searchText.isNotBlank()) {
+                        Icon(Icons.AutoMirrored.Filled.Send, stringResource(R.string.ui_buscar_a62405), tint = VaultColors.Accent)
+                    }
                 }
             },
             singleLine = true,

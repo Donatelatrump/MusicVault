@@ -3,7 +3,6 @@ package com.musicvault.app.diagnostics
 import android.content.Context
 import android.net.Uri
 import android.os.Build
-import com.musicvault.app.providers.ProviderMaintenance
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -37,11 +36,10 @@ object LocalDiagnostics {
             val file = File(context.noBackupFilesDir, "diagnostic-events.json")
             if (file.isFile) runCatching { JSONArray(file.readText()) }.getOrDefault(JSONArray()) else JSONArray()
         }
-        val update = ProviderMaintenance.state.value
         val report = JSONObject().put("format", 1).put("application", "MusicVault")
             .put("version", context.packageManager.getPackageInfo(context.packageName, 0).versionName)
-            .put("androidApi", Build.VERSION.SDK_INT).put("extractor", update.version ?: "bundled")
-            .put("extractorLastCheck", update.lastCheck).put("events", events)
+            .put("androidApi", Build.VERSION.SDK_INT).put("extractor", "newpipe")
+            .put("extractorLastCheck", 0L).put("events", events)
             .put("frameAggregates", PerformanceDiagnostics.snapshot())
             .put("lastCrash", LocalCrashRecorder.snapshot(context) ?: JSONObject.NULL)
             .put("privacy", "No cookies, signed URLs, account identifiers, library titles or file paths are collected")

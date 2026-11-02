@@ -19,7 +19,6 @@ import androidx.compose.ui.semantics.contentDescription
 import com.musicvault.app.diagnostics.LocalDiagnostics
 import com.musicvault.app.diagnostics.PerformanceDiagnostics
 import com.musicvault.app.diagnostics.DiagnosticsScreen
-import com.musicvault.app.providers.ProviderMaintenance
 import com.musicvault.app.providers.Providers
 import com.musicvault.app.scrobble.ListenBrainz
 import kotlinx.coroutines.CancellationException
@@ -31,7 +30,6 @@ import kotlinx.coroutines.withContext
 fun ProviderToolsScreen(onClose: () -> Unit) {
     val context = LocalContext.current.applicationContext
     val scope = rememberCoroutineScope()
-    val update by ProviderMaintenance.state.collectAsState()
     val scrobble by ListenBrainz.state.collectAsState()
     val captureFrames by PerformanceDiagnostics.enabled.collectAsState()
     var token by remember { mutableStateOf("") }
@@ -48,13 +46,8 @@ fun ProviderToolsScreen(onClose: () -> Unit) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         TextButton(onClick = onClose) { Text(context.getString(R.string.ui_atras_0e715a)) }
         Text(context.getString(R.string.ui_proveedores_y_privacidad_d73ba0), style = MaterialTheme.typography.headlineSmall)
-        Text(context.getString(R.string.ui_extractor_yt_dlp_de6407), style = MaterialTheme.typography.titleMedium)
-        Text("Versión: ${update.version ?: "incluida en la aplicación"}")
-        Text(update.message)
-        Button(enabled = !update.checking, onClick = { scope.launch { ProviderMaintenance.check(context) } }) {
-            Text(if (update.checking) context.getString(R.string.ui_comprobando_338dc7) else context.getString(R.string.ui_comprobar_actualizacion_846514))
-        }
-        Text(context.getString(R.string.ui_la_comprobacion_automatica_ocurre_cada_24_hora_ea62e9))
+        Text(context.getString(R.string.ui_extractor_newpipe_a1b2c3), style = MaterialTheme.typography.titleMedium)
+        Text(context.getString(R.string.ui_extractor_newpipe_desc_d4e5f6))
         HorizontalDivider()
         Text(context.getString(R.string.ui_diagnostico_local_051e59), style = MaterialTheme.typography.titleMedium)
         Text(context.getString(R.string.ui_exporta_version_api_de_android_y_eventos_tecni_521d52))

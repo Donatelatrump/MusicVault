@@ -247,7 +247,7 @@ internal fun MiniPlayer(
             IconButton(onClick = onToggle, enabled = !isPreparing) {
                 Box(
                     modifier = Modifier
-                        .size(if (hybrid) 44.dp else 34.dp)
+                        .size(if (hybrid) 44.dp else 40.dp)
                         .clip(CircleShape)
                         .background(VaultColors.Accent),
                     contentAlignment = Alignment.Center
@@ -650,7 +650,7 @@ internal fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean
                 FilledIconButton(
                     onClick = vm::togglePlayback,
                     modifier = Modifier
-                        .size(64.dp)
+                        .size(72.dp)
                         .graphicsLayer { scaleX = playScale; scaleY = playScale },
                     colors = IconButtonDefaults.filledIconButtonColors(
                         containerColor = VaultColors.Accent,
@@ -660,7 +660,7 @@ internal fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean
                     Icon(
                         if (isPlaying) VaultIcons.Pause else Icons.Default.PlayArrow,
                         null,
-                        modifier = Modifier.size(34.dp)
+                        modifier = Modifier.size(38.dp)
                     )
                 }
             }

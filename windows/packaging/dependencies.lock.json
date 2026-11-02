@@ -19,20 +19,12 @@
     "url": "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.1.2-essentials_build.zip",
     "sha256": "db580001caa24ac104c8cb856cd113a87b0a443f7bdf47d8c12b1d740584a2ec"
   },
-  "mutagen-1.47.0-py3-none-any.whl": {
-    "sha256": "edd96f50c5907a9539d8e5bba7245f62c9f520aef333d13392a79a4f70aca719",
-    "url": "https://pypi.org/"
-  },
-  "pyqt6_sip-13.11.1-cp312-cp312-win_amd64.whl": {
-    "sha256": "1d1c67179c1924b28e3d7f04585639e7a7c0946f62390efc6ccf2a6206e595d3",
-    "url": "https://pypi.org/"
-  },
   "pyqt6-6.10.2-cp39-abi3-win_amd64.whl": {
     "sha256": "bd328cb70bc382c48861cd5f0a11b2b8ae6f5692d5a2d6679ba52785dced327b",
     "url": "https://pypi.org/"
   },
-  "pyqt6_webengine_qt6-6.10.2-py3-none-win_amd64.whl": {
-    "sha256": "91f64339c5d4ac0bc69157d0baeae2fd5a7d5aa15c31500b6bfc8441e7ae7732",
+  "pyqt6_sip-13.11.1-cp312-cp312-win_amd64.whl": {
+    "sha256": "1d1c67179c1924b28e3d7f04585639e7a7c0946f62390efc6ccf2a6206e595d3",
     "url": "https://pypi.org/"
   },
   "pyqt6_webengine-6.10.0-cp39-abi3-win_amd64.whl": {
@@ -41,6 +33,14 @@
   },
   "pyqt6_qt6-6.10.2-py3-none-win_amd64.whl": {
     "sha256": "c4b7f7d66cc58bddf1bc1ca28dfcf7a45f58cfcb11d81d13a0510409dd4957ac",
+    "url": "https://pypi.org/"
+  },
+  "mutagen-1.47.0-py3-none-any.whl": {
+    "sha256": "edd96f50c5907a9539d8e5bba7245f62c9f520aef333d13392a79a4f70aca719",
+    "url": "https://pypi.org/"
+  },
+  "pyqt6_webengine_qt6-6.10.2-py3-none-win_amd64.whl": {
+    "sha256": "91f64339c5d4ac0bc69157d0baeae2fd5a7d5aa15c31500b6bfc8441e7ae7732",
     "url": "https://pypi.org/"
   }
 }

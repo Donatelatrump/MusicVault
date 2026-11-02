@@ -162,16 +162,15 @@ dependencies {
     // HTTP/2 + HTTP/3/QUIC without bundling the ~8 MB embedded Cronet binary.
     implementation("com.google.android.gms:play-services-cronet:18.1.1")
 
-    // Native/JVM-first YouTube resolver. NewPipeExtractor handles the primary
-    // stream URL extraction; yt-dlp remains a compatibility fallback.
+    // Native/JVM-first YouTube resolver. NewPipeExtractor handles all
+    // YouTube search, match, and stream URL extraction.
     implementation("com.github.teamnewpipe:newpipeextractor:0.26.5")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs_nio:2.0.3")
 
     implementation("io.coil-kt:coil-compose:2.7.0")
 
-    // youtube-dl android
-    implementation("io.github.junkfood02.youtubedl-android:library:0.18.1")
+    // FFmpeg (native) used by AudioTagger for ID3/MP4 metadata embedding.
     implementation("io.github.junkfood02.youtubedl-android:ffmpeg:0.18.1")
 }
 
