@@ -47,7 +47,7 @@ def test_non_image_response_is_not_cached(monkeypatch):
     from musicvault.services import cover_file
     monkeypatch.setattr("musicvault.services.get_bytes", lambda source: b"<html>temporarily unavailable</html>")
     with pytest.raises(ValueError, match="imagen"):
-        cover_file("https://example.test/cover.jpg")
+        cover_file("https://example.net/cover.jpg")
     assert list((data_dir() / "covers").iterdir()) == []
 
 
@@ -102,27 +102,35 @@ def test_lyrics_sidecar_wins_without_network(db, audio_file, monkeypatch):
     assert result["synced"] == [(1.2, "Hola"), (2.0, "Mundo")]
 
 
-def fake_downloader(tmp_path, monkeypatch, script):
-    binary = tmp_path / "yt-dlp"
-    binary.write_text("#!/usr/bin/python3\n" + script)
-    binary.chmod(0o755)
-    monkeypatch.setenv("MUSICVAULT_YTDLP", str(binary))
-    monkeypatch.setattr("musicvault.services.youtube_arguments", lambda: ["--js-runtimes", "node:/test/node"])
-    real_which = __import__("shutil").which
-    monkeypatch.setattr("musicvault.services.shutil.which", lambda name: str(binary) if name == "yt-dlp" else real_which(name))
+class _FakeResponse:
+    def __init__(self, body, status=200, headers=None):
+        self.body = body
+        self.status = status
+        self.headers = headers or {}
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+    def read(self, n=-1):
+        return self.body
 
 
-def test_download_atomic_publish_arguments_and_validation(tmp_path, audio_file, monkeypatch):
+def fake_http_download(monkeypatch, body=b"\x00\x01\x02\x03fake_audio", status=200, headers=None):
+    """Reemplaza urlopen para devolver audio directo sin yt-dlp."""
+    import urllib.request
+    def fake_urlopen(request, timeout=30):
+        return _FakeResponse(body, status, headers or {"Content-Length": str(len(body))})
+    monkeypatch.setattr("musicvault.services.urlopen", fake_urlopen)
+
+
+def test_download_direct_http_publish(tmp_path, audio_file, monkeypatch):
+    from musicvault.streaming import resolve_stream as _real_resolve
     fixture = audio_file("source.wav")
-    fake_downloader(tmp_path, monkeypatch, f"""import sys, pathlib, shutil
-target = pathlib.Path(sys.argv[sys.argv.index('--output') + 1].replace('%(ext)s', 'wav'))
-assert '--ignore-config' in sys.argv
-assert sys.argv[-2] == '--'
-shutil.copyfile({str(fixture)!r}, target)
-print('MV_PROGRESS: 50.0%', flush=True)
-print('MV_FILE:' + str(target), flush=True)
-""")
-    # The mock emits WAV to exercise validation, without network or external content.
+    # Simular que NewPipe resuelve una URL de stream válida
+    def fake_resolve(track, cancel=None):
+        return "https://audio.example.test/stream"
+    monkeypatch.setattr("musicvault.services.resolve_stream", fake_resolve)
+    fake_http_download(monkeypatch, body=fixture.read_bytes())
     result = download(Track("remote", "Title; $(touch nope)", "Artist"), tmp_path / "downloads", threading.Event(), lambda value: None)
     assert Path(result.path).is_file()
     assert result.duration == 2
@@ -130,18 +138,28 @@ print('MV_FILE:' + str(target), flush=True)
     assert not (tmp_path / "nope").exists()
 
 
-def test_download_cancel_reaps_process_and_preserves_other_files(tmp_path, monkeypatch):
-    pidfile = tmp_path / "pid"
-    fake_downloader(tmp_path, monkeypatch, f"""import os, pathlib, time
-pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid()))
-time.sleep(60)
-""")
+def test_download_cancel_during_http(tmp_path, monkeypatch):
+    def fake_resolve(track, cancel=None):
+        return "https://audio.example.test/stream"
+    monkeypatch.setattr("musicvault.services.resolve_stream", fake_resolve)
+
+    class _SlowResponse:
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def read(self, n=-1):
+            time.sleep(0.5)
+            return b""
+    import urllib.request
+    monkeypatch.setattr("musicvault.services.urlopen", lambda request, timeout=30: _SlowResponse())
+
     destination = tmp_path / "downloads"
     destination.mkdir()
     original = destination / "my-song.mp3"
     original.write_bytes(b"original")
     cancel = threading.Event()
-    timer = threading.Timer(0.4, cancel.set)
+    timer = threading.Timer(0.2, cancel.set)
     timer.start()
     try:
         with pytest.raises(DownloadCancelled):
@@ -150,17 +168,14 @@ time.sleep(60)
         timer.cancel()
     assert original.read_bytes() == b"original"
     assert not list(destination.glob(".musicvault-*"))
-    if pidfile.exists():
-        with pytest.raises(ProcessLookupError):
-            os.kill(int(pidfile.read_text()), 0)
 
 
-def test_youtube_metadata_and_source_specific_cache(db, tmp_path, monkeypatch):
-    fake_downloader(tmp_path, monkeypatch, """import json, sys
-assert '--flat-playlist' in sys.argv
-assert sys.argv[-1] == 'ytsearch20:Test artist'
-print(json.dumps({'id': 'a-b_c', 'title': 'A song', 'channel': 'Test artist', 'duration': 123}))
-""")
+def test_youtube_metadata_and_source_specific_cache(db, monkeypatch):
+    def fake_newpipe_search(query, cancel=None, limit=20):
+        from musicvault.models import Track as T
+        return [T("youtube:a-b_c", "A song", "Test artist", source="youtube",
+                   url="https://www.youtube.com/watch?v=a-b_c", duration=123)]
+    monkeypatch.setattr("musicvault.streaming.youtube_search", fake_newpipe_search)
     catalog = Catalog(db)
     result = catalog.search("Test artist", source="youtube")
     assert result["tracks"][0]["source"] == "youtube"

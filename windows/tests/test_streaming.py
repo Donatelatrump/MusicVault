@@ -20,17 +20,19 @@ def test_youtube_playlists_and_stream_url_use_cached_resolution(tmp_path, monkey
     db = Database(tmp_path / "library.sqlite3")
     calls = []
 
-    def run(command, cancel=None, timeout=30):
-        calls.append(command)
-        if "--get-url" in command:
-            return "https://audio.example.test/stream\n"
-        if any(str(part).startswith("ytsearch1:") for part in command):
-            return "https://www.youtube.com/watch?v=abc123\n"
-        return json.dumps({"id": "playlist123", "title": "Prueba", "playlist_count": 2}) + "\n"
+    def newpipe(mode, query, cancel=None, limit=25):
+        calls.append(mode)
+        if mode == 'search':
+            return [{"url": "https://www.youtube.com/watch?v=abc123"}]
+        if mode == 'playlists':
+            return [{"id": "playlist123", "title": "Prueba", "playlist_count": 2}]
+        if mode == 'playlist':
+            return [{"id": "v1", "title": "Song 1", "uploader": "Artist", "duration": 120}]
+        if mode == 'resolve':
+            return {"url": "https://audio.example.test/stream"}
+        return []
 
-    monkeypatch.setattr(streaming, "_run", run)
-    monkeypatch.setattr(streaming, "downloader_command", lambda: ["yt-dlp.exe"])
-    monkeypatch.setattr(streaming, "youtube_arguments", lambda: [])
+    monkeypatch.setattr(streaming, "_newpipe", newpipe)
     playlist = streaming.youtube_playlist_search("prueba")[0]
     assert playlist["id"] == "playlist123"
     track = Track("deezer:one", "Canción", "Artista", source="deezer")
@@ -39,7 +41,6 @@ def test_youtube_playlists_and_stream_url_use_cached_resolution(tmp_path, monkey
     count = len(calls)
     assert service.resolve(track) == "https://audio.example.test/stream"
     assert len(calls) == count
-    assert "--encoding" in calls[0] and "utf-8" in calls[0]
 
 
 def test_stream_subprocess_cancels_on_windows():
@@ -88,23 +89,24 @@ def test_remote_play_starts_stream_without_queuing_download(app, db, monkeypatch
         assert window.search_playlists_tab.text() == "Playlists"
     finally:
         window.quit_app()
-def test_newpipe_search_precedes_ytdlp(monkeypatch):
+
+
+def test_newpipe_search_returns_tracks(monkeypatch):
     from musicvault import streaming
     calls = []
     def newpipe(mode, query, cancel=None, limit=25):
         calls.append(mode)
-        return [{"id": "video", "title": "Song", "uploader": "Artist", "thumbnail": "https://i.ytimg.com/vi/video/hqdefault.jpg"}]
+        return [{"id": "video", "title": "Song", "uploader": "Artist",
+                 "thumbnail": "https://i.ytimg.com/vi/video/hqdefault.jpg"}]
     monkeypatch.setattr(streaming, "_newpipe", newpipe)
-    monkeypatch.setattr(streaming, "_yt_base", lambda: (_ for _ in ()).throw(AssertionError("yt-dlp should be fallback only")))
     result = streaming.youtube_search("Song")
     assert calls == ["search"]
     assert result[0].id == "youtube:video" and result[0].cover
 
 
-def test_newpipe_resolves_stream_before_ytdlp(db, monkeypatch):
+def test_newpipe_resolves_stream_directly(db, monkeypatch):
     from musicvault import streaming
     from musicvault.models import Track
     monkeypatch.setattr(streaming, "_newpipe", lambda *a, **k: {"url": "https://audio.example.test/direct"})
-    monkeypatch.setattr(streaming, "_yt_base", lambda: (_ for _ in ()).throw(AssertionError("Unexpected yt-dlp")))
     service = streaming.StreamingService(db)
     assert service.resolve(Track("youtube:v", "Song", source="youtube", source_id="v")) == "https://audio.example.test/direct"

@@ -15,7 +15,6 @@ STAGE = ROOT / 'dist/MusicVault-Windows-x64-0.9.7'
 SOURCES = {
  'python.zip': ('https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip', None),
  'mpv.7z': ('https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20260903/mpv-dev-x86_64-20260903-git-69e63f425a.7z', 'fac135c68a35b7639e39d72c0c365104edbaebdea39a0dfdd8c36e8c8e80faef'),
- 'yt-dlp.exe': ('https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp.exe', '66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a'),
  'node.zip': ('https://nodejs.org/dist/v22.16.0/node-v22.16.0-win-x64.zip', None),
  'ffmpeg.zip': ('https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.1.2-essentials_build.zip', None),
 }
@@ -86,8 +85,7 @@ def main():
     subprocess.run([seven, 'x', '-y', str(CACHE / 'mpv.7z'), '-o' + str(mpv)], check=True, stdout=subprocess.DEVNULL)
     for dll in mpv.rglob('*.dll'):
         shutil.copy2(dll, runtime / dll.name)
-    shutil.copy2(CACHE / 'yt-dlp.exe', runtime / 'yt-dlp.exe')
-    for required in ('libmpv-2.dll', 'node.exe', 'ffmpeg.exe', 'ffprobe.exe', 'yt-dlp.exe'):
+    for required in ('libmpv-2.dll', 'node.exe', 'ffmpeg.exe', 'ffprobe.exe'):
         if not (runtime / required).is_file():
             raise RuntimeError('Missing runtime: ' + required)
     subprocess.run([sys.executable, str(ROOT / 'packaging/build_newpipe.py')], check=True)

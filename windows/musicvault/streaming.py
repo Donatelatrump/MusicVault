@@ -9,7 +9,6 @@ import subprocess
 import threading
 import time
 
-from .downloader import downloader_command, youtube_arguments
 from .models import Track, data_dir, stable_id
 from .processes import process_options, stop_process
 
@@ -68,13 +67,6 @@ def _run(command, cancel=None, timeout=30):
             process.stderr.close()
 
 
-def _yt_base():
-    return downloader_command() + youtube_arguments() + [
-        "--encoding", "utf-8", "--ignore-config", "--cache-dir", str(data_dir() / "cache/yt-dlp"),
-        "--no-warnings", "--socket-timeout", "10", "--retries", "1",
-    ]
-
-
 def _youtube_track(item):
     video_id = str(item.get("id") or item.get("url") or "").strip()
     if not video_id:
@@ -111,25 +103,12 @@ def _newpipe(mode, query, cancel=None, limit=25):
 
 
 def youtube_search(query, cancel=None, limit=20):
-    """Line-oriented flat search: materially cheaper than one large single JSON document."""
+    """Búsqueda solo vía NewPipeExtractor (sin fallback de yt-dlp)."""
     rows = _newpipe('search', query, cancel, min(limit, 25))
-    if rows:
-        tracks = [track for item in rows if (track := _youtube_track(item))]
-        if tracks:
-            return tracks[:limit]
-    command = _yt_base() + ["--flat-playlist", "--dump-json", "--skip-download",
-                            "--playlist-end", str(limit), "--", f"ytsearch{limit}:{query}"]
-    output = _run(command, cancel, timeout=24)
-    tracks = []
-    for line in output.splitlines():
-        try:
-            item = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        track = _youtube_track(item)
-        if track:
-            tracks.append(track)
-    return tracks
+    if not rows:
+        return []
+    tracks = [track for item in rows if (track := _youtube_track(item))]
+    return tracks[:limit]
 
 
 def _playlist_from_item(item):
@@ -154,7 +133,7 @@ def _playlist_from_item(item):
 
 
 def youtube_playlist_search(query, cancel=None, limit=16):
-    """Search playlist entities on YouTube. A direct playlist URL is accepted too."""
+    """Busca playlist entities en YouTube solo vía NewPipe."""
     query = query.strip()
     if 'youtube.com/playlist' not in query:
         rows = _newpipe('playlists', query, cancel, limit)
@@ -165,54 +144,27 @@ def youtube_playlist_search(query, cancel=None, limit=16):
     if "youtube.com/playlist" in query or "youtu.be/playlist" in query:
         targets = [query]
     else:
-        # YouTube's playlist result filter. yt-dlp understands the search result page
-        # and exposes playlist entities in flat mode on current releases.
-        targets = [f"https://www.youtube.com/results?search_query={quote_plus(query)}&sp=EgIQAw%253D%253D"]
+        return []
     playlists = []
     for target in targets:
-        command = _yt_base() + ["--flat-playlist", "--dump-json", "--skip-download",
-                                "--playlist-end", str(limit), "--", target]
-        try:
-            output = _run(command, cancel, timeout=25)
-        except Exception:
-            if cancel is not None and cancel.is_set():
-                raise StreamCancelled()
-            continue
-        seen = set()
-        for line in output.splitlines():
-            try:
-                item = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            playlist = _playlist_from_item(item)
-            if playlist and playlist["id"] not in seen:
-                playlists.append(playlist)
-                seen.add(playlist["id"])
-                if len(playlists) >= limit:
-                    return playlists
+        rows = _newpipe('playlist', target, cancel, limit)
+        if rows:
+            for item in rows:
+                playlist = _playlist_from_item(item)
+                if playlist and playlist["id"] not in {p["id"] for p in playlists}:
+                    playlists.append(playlist)
+                    if len(playlists) >= limit:
+                        return playlists
     return playlists
 
 
 def youtube_playlist_tracks(playlist, cancel=None, limit=500):
     url = playlist.get("url") or f"https://www.youtube.com/playlist?list={playlist['id']}"
     rows = _newpipe('playlist', url, cancel, limit)
-    if rows:
-        tracks = [track for item in rows if (track := _youtube_track(item))]
-        if tracks:
-            return tracks[:limit]
-    command = _yt_base() + ["--flat-playlist", "--dump-json", "--skip-download", "--ignore-errors",
-                            "--playlist-end", str(limit), "--", url]
-    output = _run(command, cancel, timeout=55)
-    tracks = []
-    for line in output.splitlines():
-        try:
-            item = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        track = _youtube_track(item)
-        if track:
-            tracks.append(track)
-    return tracks
+    if not rows:
+        return []
+    tracks = [track for item in rows if (track := _youtube_track(item))]
+    return tracks[:limit]
 
 
 class StreamingService:
@@ -256,14 +208,7 @@ class StreamingService:
             match = rows[0]['url']
             self.db.cache_put(cache_key, match)
             return match
-        command = _yt_base() + ["--flat-playlist", "--skip-download", "--print", "%(webpage_url)s",
-                                "--", "ytsearch1:" + query]
-        output = _run(command, cancel, timeout=22)
-        match = next((line.strip() for line in output.splitlines() if line.strip().startswith("http")), "")
-        if not match:
-            raise RuntimeError(f"No se encontró una fuente reproducible para «{track.title}».")
-        self.db.cache_put(cache_key, match)
-        return match
+        raise RuntimeError(f"No se encontró una fuente reproducible para «{track.title}».")
 
     def resolve(self, track, cancel=None):
         cached = self._url_get(track)
@@ -283,21 +228,7 @@ class StreamingService:
             if isinstance(resolved, dict) and resolved.get('url', '').startswith('https://'):
                 self._url_put(track, resolved['url'])
                 return resolved['url']
-            common = ["--no-playlist", "--skip-download", "-f", "bestaudio/best", "--get-url"]
-            errors = []
-            for extra in (["--extractor-args", "youtube:skip=hls,dash"], []):
-                try:
-                    output = _run(_yt_base() + extra + common + ["--", match], cancel, timeout=26)
-                    direct = next((line.strip() for line in output.splitlines()
-                                   if line.strip().startswith("http") and "youtube.com/watch" not in line), "")
-                    if direct:
-                        self._url_put(track, direct)
-                        return direct
-                except StreamCancelled:
-                    raise
-                except Exception as exc:
-                    errors.append(str(exc))
-            raise RuntimeError((errors[-1] if errors else "") or f"No se pudo preparar «{track.title}» para streaming.")
+            raise RuntimeError(f"No se pudo preparar «{track.title}» para streaming.")
         finally:
             lock.release()
 

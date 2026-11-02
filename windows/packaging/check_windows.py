@@ -51,36 +51,48 @@ with tempfile.TemporaryDirectory(prefix='musicvault-check-') as folder:
     assert not errors, errors
     print('PASS: Windows Qt/WebEngine imports, window render, media key registration, libmpv WAV decoding.', flush=True)
 
-# Exercise the real Windows pipe reader/publication path without network access.
+# Exercise the real Windows download path (NewPipe stream + direct HTTP) without network access.
 import sys
 import threading
 from musicvault import services
 from musicvault.models import Track
 from musicvault.processes import process_options, stop_process
 import subprocess
+from urllib.request import Request, urlopen
+
+class _FakeResponse:
+    def __init__(self, body):
+        self.body = body
+        self.status = 200
+        self.headers = {"Content-Length": str(len(body))}
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+    def read(self, n=-1):
+        return self.body
 
 with tempfile.TemporaryDirectory(prefix='musicvault-download-check-') as folder:
     os.environ['MUSICVAULT_DATA_DIR'] = folder
-    script = Path(folder) / 'fake_downloader.py'
-    script.write_text('''import sys, wave
-from pathlib import Path
-path = Path(sys.argv[sys.argv.index('--output') + 1].replace('%(ext)s', 'wav'))
-with wave.open(str(path), 'wb') as out:
-    out.setnchannels(1)
-    out.setsampwidth(2)
-    out.setframerate(8000)
-    out.writeframes(b'\\x00\\x01' * 8000)
-print('MV_PROGRESS:100%')
-print('MV_FILE:' + str(path))
-''')
-    original = services.downloader_command
-    services.downloader_command = lambda: [sys.executable, str(script)]
+    path = Path(folder) / 'test.wav'
+    with wave.open(str(path), 'wb') as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(8000)
+        audio.writeframes(b'\x00\x01' * 8000)
+    def fake_resolve(track, cancel=None):
+        return "https://audio.example.test/stream"
+    def fake_urlopen(request, timeout=30):
+        return _FakeResponse(path.read_bytes())
+    services.resolve_stream = fake_resolve
+    services.urlopen = fake_urlopen
     try:
         result = services.download(Track('check', 'Check'), Path(folder) / 'downloads', threading.Event(), lambda value: None)
         assert Path(result.path).is_file()
     finally:
-        services.downloader_command = original
+        del services.resolve_stream
+        del services.urlopen
     child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], **process_options())
     stop_process(child)
     assert child.wait(timeout=10) != 0
-print('PASS: Windows download pipes, audio publication and process cancellation.', flush=True)
+print('PASS: Windows download, audio publication and process cancellation.', flush=True)

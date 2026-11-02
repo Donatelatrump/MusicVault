@@ -4,9 +4,8 @@ from dataclasses import replace
 from pathlib import Path
 import json
 import os
-from .processes import PipeSelector, stop_process, process_options
+from .processes import process_options
 import shutil
-import subprocess
 import tempfile
 import threading
 import time
@@ -18,11 +17,10 @@ from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
 from PyQt6.QtGui import QImageReader
 
 from .library import read_track
-from .downloader import downloader_command, youtube_arguments, explain_download_error
 from .models import Track, data_dir, parse_lrc, stable_id
 from .songmirror import import_spotify_playlist, import_spotify_track
 from .streaming import (youtube_search as fast_youtube_search, youtube_playlist_search,
-                        youtube_playlist_tracks, StreamCancelled)
+                        youtube_playlist_tracks, resolve as resolve_stream, StreamCancelled)
 from .catalog import SearchScorer, CoverImageCache, MusicBrainzProvider, SearchResult, sort_results
 
 USER_AGENT = "MusicVault/0.9.7 (Windows desktop music library)"
@@ -329,44 +327,9 @@ class Catalog:
 
 
 def youtube_search(query, cancel=None):
-    command = downloader_command() + youtube_arguments() + ["--encoding", "utf-8", "--ignore-config", "--cache-dir", str(data_dir()/"cache/yt-dlp"), "--flat-playlist", "--dump-single-json", "--skip-download",
-               "--no-warnings", "--socket-timeout", "10", "--retries", "0", "--", "ytsearch20:" + query]
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **process_options())
-    deadline = time.monotonic() + 35
-    try:
-        while True:
-            if cancel and cancel.is_set():
-                return []
-            if time.monotonic() > deadline:
-                raise RuntimeError("YouTube tardó demasiado en responder.")
-            try:
-                stdout, stderr = process.communicate(timeout=0.2)
-                break
-            except subprocess.TimeoutExpired:
-                continue
-        if process.returncode:
-            raise RuntimeError(stderr.decode(errors="replace")[-1000:])
-        result = json.loads(stdout)
-        tracks = []
-        for item in result.get("entries", []):
-            if not item or not item.get("id"):
-                continue
-            tracks.append(Track("youtube:" + item["id"], item.get("title") or "Sin título",
-                                item.get("artist") or item.get("uploader") or item.get("channel") or "YouTube",
-                                item.get("album") or "YouTube", float(item.get("duration") or 0),
-                                cover="https://i.ytimg.com/vi/" + item["id"] + "/hqdefault.jpg",
-                                source="youtube", source_id=item["id"], url="https://www.youtube.com/watch?v=" + item["id"]))
-        return tracks
-    finally:
-        if process.poll() is None:
-            stop_process(process)
-            try:
-                process.communicate(timeout=3)
-            except subprocess.TimeoutExpired:
-                stop_process(process, force=True)
-                process.communicate()
-        process.stdout.close()
-        process.stderr.close()
+    """Búsqueda YouTube solo vía NewPipe (delegado a streaming.youtube_search)."""
+    from .streaming import youtube_search as _yt_search
+    return _yt_search(query, cancel)
 
 
 def cover_file(url):
@@ -414,73 +377,59 @@ class DownloadCancelled(Exception):
 
 
 def download(track, destination, cancel, progress):
-    """A private staging directory makes cancellation safe and final publication atomic."""
-    downloader = downloader_command()
-    runtime = youtube_arguments()
-    if not shutil.which("ffmpeg"):
-        raise RuntimeError("Falta FFmpeg en runtime. Vuelve a extraer el paquete completo.")
+    """Descarga directa: resuelve stream URL vía NewPipe y descarga con urllib (sin yt-dlp)."""
     destination = Path(destination).expanduser().resolve()
     destination.mkdir(parents=True, exist_ok=True)
     if cancel.is_set():
         raise DownloadCancelled()
-    target = track.url if track.source == "youtube" and track.url.startswith("https://") else f"ytsearch1:{track.artist} {track.title} audio"
-    if track.source == "youtube" and track.url and not track.url.startswith("https://www.youtube.com/watch?v="):
-        raise ValueError(f"URL de YouTube no válida para la descarga: {track.url}")
+
+    try:
+        stream_url = resolve_stream(track, cancel)
+    except StreamCancelled:
+        raise DownloadCancelled()
+    except Exception as exc:
+        raise RuntimeError(f"No se pudo obtener el stream de audio de YouTube: {exc}")
+
+    if not stream_url or not stream_url.startswith("https://"):
+        raise RuntimeError("NewPipe no devolvió una URL de stream válida.")
+
     with tempfile.TemporaryDirectory(prefix=".musicvault-", dir=destination) as work:
-        command = downloader + runtime + ["--encoding", "utf-8", "--ignore-config", "--cache-dir", str(data_dir()/"cache/yt-dlp"), "--no-playlist", "--no-colors", "--newline", "--progress", "--no-simulate",
-                   "--socket-timeout", "15", "--retries", "2", "--extract-audio", "--audio-format", "mp3",
-                   "--audio-quality", "0", "--embed-metadata", "--progress-template",
-                   "download:MV_PROGRESS:%(progress._percent_str)s", "--print", "after_move:MV_FILE:%(filepath)s",
-                   "--output", str(Path(work) / "audio.%(ext)s"), "--", target]
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                   **process_options())
-        selector = PipeSelector()
-        selector.register(process.stdout, 1)
-        tail, buffer, final = [], b"", None
-        deadline = time.monotonic() + 1800
+        tmp_file = Path(work) / "audio"
         try:
-            while True:
-                if cancel.is_set():
-                    raise DownloadCancelled()
-                if time.monotonic() > deadline:
-                    raise RuntimeError("La descarga excedió el tiempo máximo de 30 minutos.")
-                ready = selector.select(0.2)
-                if ready:
-                    chunk = selector.read()
-                    buffer += chunk
-                    while b"\n" in buffer:
-                        raw, buffer = buffer.split(b"\n", 1)
-                        line = raw.decode("utf-8", errors="replace").strip()
-                        tail.append(line)
-                        tail = tail[-12:]
-                        if line.startswith("MV_PROGRESS:"):
-                            try:
-                                progress(min(99, int(float(line.split(":", 1)[1].strip().rstrip("%")))))
-                            except ValueError:
-                                pass
-                        elif line.startswith("MV_FILE:"):
-                            final = Path(line.split(":", 1)[1]).resolve()
-                    if not chunk:
-                        break
-            if process.wait(timeout=5) != 0:
-                details = "\n".join(tail)
-                raise RuntimeError(explain_download_error(details) + "\n\nDetalle técnico:\n" + details)
-            if cancel.is_set():
-                raise DownloadCancelled()
-            if not final or not final.is_relative_to(Path(work).resolve()) or not final.is_file():
-                raise RuntimeError("La descarga terminó sin un archivo de audio válido.")
-            info = read_track(final)
-            filename = stable_id(track.id) + ".mp3"
-            output = destination / filename
-            os.replace(final, output)
-            return replace(track, path=str(output), duration=info.duration)
-        finally:
-            selector.close()
-            if process.poll() is None:
-                stop_process(process)
-                try:
-                    process.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    stop_process(process, force=True)
-                    process.wait()
-            process.stdout.close()
+            request = Request(stream_url, headers={"User-Agent": USER_AGENT, "Accept": "*/*"})
+            with urlopen(request, timeout=30) as response:
+                if not (200 <= response.status < 300):
+                    raise RuntimeError(f"HTTP {response.status} {response.reason}")
+                total = response.headers.get("Content-Length")
+                total = int(total) if total else 0
+                bytes_read = 0
+                with tmp_file.open("wb") as out:
+                    while True:
+                        if cancel.is_set():
+                            raise DownloadCancelled()
+                        chunk = response.read(8192)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                        bytes_read += len(chunk)
+                        if total > 0:
+                            pct = min(99, int((bytes_read * 94) / total))
+                            progress(pct)
+        except DownloadCancelled:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"Fallo al descargar el stream de audio: {exc}")
+
+        if tmp_file.stat().st_size == 0:
+            raise RuntimeError("El archivo descargado está vacío.")
+
+        info = read_track(tmp_file)
+        filename = stable_id(track.id) + ".mp3"
+        output = destination / filename
+
+        if cancel.is_set():
+            raise DownloadCancelled()
+
+        shutil.move(str(tmp_file), str(output))
+
+        return replace(track, path=str(output), duration=info.duration)

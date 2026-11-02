@@ -2391,7 +2391,7 @@ class Window(QMainWindow):
         about_row.addWidget(label("MusicVault", "settingsLabel"), 1)
         about_row.addWidget(label(f"{__version__} · Windows x64", "settingsValue"))
         about_card.addLayout(about_row)
-        about_meta = label("Qt 6 · libmpv · SQLite · yt-dlp · FFmpeg", "settingsDescription")
+        about_meta = label("Qt 6 · libmpv · SQLite · NewPipe · FFmpeg", "settingsDescription")
         about_card.addWidget(about_meta)
 
         page_layout.addStretch()

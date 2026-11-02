@@ -12,7 +12,6 @@ from .portable import configure, mpv_library, relocate_library
 
 
 def doctor():
-    from .downloader import downloader_command, javascript_runtime
     from .newpipe import command as newpipe_command
     checks = {"windows_x86_64": sys.platform == "win32" and platform.machine().lower() in ("x86_64", "amd64"),
               "python": platform.python_version(), "libmpv": mpv_library()}
@@ -22,17 +21,12 @@ def doctor():
         checks["PyQt6.QtWebEngineWidgets"] = importlib.util.find_spec("PyQt6.QtWebEngineWidgets") is not None
     except ModuleNotFoundError:
         checks["PyQt6.QtWebEngineWidgets"] = False
-    for command in ("ffmpeg", "ffprobe", "yt-dlp"):
+    for command in ("ffmpeg", "ffprobe"):
         checks[command] = shutil.which(command)
-    try:
-        checks["yt-dlp"] = downloader_command()
-    except RuntimeError:
-        checks["yt-dlp"] = None
-    checks["javascript_runtime"] = javascript_runtime()
     checks["youtube_extractor"] = "NewPipeExtractor 0.26.5" if newpipe_command('health') else None
     print(json.dumps(checks, indent=2, ensure_ascii=False))
     critical = ("windows_x86_64", "libmpv", "PyQt6", "mutagen", "PyQt6.QtWebEngineWidgets",
-                "ffmpeg", "ffprobe", "yt-dlp", "javascript_runtime", "youtube_extractor")
+                "ffmpeg", "ffprobe", "youtube_extractor")
     return 0 if all(checks.get(k) for k in critical) else 1
 
 
