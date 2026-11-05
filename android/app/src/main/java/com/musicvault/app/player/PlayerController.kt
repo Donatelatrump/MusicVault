@@ -54,6 +54,8 @@ class PlayerController(context: Context) {
         context.applicationContext,
         SessionToken(context.applicationContext, ComponentName(context, MusicPlaybackService::class.java))
     ).setConnectionHints(android.os.Bundle().apply { putBoolean("musicvault.internal_playback", true) }).buildAsync()
+    private val _playbackState = MutableStateFlow(Player.STATE_IDLE)
+    val playbackState: StateFlow<Int> = _playbackState
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying
     private val _progress = MutableStateFlow(restoredSnapshot?.let {
@@ -143,6 +145,7 @@ class PlayerController(context: Context) {
                         publishProgress(controller)
                     }
                     override fun onPlaybackStateChanged(playbackState: Int) {
+                        _playbackState.value = playbackState
                         publishProgress(controller)
                         if (playbackState == androidx.media3.common.Player.STATE_ENDED) _ended.value = System.nanoTime()
                     }
@@ -153,6 +156,7 @@ class PlayerController(context: Context) {
                     }
                     override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) { _shuffle.value = shuffleModeEnabled }
                 })
+                _playbackState.value = controller.playbackState
                 _isPlaying.value = controller.isPlaying
                 if (controller.currentMediaItem != null) _shuffle.value = controller.shuffleModeEnabled
                 _audioSessionId.value = AudioSessionBridge.sessionId
@@ -259,6 +263,36 @@ class PlayerController(context: Context) {
             publishQueue(controller)
             publishProgress(controller)
         }
+    }
+
+    /** Prepare a shared song without emitting a transient play/pause pair. */
+    fun preparePaused(track: Track, positionMs: Long = 0L) {
+        queueGeneration++
+        QueueRestoration.state = null
+        queueRestored = true
+        val item = mediaItem(track) ?: return
+        knownTracks[track.id] = track
+        withController { controller ->
+            controller.playWhenReady = false
+            controller.shuffleModeEnabled = false
+            controller.setMediaItem(item, positionMs.coerceAtLeast(0))
+            controller.prepare()
+            publishQueue(controller)
+            publishProgress(controller)
+        }
+    }
+    /** MediaController already extrapolates live position; don't re-use a stale UI ticker for sync. */
+    fun liveProgress(): PlaybackProgress {
+        if (!isConnected) return _progress.value
+        return runCatching {
+            val controller = controllerFuture.get()
+            PlaybackProgress(controller.currentMediaItem?.mediaId, controller.currentPosition.coerceAtLeast(0),
+                controller.duration.takeIf { it > 0 } ?: 0, controller.isPlaying,
+                android.os.SystemClock.elapsedRealtimeNanos(), controller.playbackParameters.speed)
+        }.getOrDefault(_progress.value)
+    }
+    fun setSyncSpeed(speed: Float) = withController { controller ->
+        if (kotlin.math.abs(controller.playbackParameters.speed - speed) > .001f) controller.setPlaybackSpeed(speed)
     }
 
     fun hasCurrentMediaItem(): Boolean = if (controllerFuture.isDone && !controllerFuture.isCancelled) {

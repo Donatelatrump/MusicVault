@@ -177,6 +177,12 @@ internal fun SearchScreen(
     prewarm: Boolean = false
 ) {
     val online by vm.isOnline.collectAsStateWithLifecycle()
+    val jam by vm.jams.state.collectAsStateWithLifecycle()
+    val trackFeedback by vm.jams.trackFeedback.collectAsStateWithLifecycle()
+    val displayJamFeedback = if (jam.active && jam.playback.buffering && jam.currentSong?.sourceTrackId != null)
+        trackFeedback + (jam.currentSong!!.sourceTrackId!! to com.musicvault.app.jams.JamTrackFeedback(com.musicvault.app.jams.JamTrackStatus.LOADING, 0))
+        else trackFeedback
+    val jamSelectedTrackId = if (jam.active) jam.currentSong?.sourceTrackId ?: state.selectedTrackId else state.selectedTrackId
     val offlineTracks by vm.offlineSearchResults.collectAsStateWithLifecycle()
     val offlineAdapter = remember { LibraryFeedAdapter(vm) }
     val hybrid = LocalHybridDesign.current
@@ -197,7 +203,7 @@ internal fun SearchScreen(
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     val latestIsPlaying by rememberUpdatedState(isPlaying)
-    val latestSelectedTrackId by rememberUpdatedState(state.selectedTrackId)
+    val latestSelectedTrackId by rememberUpdatedState(jamSelectedTrackId)
 
     val adapter = remember {
         RemoteResultsAdapter(
@@ -476,8 +482,9 @@ internal fun SearchScreen(
                         adapter.updateState(
                             downloadedIds = downloadedIds,
                             progress = downloadProgress,
-                            selectedTrackId = state.selectedTrackId,
-                            isPlaying = isPlaying
+                            selectedTrackId = jamSelectedTrackId,
+                            isPlaying = isPlaying,
+                            jamFeedback = displayJamFeedback
                         )
                     }
                 }

@@ -270,11 +270,15 @@ fun MusicVaultApp(
     onAppReadyForPermissions: () -> Unit = {}
 ) {
     val state by vm.state.collectAsStateWithLifecycle()
-    val isPlaying by vm.isPlaying.collectAsStateWithLifecycle()
+    val devicePlaying by vm.isPlaying.collectAsStateWithLifecycle()
     val isOnline by vm.isOnline.collectAsStateWithLifecycle()
     val offlinePlayableIds by vm.offlinePlayableIds.collectAsStateWithLifecycle()
     val albumDownloads by vm.albumDownloads.collectAsStateWithLifecycle()
     val favoriteIds = state.favoriteIds
+    val incomingJamLink by vm.jamLink.collectAsStateWithLifecycle()
+    val jamRoom by vm.jams.state.collectAsStateWithLifecycle()
+    val jamContacts by vm.jamFriends.state.collectAsStateWithLifecycle()
+    val isPlaying = if (jamRoom.active) jamRoom.playback.playing else devicePlaying
     val downloadDirLabel by vm.downloadDirLabel.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val appUpdates: com.musicvault.app.updates.AppUpdateViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
@@ -387,6 +391,30 @@ fun MusicVaultApp(
         return
     }
 
+    LaunchedEffect(incomingJamLink, jamRoom.active, jamRoom.roomCode, jamRoom.busy, jamContacts.busy, isOnline, onboardingFinishing) {
+        val link = incomingJamLink ?: return@LaunchedEffect
+        showJams = true
+        showSettings = false
+        vm.closeFullPlayer()
+        if (!isOnline || onboardingFinishing) return@LaunchedEffect
+        when (link.kind) {
+            com.musicvault.app.jams.JamInvitation.Kind.ROOM -> {
+                if (jamRoom.roomCode == link.code) vm.consumeJamLink()
+                else if (!jamRoom.active && !jamRoom.busy) { vm.jams.joinRoom(link.code); vm.consumeJamLink() }
+            }
+            com.musicvault.app.jams.JamInvitation.Kind.FRIEND -> {
+                if (!jamContacts.busy) { vm.jamFriends.requestFromLink(link.code); vm.consumeJamLink() }
+            }
+        }
+    }
+    val switchRoomLink = incomingJamLink?.takeIf { it.kind == com.musicvault.app.jams.JamInvitation.Kind.ROOM &&
+        jamRoom.active && it.code != jamRoom.roomCode && !jamRoom.busy }
+    if (switchRoomLink != null) AlertDialog(onDismissRequest = vm::consumeJamLink,
+        title = { Text(stringResource(R.string.jams_switch_room)) },
+        text = { Text(stringResource(if (jamRoom.isHost) R.string.jams_switch_host else R.string.jams_switch_guest)) },
+        confirmButton = { TextButton(onClick = vm.jams::leave) { Text(stringResource(R.string.jams_join)) } },
+        dismissButton = { TextButton(onClick = vm::consumeJamLink) { Text(stringResource(R.string.jams_cancel)) } })
+
     AppUpdateHost(appUpdates, online = isOnline, enabled = !onboardingFinishing)
 
     // Android only exposes clipboard contents while an app is in the foreground.
@@ -480,7 +508,7 @@ fun MusicVaultApp(
         bottomBar = {
             if (!state.fullPlayer && !showSettings) {
                 Column {
-                    state.selectedTrack?.let {
+                    if (!showJams) state.selectedTrack?.let {
                         MiniPlayer(
                             track = it,
                             isPlaying = isPlaying,
@@ -495,7 +523,7 @@ fun MusicVaultApp(
                     BottomBar(
                         section = state.section,
                         hybrid = state.appDesign == APP_DESIGN_HYBRID,
-                        onSelect = vm::selectSection
+                        onSelect = { showJams = false; vm.selectSection(it) }
                     )
                 }
             }
@@ -504,7 +532,8 @@ fun MusicVaultApp(
         Box(Modifier.fillMaxSize().padding(padding)) {
             if (showJams && !state.fullPlayer) {
                 androidx.activity.compose.BackHandler { showJams = false }
-                JamsScreen(vm.jams, state.selectedTrack) { showJams = false }
+                JamsScreen(vm.jams, vm.jamFriends, state.selectedTrack, vm::searchJamSongs,
+                    onOpenRoom = { vm.openJamLink(com.musicvault.app.jams.JamInvitation.roomUrl(it)) }) { showJams = false }
             } else if (showSettings && !state.fullPlayer) {
                 SettingsScreen(
                     appUpdates = appUpdates,
@@ -547,7 +576,7 @@ fun MusicVaultApp(
                             letterSpacing = (-0.75).sp,
                             modifier = Modifier.weight(1f)
                         )
-                        TextButton(onClick = { showJams = true }) { Text("JAMS") }
+                        TextButton(onClick = { showJams = true }) { Text("JAMS"); if (jamContacts.requests.isNotEmpty() || jamContacts.invitations.isNotEmpty()) Badge(Modifier.padding(start = 5.dp)) }
                         Box(
                             Modifier
                                 .size(if (state.appDesign == APP_DESIGN_HYBRID) 44.dp else 34.dp)

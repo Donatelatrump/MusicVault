@@ -28,6 +28,8 @@ import com.musicvault.app.catalog.CatalogPlaylist
 import com.musicvault.app.catalog.CatalogTrack
 import com.musicvault.app.catalog.CoverImageCache
 import com.musicvault.app.ui.NativeAccessibility
+import com.musicvault.app.jams.JamTrackFeedback
+import com.musicvault.app.jams.JamTrackStatus
 import kotlin.math.roundToInt
 
 sealed interface RemoteResultItem {
@@ -61,6 +63,7 @@ class RemoteResultsAdapter(
     private var progress: Map<String, Int> = emptyMap()
     private var selectedTrackId: String? = null
     private var isPlaying: Boolean = false
+    private var jamFeedback: Map<String, JamTrackFeedback> = emptyMap()
     private val positionByLocalId = HashMap<String, Int>(128)
 
     init {
@@ -99,26 +102,29 @@ class RemoteResultsAdapter(
         }
     }
 
-    fun updateState(
+    internal fun updateState(
         downloadedIds: Set<String>,
         progress: Map<String, Int>,
         selectedTrackId: String?,
-        isPlaying: Boolean
+        isPlaying: Boolean,
+        jamFeedback: Map<String, JamTrackFeedback> = emptyMap()
     ) {
         if (this.downloadedIds === downloadedIds &&
             this.progress === progress &&
             this.selectedTrackId == selectedTrackId &&
-            this.isPlaying == isPlaying
+            this.isPlaying == isPlaying && this.jamFeedback == jamFeedback
         ) return
         if (this.downloadedIds == downloadedIds &&
             this.progress == progress &&
             this.selectedTrackId == selectedTrackId &&
-            this.isPlaying == isPlaying
+            this.isPlaying == isPlaying && this.jamFeedback == jamFeedback
         ) return
 
         val oldDownloadedIds = this.downloadedIds
         val oldProgress = this.progress
         val oldSelectedTrackId = this.selectedTrackId
+        val oldJamFeedback = this.jamFeedback
+        this.jamFeedback = jamFeedback
 
         this.downloadedIds = downloadedIds
         this.progress = progress
@@ -129,6 +135,8 @@ class RemoteResultsAdapter(
             val changedIds = HashSet<String>(oldProgress.size + progress.size + oldDownloadedIds.size + downloadedIds.size + 2)
             changedIds.addAll(oldProgress.keys)
             changedIds.addAll(progress.keys)
+            changedIds.addAll(oldJamFeedback.keys)
+            changedIds.addAll(jamFeedback.keys)
             changedIds.addAll(oldDownloadedIds)
             changedIds.addAll(downloadedIds)
             oldSelectedTrackId?.let(changedIds::add)
@@ -184,6 +192,7 @@ class RemoteResultsAdapter(
                 progress,
                 selectedTrackId,
                 isPlaying,
+                jamFeedback,
                 payload != null
             )
         }
@@ -298,6 +307,7 @@ class RemoteResultsAdapter(
             progress: Map<String, Int>,
             selectedTrackId: String?,
             isPlaying: Boolean,
+            jamFeedback: Map<String, JamTrackFeedback>,
             stateOnly: Boolean
         ) {
             track = value
@@ -314,8 +324,19 @@ class RemoteResultsAdapter(
                 description.visibility = if (description.text.isNullOrBlank()) View.GONE else View.VISIBLE
                 loadCover(itemView.context, image, value.coverUri, 56)
             }
-            progressBar.visibility = if (downloading) View.VISIBLE else View.GONE
-            if (downloading) progressBar.progress = (p ?: 0).coerceIn(0, 100)
+            val feedback = jamFeedback[localId]?.status
+            val preparing = feedback == JamTrackStatus.LOADING
+            progressBar.isIndeterminate = preparing
+            progressBar.visibility = if (downloading || preparing) View.VISIBLE else View.GONE
+            if (downloading && !preparing) progressBar.progress = (p ?: 0).coerceIn(0, 100)
+            description.text = when (feedback) {
+                JamTrackStatus.LOADING -> itemView.context.getString(R.string.jams_preparing_track)
+                JamTrackStatus.ADDED -> itemView.context.getString(R.string.jams_track_added)
+                JamTrackStatus.FAILED -> itemView.context.getString(R.string.jams_track_failed)
+                else -> value.description.orEmpty()
+            }
+            description.visibility = if (description.text.isBlank()) View.GONE else View.VISIBLE
+            description.setTextColor(Color.parseColor(if (feedback == JamTrackStatus.FAILED) "#D96A55" else "#E0A458"))
 
             // Row tap is now the universal playback action (local or streaming).
             // The trailing affordance is always the overflow menu; download is
@@ -324,7 +345,7 @@ class RemoteResultsAdapter(
             more.visibility = View.VISIBLE
             more.setDotsColor(Color.parseColor("#F1EAD9"))
             play.mode = if (isPlaying && selectedTrackId == localId) StyledPlayButton.Mode.PAUSE else StyledPlayButton.Mode.PLAY
-            title.setTextColor(if (isPlaying && selectedTrackId == localId) Color.parseColor("#E0A458") else Color.parseColor("#F1EAD9"))
+            title.setTextColor(if (preparing || selectedTrackId == localId) Color.parseColor("#E0A458") else Color.parseColor("#F1EAD9"))
             val active = isPlaying && selectedTrackId == localId
             val playbackLabel = if (active) itemView.context.getString(R.string.ui_pausar_8e0f5e) else itemView.context.getString(R.string.ui_reproducir_d1a188)
             val state = buildList {

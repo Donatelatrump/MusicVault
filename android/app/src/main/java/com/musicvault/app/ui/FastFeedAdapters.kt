@@ -519,13 +519,22 @@ internal class NativeTrackHolder(
             progressFlow = flow
             progressJob = scope.launch {
                 // Reads holder fields instead of stale bind-time captures.
-                flow.collect { p ->
+                kotlinx.coroutines.flow.combine(flow, vm.jams.trackFeedback, vm.jams.state) { p, feedback, jam -> Triple(p, feedback, jam) }.collect { (p, feedback, jam) ->
                     val t = track ?: return@collect
+                    val status = feedback[t.id]?.status
+                    val waiting = status == com.musicvault.app.jams.JamTrackStatus.LOADING || (jam.active && jam.playback.buffering && jam.currentSong?.sourceTrackId == t.id)
+                    subtitle.text = when {
+                        waiting -> itemView.context.getString(R.string.jams_preparing_track)
+                        status == com.musicvault.app.jams.JamTrackStatus.ADDED -> itemView.context.getString(R.string.jams_track_added)
+                        status == com.musicvault.app.jams.JamTrackStatus.FAILED -> itemView.context.getString(R.string.jams_track_failed)
+                        else -> "${t.artistName} · ${t.albumTitle}"
+                    }
                     val ready = t.isDownloaded && !t.audioUri.isNullOrBlank()
                     val downloading = p != null && !ready
                     currentProgress = p
-                    progress.visibility = if (downloading) View.VISIBLE else View.GONE
-                    if (downloading) progress.progress = p!!.coerceIn(0, 100)
+                    progress.isIndeterminate = waiting
+                    progress.visibility = if (downloading || waiting) View.VISIBLE else View.GONE
+                    if (downloading && !waiting) progress.progress = p!!.coerceIn(0, 100)
                     // Playback is always the row tap. Keep overflow available
                     // for local and online tracks, including active downloads.
                     play.visibility = View.GONE

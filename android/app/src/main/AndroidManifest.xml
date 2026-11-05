@@ -65,6 +65,7 @@
 
         <activity
             android:name=".MainActivity"
+            android:launchMode="singleTask"
             android:exported="true"
             android:theme="@style/Theme.MusicVault.Starting"
             android:fitsSystemWindows="true"
@@ -72,6 +73,20 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="musicvault-jams-donatelatrump.web.app" android:pathPrefix="/jam/" />
+                <data android:scheme="https" android:host="musicvault-jams-donatelatrump.web.app" android:pathPrefix="/friend/" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="musicvault" android:host="jam" />
+                <data android:scheme="musicvault" android:host="friend" />
             </intent-filter>
         </activity>
     <receiver android:name=".widget.MusicWidgetProvider" android:exported="false">

@@ -1,0 +1,14 @@
+[
+  {
+    "relation": [
+      "delegate_permission/common.handle_all_urls"
+    ],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.musicvault.app",
+      "sha256_cert_fingerprints": [
+        "5D:EB:F0:3A:62:A4:45:5F:14:B8:24:31:5A:15:CF:C0:A2:D3:55:81:EF:CC:42:3C:D5:1C:9C:F3:86:F5:80:AF"
+      ]
+    }
+  }
+]

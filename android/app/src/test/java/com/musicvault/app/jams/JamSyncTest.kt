@@ -26,7 +26,7 @@ class JamSyncTest {
     }
     @Test fun onlyFullRandomInvitationCodesAreAccepted() {
         assertEquals("a".repeat(32), JamSync.roomCode(" AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA "))
-        assertEquals("a".repeat(32), JamSync.roomCode("https://musicvault.invalid/jam/" + "a".repeat(32)))
+        assertEquals("a".repeat(32), JamSync.roomCode("https://musicvault-jams-donatelatrump.web.app/jam/" + "a".repeat(32)))
         assertEquals("a".repeat(32), JamSync.roomCode("MusicVault JAMS: " + "a".repeat(32)))
         assertNull(JamSync.roomCode("123456"))
         assertNull(JamSync.roomCode("../rooms"))

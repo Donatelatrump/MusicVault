@@ -174,7 +174,8 @@ internal fun MiniPlayer(
     // from recomposing on every playback tick.
     val playbackProgress by vm.playbackProgress.collectAsStateWithLifecycle()
     val preparingTrackId by vm.preparingTrackId.collectAsStateWithLifecycle()
-    val isPreparing = preparingTrackId == track.id
+    val jam by vm.jams.state.collectAsStateWithLifecycle()
+    val isPreparing = preparingTrackId == track.id || jam.active && jam.playback.buffering
     val durationMs = if (isPreparing) track.durationMs else playbackProgress.durationMs.coerceAtLeast(track.durationMs)
     val positionMs = if (isPreparing) 0L else playbackProgress.positionMs
     val fraction = if (!isPreparing && durationMs > 0) (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
@@ -230,7 +231,7 @@ internal fun MiniPlayer(
                     overflow = TextOverflow.Ellipsis
                 )
             }
-            IconButton(onClick = onToggle, enabled = !isPreparing) {
+            IconButton(onClick = onToggle, enabled = !isPreparing || jam.active) {
                 Box(
                     modifier = Modifier
                         .size(if (hybrid) 44.dp else 40.dp)
@@ -238,7 +239,7 @@ internal fun MiniPlayer(
                         .background(VaultColors.Accent),
                     contentAlignment = Alignment.Center
                 ) {
-                    if (isPreparing) {
+                    if (isPreparing && !jam.active) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(if (hybrid) 20.dp else 17.dp),
                             strokeWidth = 2.dp,

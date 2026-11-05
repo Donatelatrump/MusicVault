@@ -30,6 +30,12 @@
           },
           "$other": {
             ".validate": false
+          },
+          "shortCode": {
+            ".validate": "newData.isString() && newData.val().matches(/^[0-9]{6}$/)"
+          },
+          "protocolVersion": {
+            ".validate": "newData.val() == 2"
           }
         },
         "members": {
@@ -59,6 +65,9 @@
             },
             "$other": {
               ".validate": false
+            },
+            "sourceTrackId": {
+              ".validate": "newData.isString() && newData.val().length <= 256"
             }
           }
         },
@@ -82,7 +91,123 @@
           },
           "$other": {
             ".validate": false
+          },
+          "buffering": {
+            ".validate": "newData.isBoolean()"
+          },
+          "commandId": {
+            ".validate": "newData.isString() && newData.val().length <= 64"
+          },
+          "action": {
+            ".validate": "newData.isString() && newData.val().length <= 32"
           }
+        },
+        "$other": {
+          ".validate": false
+        },
+        "ready": {
+          "$uid": {
+            ".write": "auth != null && auth.uid == $uid && root.child('rooms').child($room).child('members').child(auth.uid).val() == true && root.child('rooms').child($room).child('meta/expiresAt').val() > now",
+            ".validate": "newData.isString() && root.child('rooms').child($room).child('queue').child(newData.val()).exists()"
+          }
+        }
+      }
+    },
+    "friendInvites": {
+      "$code": {
+        ".read": "auth != null && data.child('expiresAt').val() > now",
+        ".write": "auth != null && ((!data.exists() && newData.child('ownerUid').val() == auth.uid && $code.matches(/^[a-f0-9]{32}$/)) || (!newData.exists() && data.child('ownerUid').val() == auth.uid))",
+        ".validate": "newData.hasChildren(['ownerUid','expiresAt'])",
+        "ownerUid": {
+          ".validate": "newData.isString()"
+        },
+        "expiresAt": {
+          ".validate": "newData.isNumber() && newData.val() > now && newData.val() <= now + 604800000"
+        },
+        "$other": {
+          ".validate": false
+        }
+      }
+    },
+    "friendRequests": {
+      "$target": {
+        ".read": "auth != null && auth.uid == $target",
+        "$from": {
+          ".read": "auth != null && auth.uid == $from",
+          ".write": "auth != null && $target != $from && ((!newData.exists() && (auth.uid == $target || auth.uid == $from)) || (auth.uid == $from && ((newData.child('inviteCode').isString() && root.child('friendInvites').child(newData.child('inviteCode').val()).child('ownerUid').val() == $target && root.child('friendInvites').child(newData.child('inviteCode').val()).child('expiresAt').val() > now) || (newData.child('roomCode').isString() && root.child('rooms').child(newData.child('roomCode').val()).child('members').child(auth.uid).val() == true && root.child('rooms').child(newData.child('roomCode').val()).child('members').child($target).val() == true && root.child('rooms').child(newData.child('roomCode').val()).child('meta/expiresAt').val() > now))))",
+          ".validate": "newData.hasChildren(['createdAt']) && (newData.hasChild('inviteCode') || newData.hasChild('roomCode'))",
+          "inviteCode": {
+            ".validate": "newData.isString() && newData.val().matches(/^[a-f0-9]{32}$/)"
+          },
+          "roomCode": {
+            ".validate": "newData.isString() && newData.val().matches(/^[a-f0-9]{32}$/)"
+          },
+          "createdAt": {
+            ".validate": "newData.isNumber() && newData.val() >= now - 60000 && newData.val() <= now + 1000"
+          },
+          "$other": {
+            ".validate": false
+          }
+        }
+      }
+    },
+    "friends": {
+      "$uid": {
+        ".read": "auth != null && auth.uid == $uid",
+        "$friend": {
+          ".read": "auth != null && auth.uid == $friend",
+          ".write": "auth != null && $uid != $friend && ((!newData.exists() && (auth.uid == $uid || auth.uid == $friend)) || (newData.val() == true && ((auth.uid == $uid && root.child('friendRequests').child($uid).child($friend).exists()) || (auth.uid == $friend && root.child('friendRequests').child($friend).child($uid).exists()))))",
+          ".validate": "newData.isBoolean() && newData.val() == true"
+        }
+      }
+    },
+    "roomInvites": {
+      "$target": {
+        ".read": "auth != null && auth.uid == $target",
+        "$from": {
+          ".write": "auth != null && ((!newData.exists() && (auth.uid == $target || auth.uid == $from)) || (auth.uid == $from && $target != $from && root.child('friends').child($from).child($target).val() == true && root.child('friends').child($target).child($from).val() == true && newData.child('roomCode').isString() && root.child('rooms').child(newData.child('roomCode').val()).child('members').child($from).val() == true && root.child('rooms').child(newData.child('roomCode').val()).child('meta/expiresAt').val() > now))",
+          ".validate": "newData.hasChildren(['roomCode','createdAt'])",
+          "roomCode": {
+            ".validate": "newData.isString() && newData.val().matches(/^[a-f0-9]{32}$/)"
+          },
+          "createdAt": {
+            ".validate": "newData.isNumber() && newData.val() >= now - 60000 && newData.val() <= now + 1000"
+          },
+          "$other": {
+            ".validate": false
+          }
+        }
+      }
+    },
+    "roomLookups": {
+      "$uid": {
+        ".read": "auth != null && auth.uid == $uid",
+        ".write": "auth != null && auth.uid == $uid && newData.exists() && (!data.exists() || now >= data.child('requestedAt').val() + 2000)",
+        ".validate": "newData.hasChildren(['code','requestedAt'])",
+        "code": {
+          ".validate": "newData.isString() && newData.val().matches(/^[0-9]{6}$/)"
+        },
+        "requestedAt": {
+          ".validate": "newData.isNumber() && newData.val() >= now - 1000 && newData.val() <= now"
+        },
+        "$other": {
+          ".validate": false
+        }
+      }
+    },
+    "roomCodes": {
+      "$code": {
+        ".read": "auth != null && ((data.child('ownerUid').val() == auth.uid) || (root.child('roomLookups').child(auth.uid).child('code').val() == $code && root.child('roomLookups').child(auth.uid).child('requestedAt').val() >= now - 10000 && (!data.exists() || data.child('expiresAt').val() > now)))",
+        ".write": "auth != null && $code.matches(/^[0-9]{6}$/) && ((!newData.exists() && data.child('ownerUid').val() == auth.uid) || (newData.exists() && (!data.exists() || data.child('expiresAt').val() <= now) && newData.child('ownerUid').val() == auth.uid && root.child('rooms').child(newData.child('roomId').val()).child('meta/hostUid').val() == auth.uid && root.child('rooms').child(newData.child('roomId').val()).child('meta/shortCode').val() == $code && root.child('rooms').child(newData.child('roomId').val()).child('meta/expiresAt').val() == newData.child('expiresAt').val()))",
+        ".validate": "newData.hasChildren(['roomId','ownerUid','expiresAt'])",
+        "roomId": {
+          ".validate": "newData.isString() && newData.val().matches(/^[a-f0-9]{32}$/)"
+        },
+        "ownerUid": {
+          ".validate": "newData.isString()"
+        },
+        "expiresAt": {
+          ".validate": "newData.isNumber() && newData.val() > now && newData.val() <= now + 86400000"
         },
         "$other": {
           ".validate": false

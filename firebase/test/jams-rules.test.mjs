@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { before, after, beforeEach, test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { initializeTestEnvironment, assertFails, assertSucceeds } from '@firebase/rules-unit-testing';
@@ -53,4 +54,74 @@ test('members cannot inject audio URLs, arbitrary private fields or invalid vide
   await assertFails(set(ref(client('host'), `${room()}/queue/song1`), {...song, audioUri:'https://private.example/audio'}));
   await assertFails(set(ref(client('host'), `${room()}/queue/song1`), {...song,videoId:'bad'}));
   await assertSucceeds(set(ref(client('host'), `${room()}/queue/song1`), song));
+});
+
+const friendCode = 'b'.repeat(32);
+async function friendship() {
+  await set(ref(client('host'), `friendInvites/${friendCode}`), {ownerUid:'host',expiresAt:Date.now()+86400000});
+  await set(ref(client('guest'), 'friendRequests/host/guest'), {inviteCode:friendCode,createdAt:Date.now()});
+  const {update} = await import('firebase/database');
+  await update(ref(client('host')), {'friends/host/guest':true,'friends/guest/host':true,'friendRequests/host/guest':null});
+}
+test('a shared friend link creates a request that only its recipient may accept', async () => {
+  await set(ref(client('host'), `friendInvites/${friendCode}`), {ownerUid:'host',expiresAt:Date.now()+86400000});
+  await assertSucceeds(set(ref(client('guest'), 'friendRequests/host/guest'), {inviteCode:friendCode,createdAt:Date.now()}));
+  await assertFails(set(ref(client('guest'), 'friends/guest/host'), true));
+  const {update} = await import('firebase/database');
+  await assertSucceeds(update(ref(client('host')), {'friends/host/guest':true,'friends/guest/host':true,'friendRequests/host/guest':null}));
+  await assertSucceeds(get(ref(client('guest'), 'friends/guest')));
+  await assertFails(get(ref(client('outsider'), 'friends/guest')));
+});
+test('arbitrary strangers cannot add friends or inspect friend requests', async () => {
+  await assertFails(set(ref(client('outsider'), 'friends/host/outsider'), true));
+  await assertFails(set(ref(client('outsider'), 'friendRequests/host/outsider'), {inviteCode:'f'.repeat(32),createdAt:Date.now()}));
+  await assertFails(get(ref(client('outsider'), 'friendRequests/host')));
+  await assertFails(get(ref(client('host'), 'friendInvites')));
+});
+test('room participants can send friend requests without a public user directory', async () => {
+  await create();
+  await set(ref(client('guest'), `${room()}/members/guest`), true);
+  await assertSucceeds(set(ref(client('guest'), 'friendRequests/host/guest'), {roomCode:code,createdAt:Date.now()}));
+  await assertFails(set(ref(client('outsider'), 'friendRequests/host/outsider'), {roomCode:code,createdAt:Date.now()}));
+});
+test('only accepted friends currently in a room may send room invitations', async () => {
+  await create();
+  await friendship();
+  await assertSucceeds(set(ref(client('host'), 'roomInvites/guest/host'), {roomCode:code,createdAt:Date.now()}));
+  await assertSucceeds(get(ref(client('guest'), 'roomInvites/guest')));
+  await assertFails(get(ref(client('outsider'), 'roomInvites/guest')));
+  await assertFails(set(ref(client('outsider'), 'roomInvites/guest/outsider'), {roomCode:code,createdAt:Date.now()}));
+});
+test('removing a friend removes both sides and prevents new room invitations', async () => {
+  await create();
+  await friendship();
+  const {update} = await import('firebase/database');
+  await assertSucceeds(update(ref(client('guest')), {'friends/host/guest':null,'friends/guest/host':null}));
+  await assertFails(set(ref(client('host'), 'roomInvites/guest/host'), {roomCode:code,createdAt:Date.now()}));
+});
+
+test('six digit codes resolve privately, reject collisions and expire with the room', async () => {
+  const expiry=Date.now()+3600000;
+  await set(ref(client('host'),room()), {meta:{hostUid:'host',expiresAt:expiry,shortCode:'012345',protocolVersion:2},members:{host:true},playback:playback(0)});
+  const directory={roomId:code,ownerUid:'host',expiresAt:expiry};
+  await assertSucceeds(set(ref(client('host'),'roomCodes/012345'),directory));
+  await assertFails(set(ref(client('host'),'roomCodes/012345'),directory));
+  await assertFails(get(ref(client('guest'),'roomCodes')));
+  await assertFails(get(ref(client('guest'),'roomCodes/012345')));
+  await assertSucceeds(set(ref(client('guest'),'roomLookups/guest'),{code:'012345',requestedAt:Date.now()}));
+  assert.equal((await assertSucceeds(get(ref(client('guest'),'roomCodes/012345')))).val().roomId,code);
+  await assertFails(set(ref(client('guest'),'roomLookups/guest'),{code:'123456',requestedAt:Date.now()}));
+  await assertFails(remove(ref(client('guest'),'roomLookups/guest')));
+  await assertFails(remove(ref(client('guest'),'roomCodes/012345')));
+  await assertSucceeds(remove(ref(client('host'),'roomCodes/012345')));
+});
+test('members publish only their own readiness and share buffered playback',async()=>{
+  await create();
+  await set(ref(client('guest'),`${room()}/members/guest`),true);
+  await assertSucceeds(set(ref(client('host'),`${room()}/queue/song1`),{videoId:'QTzZqdJ-oXw',title:'Friends',artist:'Test',durationMs:104000,addedBy:'host',sourceTrackId:'deezer:123'}));
+  await assertSucceeds(set(ref(client('host'),`${room()}/playback`),{...playback(1,true),songKey:'song1',buffering:true,commandId:'command-1',action:'select'}));
+  await assertSucceeds(set(ref(client('guest'),`${room()}/ready/guest`),'song1'));
+  await assertFails(set(ref(client('host'),`${room()}/ready/guest`),'song1'));
+  await assertFails(set(ref(client('guest'),`${room()}/ready/guest`),'missing'));
+  await assertSucceeds(remove(ref(client('guest'),`${room()}/ready/guest`)));
 });

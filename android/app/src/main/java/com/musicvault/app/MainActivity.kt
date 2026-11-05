@@ -1,6 +1,7 @@
 package com.musicvault.app
 
 import android.os.Bundle
+import android.content.Intent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -56,6 +57,7 @@ class MainActivity : androidx.fragment.app.FragmentActivity() {
         installSplashScreen()
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        if (savedInstanceState == null && intent?.action == Intent.ACTION_VIEW) viewModel.openJamLink(intent.dataString)
 
         // Warm the font files off the main thread so the first frame never
         // pays for reading/parsing the TTFs (runs in parallel with Providers).
@@ -82,6 +84,12 @@ class MainActivity : androidx.fragment.app.FragmentActivity() {
                 )
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.action == Intent.ACTION_VIEW) viewModel.openJamLink(intent.dataString)
     }
 
     override fun onResume() {

@@ -151,7 +151,7 @@ class MusicVaultViewModel(
     private val catalog = container.catalog
     private val searchCoordinator = SearchCoordinator(catalog)
     private val player = container.playback()
-    internal val jams by lazy {
+    internal val jams: com.musicvault.app.jams.JamsController by lazy {
         com.musicvault.app.jams.JamsController(appContext, viewModelScope, player, { isOnline.value },
             onEnter = {
                 stopDj()
@@ -165,8 +165,28 @@ class MusicVaultViewModel(
                 player.clearQueue()
                 _selectedTrack.value = null
             },
-            onTrack = { _selectedTrack.value = it; _preparingTrackId.value = null },
+            onTrack = { _selectedTrack.value = it; _preparingTrackId.value = if (jams.state.value.playback.playing) it.id else null },
+            onPreparing = { ready ->
+                if (ready != null) _selectedTrack.value = ready
+                _preparingTrackId.value = ready?.id
+            },
             onLeave = { explicitQueueMode = false; _selectedTrack.value = null; _preparingTrackId.value = null })
+    }
+    internal val jamFriends by lazy {
+        com.musicvault.app.jams.JamFriendsController(viewModelScope) {
+            val db = jams.authenticatedDatabase()
+            db to requireNotNull(jams.state.value.uid)
+        }
+    }
+    private val _jamLink = MutableStateFlow<com.musicvault.app.jams.JamInvitation.Link?>(null)
+    internal val jamLink = _jamLink.asStateFlow()
+    internal fun openJamLink(raw: String?) {
+        raw?.let(com.musicvault.app.jams.JamInvitation::parse)?.let { _jamLink.value = it }
+    }
+    internal fun consumeJamLink() { _jamLink.value = null }
+    internal suspend fun searchJamSongs(query: String): List<Track> = withContext(Dispatchers.IO) {
+        if (!isOnline.value || query.trim().length < 2) emptyList()
+        else catalog.searchTracksFast(query.trim(), 20).map(::catalogTrackForStreaming)
     }
     private val connectivityMonitor = container.connectivity()
     private val equalizer = AudioEffects()
@@ -1157,7 +1177,7 @@ class MusicVaultViewModel(
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MusicUiState(recommendedTracks = initialHomeRecommendations.first, recommendedAlbums = initialHomeRecommendations.second))
 
     init {
-        viewModelScope.launch { isOnline.collect { if (it) jams.connectIdentity() } }
+        viewModelScope.launch { isOnline.collect { if (it) { jams.connectIdentity(); jamFriends.connect() } } }
         // Precompute the next DJ batch after startup, without blocking first paint.
         viewModelScope.launch(Dispatchers.IO) {
             combine(_estadoInicialCargado, _preferencias, isOnline) { loaded, prefs, online ->
@@ -2002,7 +2022,7 @@ class MusicVaultViewModel(
     }
 
     fun selectTrack(track: Track) {
-        if (jams.active) { jams.addTrack(track); return }
+        if (jams.active) { jams.addAndPlay(track); return }
         recordUserSkip(track.id)
         selectTrackAtPosition(track, 0L)
     }
@@ -2278,7 +2298,7 @@ class MusicVaultViewModel(
     }
 
     fun playPlaylistTrack(playlist: Playlist, track: Track, shuffle: Boolean = if (playlist.id == DJ_MIX_ID) false else _shuffle.value) {
-        if (jams.active) { jams.addTrack(track); return }
+        if (jams.active) { jams.addAndPlay(track); return }
         viewModelScope.launch(Dispatchers.IO) {
             val allTracks = if (playlist.id == DJ_MIX_ID) _djState.value.upcoming else repository.getPlaylistTracks(playlist.id)
             val current = allTracks.firstOrNull { it.id == track.id }
@@ -3383,6 +3403,7 @@ class MusicVaultViewModel(
     }
 
     override fun onCleared() {
+        jamFriends.close()
         jams.close()
         stopDj()
         runCatching { appContext.unregisterReceiver(downloadReceiver) }
