@@ -1,0 +1,49 @@
+name: Android update metadata
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag containing signed Android release APKs
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-update-metadata-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || github.ref }}
+      - name: Generate metadata from published APKs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        shell: bash
+        run: |
+          mkdir -p /tmp/musicvault-release-apks
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' > /tmp/musicvault-release-assets.txt
+          if ! rg -q '^app-(arm64-v8a|armeabi-v7a|universal)-release\.apk$' /tmp/musicvault-release-assets.txt; then
+            echo 'No standard Android release APKs; skipping Android metadata.'
+            exit 0
+          fi
+          arguments=()
+          for abi in arm64-v8a armeabi-v7a universal; do
+            apk="app-$abi-release.apk"
+            if rg -Fxq "$apk" /tmp/musicvault-release-assets.txt; then
+              gh release download "$RELEASE_TAG" --pattern "$apk" --dir /tmp/musicvault-release-apks
+              arguments+=(--apk "$abi=/tmp/musicvault-release-apks/$apk")
+            fi
+          done
+          python3 android/tools/create_update_manifest.py --tag "$RELEASE_TAG" "${arguments[@]}"
+          gh release upload "$RELEASE_TAG" musicvault-android-update.json --clobber

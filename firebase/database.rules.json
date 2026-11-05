@@ -1,0 +1,93 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "installations": {
+      "$uid": {
+        ".read": "auth != null && auth.uid == $uid",
+        ".write": "auth != null && auth.uid == $uid",
+        ".validate": "newData.hasChildren(['installationUid'])",
+        "installationUid": {
+          ".validate": "newData.isString() && newData.val().matches(/^[a-f0-9-]{36}$/)"
+        },
+        "$other": {
+          ".validate": false
+        }
+      }
+    },
+    "rooms": {
+      "$room": {
+        ".read": "auth != null && data.child('members').child(auth.uid).val() == true && data.child('meta/expiresAt').val() > now",
+        ".write": "auth != null && ((!data.exists() && newData.child('meta/hostUid').val() == auth.uid && newData.child('members').child(auth.uid).val() == true && !newData.child('queue').exists() && $room.matches(/^[a-f0-9]{32}$/)) || (!newData.exists() && data.child('meta/hostUid').val() == auth.uid))",
+        ".validate": "newData.hasChildren(['meta','members','playback'])",
+        "meta": {
+          ".validate": "newData.hasChildren(['hostUid','expiresAt'])",
+          "hostUid": {
+            ".validate": "newData.isString() && (!data.exists() || newData.val() == data.val())"
+          },
+          "expiresAt": {
+            ".validate": "newData.isNumber() && newData.val() > now && newData.val() <= now + 86400000 && (!data.exists() || newData.val() == data.val())"
+          },
+          "$other": {
+            ".validate": false
+          }
+        },
+        "members": {
+          "$uid": {
+            ".write": "auth != null && auth.uid == $uid && root.child('rooms').child($room).child('meta/expiresAt').val() > now",
+            ".validate": "newData.isBoolean()"
+          }
+        },
+        "queue": {
+          "$song": {
+            ".write": "auth != null && root.child('rooms').child($room).child('members').child(auth.uid).val() == true && root.child('rooms').child($room).child('meta/expiresAt').val() > now && ((!data.exists() && newData.child('addedBy').val() == auth.uid) || (!newData.exists() && (data.child('addedBy').val() == auth.uid || root.child('rooms').child($room).child('meta/hostUid').val() == auth.uid) && root.child('rooms').child($room).child('playback/songKey').val() != $song))",
+            ".validate": "newData.hasChildren(['videoId','title','artist','durationMs','addedBy'])",
+            "videoId": {
+              ".validate": "newData.isString() && newData.val().matches(/^[A-Za-z0-9_-]{11}$/)"
+            },
+            "title": {
+              ".validate": "newData.isString() && newData.val().length <= 300"
+            },
+            "artist": {
+              ".validate": "newData.isString() && newData.val().length <= 300"
+            },
+            "durationMs": {
+              ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 86400000"
+            },
+            "addedBy": {
+              ".validate": "newData.isString()"
+            },
+            "$other": {
+              ".validate": false
+            }
+          }
+        },
+        "playback": {
+          ".write": "auth != null && root.child('rooms').child($room).child('members').child(auth.uid).val() == true && root.child('rooms').child($room).child('meta/expiresAt').val() > now",
+          ".validate": "newData.hasChildren(['songKey','playing','positionMs','effectiveAt','revision']) && ((!data.exists() && newData.child('revision').val() == 0) || newData.child('revision').val() > data.child('revision').val()) && ((newData.child('songKey').val() == '' && newData.child('playing').val() == false) || newData.parent().child('queue').child(newData.child('songKey').val()).exists())",
+          "songKey": {
+            ".validate": "newData.isString()"
+          },
+          "playing": {
+            ".validate": "newData.isBoolean()"
+          },
+          "positionMs": {
+            ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 86400000"
+          },
+          "effectiveAt": {
+            ".validate": "newData.isNumber() && newData.val() >= now - 30000 && newData.val() <= now + 10000"
+          },
+          "revision": {
+            ".validate": "newData.isNumber() && newData.val() >= 0"
+          },
+          "$other": {
+            ".validate": false
+          }
+        },
+        "$other": {
+          ".validate": false
+        }
+      }
+    }
+  }
+}

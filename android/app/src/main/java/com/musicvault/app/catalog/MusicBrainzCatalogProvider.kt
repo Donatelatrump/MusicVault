@@ -68,6 +68,15 @@ class MusicBrainzCatalogProvider : CatalogProvider {
         throw lastError ?: IllegalStateException("MusicBrainz: respuesta vacía")
     }
 
+    suspend fun artistsByTag(tag: String, offset: Int): Pair<List<String>, Boolean> {
+        val safe = tag.filter { it.isLetterOrDigit() || it in " -/&" }.take(100)
+        val root = getJson("artist", mapOf("query" to "tag:\"$safe\"", "limit" to "20", "offset" to offset.toString()))
+        val rows = root.optJSONArray("artists") ?: return emptyList<String>() to false
+        val names = (0 until rows.length()).mapNotNull { rows.optJSONObject(it)?.optString("name")?.takeIf(String::isNotBlank) }
+            .filterNot { it.lowercase(java.util.Locale.ROOT) in setOf("various artists", "[unknown]", "[no artist]") }
+        return names to (offset + rows.length() < root.optInt("count", 0))
+    }
+
     override suspend fun searchTracks(query: String, limit: Int): List<CatalogTrack> {
         val root = getJson(
             "recording",

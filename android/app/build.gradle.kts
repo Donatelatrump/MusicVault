@@ -5,6 +5,8 @@ plugins {
     id("com.google.devtools.ksp")
 }
 
+if (file("google-services.json").exists()) apply(plugin = "com.google.gms.google-services")
+
 android {
     namespace = "com.musicvault.app"
     compileSdk = 36
@@ -13,8 +15,8 @@ android {
         applicationId = "com.musicvault.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 26
-        versionName = "0.6.3"
+        versionCode = 38
+        versionName = "0.6.15"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         testProguardFiles("test-proguard-rules.pro")
 
@@ -106,6 +108,11 @@ composeCompiler {
 }
 
 dependencies {
+    // Pinned to Firebase's Kotlin 2.0-compatible generation; no Analytics dependency.
+    implementation(platform("com.google.firebase:firebase-bom:33.16.0"))
+    implementation("com.google.firebase:firebase-auth")
+    implementation("com.google.firebase:firebase-database")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.9.0")
     // Keep the runtime Kotlin libraries on the same line as the compiler/KSP.
     // This prevents a transitive dependency from silently pulling Kotlin 2.2.x
     // into a project still compiled with Kotlin 2.0.21.

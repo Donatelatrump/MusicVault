@@ -1,0 +1,13 @@
+{
+  "name": "musicvault-jams-validation",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "firebase emulators:exec --only database --project demo-musicvault 'node --test test/jams-rules.test.mjs'"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^4.0.1",
+    "firebase": "^11.10.0",
+    "firebase-tools": "15.35.0"
+  }
+}

@@ -11,10 +11,10 @@ object DownloadLyrics {
         source.equals("Deezer", ignoreCase = true) || source.equals("Spotify", ignoreCase = true)
 
     internal fun canUseStoredLyrics(source: String?, lyrics: Lyrics): Boolean =
-        lyrics.origin == if (usesCatalogLyrics(source)) "lrclib" else "youtube"
+        lyrics.origin in setOf(null, "user", "lrclib") || (!usesCatalogLyrics(source) && lyrics.origin == "youtube")
 
     internal inline fun fetchFromSource(source: String?, youtube: () -> Lyrics?, catalog: () -> Lyrics?): Lyrics? =
-        if (usesCatalogLyrics(source)) catalog() else youtube()
+        if (usesCatalogLyrics(source)) catalog() else youtube() ?: catalog()
 
     suspend fun fetch(appContext: Context, track: Track, localReference: String?): Lyrics? = withContext(Dispatchers.IO) {
         fetchFromSource(track.source, youtube = {
@@ -26,7 +26,7 @@ object DownloadLyrics {
                 LyricsProvider.keepOnlyTrustedSync(it, track.durationMs, exactTimeline = true).copy(origin = "youtube")
             }
         }, catalog = {
-            lyricsAttempt {
+            run {
                 LyricsProvider.fetch(
                     artist = track.artistName,
                     title = track.title,
@@ -35,16 +35,17 @@ object DownloadLyrics {
                 )
             }?.let {
                 LyricsProvider.keepOnlyTrustedSync(
-                    VocalActivityDetector.align(appContext, localReference, it), track.durationMs
+                    it, track.durationMs
                 ).copy(origin = "lrclib")
             }
         })
     }
 
     suspend fun persist(context: Context, track: Track, reference: String) {
-        val stored = LyricsLocalStore.read(context, reference)
+        val stored = LyricsLocalStore.readCached(context, track.id) ?: LyricsLocalStore.read(context, reference)
         if (stored != null && canUseStoredLyrics(track.source, stored)) return
         val lyrics = fetch(context, track, reference) ?: return
+        LyricsLocalStore.writeCached(context, track.id, lyrics)
         LyricsLocalStore.write(context, reference, lyrics)
     }
 }

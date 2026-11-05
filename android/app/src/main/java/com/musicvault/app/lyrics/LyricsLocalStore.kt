@@ -15,13 +15,31 @@ import java.io.File
  * This helper reads/writes the sibling .lrc file next to that reference.
  */
 object LyricsLocalStore {
+    private fun cacheFile(context: Context, trackId: String): File {
+        val key = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(trackId.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+        return File(context.filesDir, "lyrics-v2/$key.lrc")
+    }
+    suspend fun readCached(context: Context, trackId: String): Lyrics? = withContext(Dispatchers.IO) {
+        runCatching { LyricsProvider.parseStoredLrc(cacheFile(context, trackId).readText()) }.getOrNull()
+    }
+    suspend fun writeCached(context: Context, trackId: String, lyrics: Lyrics) = withContext(Dispatchers.IO) {
+        val file = cacheFile(context, trackId)
+        file.parentFile?.mkdirs()
+        val temp = File(file.parentFile, "${file.name}.tmp")
+        temp.writeText(LyricsProvider.buildLrc(lyrics))
+        check(temp.renameTo(file)) { "No se pudo guardar la letra" }
+    }
+    private fun audioFile(reference: String): File =
+        if (reference.startsWith("file://")) File(Uri.parse(reference).path ?: reference) else File(reference)
+
     suspend fun read(context: Context, localReference: String?): Lyrics? = withContext(Dispatchers.IO) {
         val reference = localReference?.trim().orEmpty()
         if (reference.isBlank()) return@withContext null
 
         val raw = when {
             reference.startsWith("content://") -> readDocument(context, Uri.parse(reference))
-            else -> readFile(File(reference))
+            else -> readFile(audioFile(reference))
         } ?: return@withContext null
 
         LyricsProvider.parseStoredLrc(raw)
@@ -36,7 +54,7 @@ object LyricsLocalStore {
 
         when {
             reference.startsWith("content://") -> writeDocument(context, Uri.parse(reference), text)
-            else -> writeFile(File(reference), text)
+            else -> writeFile(audioFile(reference), text)
         }
     }
 
@@ -50,11 +68,6 @@ object LyricsLocalStore {
         val lrcFile = audioFile.siblingLrc()
         return runCatching {
             lrcFile.parentFile?.mkdirs()
-            if (lrcFile.exists()) {
-                val existing = lrcFile.readText()
-                val stored = LyricsProvider.parseStoredLrc(existing)
-                if (stored != null && (lyricsOrigin(text) == null || stored.origin == lyricsOrigin(text))) return true
-            }
             lrcFile.writeText(text)
             true
         }.getOrDefault(false)
@@ -84,8 +97,6 @@ object LyricsLocalStore {
                     input.bufferedReader().use { it.readText() }
                 }
             }.getOrNull()
-            val stored = current?.let(LyricsProvider::parseStoredLrc)
-            if (stored != null && (lyricsOrigin(text) == null || stored.origin == lyricsOrigin(text))) return true
             runCatching { existing.delete() }
         }
 

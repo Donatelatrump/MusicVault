@@ -28,7 +28,7 @@ object ProviderErrors {
             httpStatus == 403 || text.contains("url expired") || text.contains("signature expired") || text.contains("http error 403") ->
                 ProviderFailure(ProviderErrorKind.URL_EXPIRED, "El enlace de audio caducó. Reintenta para obtener uno nuevo.", ProviderAction.RETRY, true)
             text.contains("extract") || text.contains("signature") || text.contains("nsig") || text.contains("player response") || text.contains("youtube") || text.contains("cambió su lector") ->
-                ProviderFailure(ProviderErrorKind.EXTRACTOR, "El extractor no pudo leer el proveedor. Comprueba una actualización de yt-dlp.", ProviderAction.UPDATE_EXTRACTOR, false)
+                ProviderFailure(ProviderErrorKind.EXTRACTOR, "No se pudo obtener el audio de YouTube. Reintenta; si el problema persiste, comprueba si hay una actualización de MusicVault.", ProviderAction.UPDATE_EXTRACTOR, false)
             else -> ProviderFailure(ProviderErrorKind.UNKNOWN, "No se pudo completar la petición. Reintenta.", ProviderAction.RETRY, true)
         }
     }

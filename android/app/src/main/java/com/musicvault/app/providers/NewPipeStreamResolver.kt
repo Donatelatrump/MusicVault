@@ -30,11 +30,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 
 /**
- * Fast native/JVM YouTube resolver used before yt-dlp.
+ * Native/JVM YouTube resolver for search, playback and downloads.
  *
  * NewPipeExtractor avoids the Python + QuickJS startup path that dominates the
- * measured MusicVault cold-start latency. yt-dlp remains the compatibility
- * fallback in Providers.resolveStream().
+ * measured MusicVault cold-start latency. NewPipe is bundled with the app.
  */
 internal data class NewPipeSearchItem(
     val id: String,
@@ -89,7 +88,7 @@ internal object NewPipeStreamResolver {
     /**
      * Lightweight YouTube search used by the catalog provider. Keeping search on
      * NewPipe avoids paying yt-dlp/Python startup just to decide that YouTube has
-     * results. yt-dlp remains a compatibility fallback in YouTubeMetadataProvider.
+     * results. YouTubeMetadataProvider uses these native results directly.
      */
     suspend fun searchYoutube(query: String, limit: Int): List<NewPipeSearchItem> =
         runInterruptible(Dispatchers.IO) {
@@ -265,7 +264,14 @@ internal object NewPipeStreamResolver {
             val started = android.os.SystemClock.elapsedRealtime()
             val info = StreamInfo.getInfo(ServiceList.YouTube, youtubeUrl)
             youtubeId(youtubeUrl)?.let { id ->
-                val tracks = info.subtitles.mapNotNull(::captionTrack)
+                val tracks = try {
+                    info.subtitles.mapNotNull(::captionTrack)
+                } catch (error: Exception) {
+                    if (error is CancellationException) throw error
+                    if (Thread.currentThread().isInterrupted) throw InterruptedException()
+                    Log.w(TAG, "Captions unavailable; continue resolving audio", error)
+                    emptyList()
+                }
                 val cached = CachedCaptions(id, tracks)
                 synchronized(captionCache) {
                     captionCache[id] = cached

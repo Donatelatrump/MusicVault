@@ -17,6 +17,7 @@ class MusicVaultApplication : Application(), ImageLoaderFactory {
 
     override fun onCreate() {
         super.onCreate()
+        com.musicvault.app.jams.InstallationIdentity.get(this)
         com.musicvault.app.diagnostics.PerformanceDiagnostics.initialize(this)
         com.musicvault.app.diagnostics.LocalCrashRecorder.install(this)
         Providers.init(this)

@@ -11,8 +11,8 @@ import kotlin.math.max
 data class LyricLine(val timeMs: Long, val text: String)
 
 /** Plain and/or synced lyrics for a track. */
-data class Lyrics(val plain: String?, val synced: List<LyricLine>, val origin: String? = null) {
-    val isEmpty: Boolean get() = plain.isNullOrBlank() && synced.isEmpty()
+data class Lyrics(val plain: String?, val synced: List<LyricLine>, val origin: String? = null, val instrumental: Boolean = false) {
+    val isEmpty: Boolean get() = !instrumental && plain.isNullOrBlank() && synced.isEmpty()
 }
 
 /**
@@ -43,7 +43,7 @@ object LyricsProvider {
     }
 
     private fun isUsable(lyrics: Lyrics): Boolean =
-        lyrics.synced.size >= MIN_SYNCED_LINES || (lyrics.plain?.length ?: 0) >= MIN_PLAIN_CHARS
+        lyrics.instrumental || lyrics.synced.size >= MIN_SYNCED_LINES || (lyrics.plain?.length ?: 0) >= MIN_PLAIN_CHARS
 
     private fun normalizedTokens(value: String): Set<String> = Normalizer
         .normalize(value.lowercase(Locale.ROOT), Normalizer.Form.NFD)
@@ -124,16 +124,17 @@ object LyricsProvider {
                 }
             }
             !lyrics.plain.isNullOrBlank() -> lyrics.plain.trimEnd()
-            else -> ""
+            else -> if (lyrics.instrumental) "[musicvault-instrumental:true]" else ""
         }
-        return if (body.isNotBlank() && lyrics.origin in setOf("youtube", "lrclib"))
+        return if (body.isNotBlank() && lyrics.origin in setOf("youtube", "lrclib", "user"))
             "[musicvault-source:${lyrics.origin}]\n$body" else body
     }
 
     fun parseStoredLrc(raw: String): Lyrics? {
-        val marker = Regex("(?m)^\\[musicvault-source:(youtube|lrclib)]\\r?$")
+        val marker = Regex("(?m)^\\[musicvault-source:(youtube|lrclib|user)]\\r?$")
         val origin = marker.find(raw)?.groupValues?.get(1)
         val body = raw.replace(marker, "").trim()
+        if (body == "[musicvault-instrumental:true]") return Lyrics(null, emptyList(), origin, instrumental = true)
         val synced = parseLrc(body)
         if (synced.isNotEmpty()) return Lyrics(plain = null, synced = synced, origin = origin)
         return body.takeIf { it.isNotBlank() }?.let { Lyrics(plain = it, synced = emptyList(), origin = origin) }
@@ -146,6 +147,9 @@ object LyricsProvider {
         durationMs: Long = 0L,
         requestBody: suspend (String) -> String? = LyricsRequest::get
     ): Lyrics? {
+        var requestFailed = false
+        suspend fun request(url: String): String? = try { requestBody(url) }
+        catch (e: java.io.IOException) { requestFailed = true; null }
         val durationSeconds = (durationMs / 1000L).takeIf { it > 0 }
         // 1. Try exact match query (with exact duration filter if available)
         val exact = lyricsAttempt {
@@ -155,7 +159,7 @@ object LyricsProvider {
                 if (!album.isNullOrBlank()) append("&album_name=").append(URLEncoder.encode(album.trim(), "UTF-8"))
                 if (durationSeconds != null) append("&duration=").append(durationSeconds)
             }
-            requestBody(query)
+            request(query)
         }
         val direct = exact?.let { body ->
             runCatching { keepOnlyTrustedSync(toLyrics(JSONObject(body)) ?: return@runCatching null, durationMs) }.getOrNull()
@@ -166,7 +170,7 @@ object LyricsProvider {
         val searchQuery = "https://lrclib.net/api/search?q=" +
             URLEncoder.encode("${title.trim()} ${artist.trim()}".trim(), "UTF-8")
         val candidates = lyricsAttempt {
-            val body = requestBody(searchQuery) ?: return@lyricsAttempt null
+            val body = request(searchQuery) ?: return@lyricsAttempt null
             val array = org.json.JSONArray(body)
             (0 until array.length()).mapNotNull { i ->
                 runCatching { array.getJSONObject(i) }.getOrNull()
@@ -198,13 +202,14 @@ object LyricsProvider {
         // Duration is useful for choosing a candidate, but it cannot establish a
         // vocal offset: different masters frequently have different outros.  The
         // caller aligns local audio with VocalActivityDetector when it has a file.
+        if (best == null && requestFailed) throw java.io.IOException("No se pudo consultar el proveedor de letras")
         return best?.first
     }
 
     private fun toLyrics(record: JSONObject): Lyrics? = runCatching {
         val plain = record.optString("plainLyrics").takeIf { it.isNotBlank() }
         val synced = record.optString("syncedLyrics").takeIf { it.isNotBlank() }?.let(::parseLrc) ?: emptyList()
-        Lyrics(plain, synced)
+        Lyrics(plain, synced, instrumental = record.optBoolean("instrumental", false))
     }.getOrNull()
 
     /** Parses LRC text: "01:23.45 line" — supports multiple timestamps per line. */

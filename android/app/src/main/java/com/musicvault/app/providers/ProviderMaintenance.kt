@@ -6,7 +6,7 @@ import kotlinx.coroutines.flow.asStateFlow
 data class ExtractorUpdateState(val version: String? = null, val checking: Boolean = false,
     val lastCheck: Long = 0, val message: String = "NewPipe extractor activo")
 
-/** Stub conservado para compatibilidad con referencias residuales. NewPipe no necesita actualización de extractor. */
+/** Stub conservado para compatibilidad con referencias residuales. NewPipe se actualiza junto con la app, no mediante un updater independiente. */
 object ProviderMaintenance {
     private val mutableState = MutableStateFlow(ExtractorUpdateState())
     val state = mutableState.asStateFlow()

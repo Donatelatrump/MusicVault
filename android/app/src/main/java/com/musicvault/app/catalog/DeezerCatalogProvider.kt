@@ -42,7 +42,7 @@ class DeezerCatalogProvider : CatalogProvider {
                         albumId = album?.optString("id"),
                         albumTitle = album?.optString("title"),
                         durationMs = r.optLong("duration", 0L) * 1000L,
-                        coverUri = album?.optString("cover_medium")?.takeIf { it.isNotBlank() }
+                        coverUri = album?.optString("cover_xl")?.takeIf { it.isNotBlank() }
                             ?: album?.optString("cover_big")?.takeIf { it.isNotBlank() },
                         provider = "deezer"
                     )
@@ -73,7 +73,7 @@ class DeezerCatalogProvider : CatalogProvider {
                         artistId = artist?.optString("id").orEmpty(),
                         artistName = artist?.optString("name") ?: "Artista desconocido",
                         year = year,
-                        coverUri = r.optString("cover_medium").takeIf { it.isNotBlank() }
+                        coverUri = r.optString("cover_xl").takeIf { it.isNotBlank() }
                             ?: r.optString("cover_big").takeIf { it.isNotBlank() },
                         provider = "deezer"
                     )

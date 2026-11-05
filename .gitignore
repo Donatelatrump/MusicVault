@@ -45,3 +45,8 @@ __pycache__/
 *.egg-info/
 .venv/
 dist/
+
+# Local Firebase tooling and emulator state
+firebase/node_modules/
+firebase/.firebase/
+firebase/*-debug.log

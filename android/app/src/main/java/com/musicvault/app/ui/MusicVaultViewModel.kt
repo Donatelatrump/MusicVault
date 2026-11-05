@@ -72,7 +72,7 @@ import kotlinx.coroutines.flow.first
 import kotlin.coroutines.resume
 import java.text.Normalizer
 
-enum class AppSection(val label: String) { HOME("Inicio"), SEARCH("Buscar"), LIBRARY("Biblioteca"), PLAYLISTS("Álbumes") }
+enum class AppSection(val label: String) { HOME("Inicio"), SEARCH("Buscar"), LIBRARY("Biblioteca"), PLAYLISTS("Playlists") }
 
 const val APP_DESIGN_HYBRID = "hybrid"
 const val APP_DESIGN_CLASSIC = "classic"
@@ -92,7 +92,8 @@ data class LyricsUiState(
     val loading: Boolean = false,
     val plain: String? = null,
     val synced: List<LyricLine> = emptyList(),
-    val notFound: Boolean = false
+    val notFound: Boolean = false,
+    val message: String? = null
 )
 
 @Immutable
@@ -150,10 +151,31 @@ class MusicVaultViewModel(
     private val catalog = container.catalog
     private val searchCoordinator = SearchCoordinator(catalog)
     private val player = container.playback()
+    internal val jams by lazy {
+        com.musicvault.app.jams.JamsController(appContext, viewModelScope, player, { isOnline.value },
+            onEnter = {
+                stopDj()
+                clearActivePlaylistPlayback()
+                streamSelectionGeneration++
+                queueGeneration++
+                explicitQueueMode = true
+                queueRestoreAttempted = true
+                restoredPlayback = null
+                _preparingTrackId.value = null
+                player.clearQueue()
+                _selectedTrack.value = null
+            },
+            onTrack = { _selectedTrack.value = it; _preparingTrackId.value = null },
+            onLeave = { explicitQueueMode = false; _selectedTrack.value = null; _preparingTrackId.value = null })
+    }
     private val connectivityMonitor = container.connectivity()
     private val equalizer = AudioEffects()
     private val preferences: SharedPreferences = com.musicvault.app.settings.AppPreferences.prefs(appContext)
-    private val homeRecommendationSnapshot = HomeRecommendationCache.load(preferences)
+    @Volatile private var homeRecommendationSnapshot = HomeRecommendationCache.load(preferences)
+    private val initialHomeRecommendations = homeRecommendationSnapshot?.let(HomeRecommendationCache::forToday)
+        ?: (emptyList<Track>() to emptyList<Album>())
+    private val djCachePreferences = appContext.getSharedPreferences("dj_precomputed_v1", Context.MODE_PRIVATE)
+    @Volatile private var djRecommendationSnapshot = HomeRecommendationCache.load(djCachePreferences)
     private val spotifySession = container.spotifySession
     private val spotifyClient = container.spotifyClient
 
@@ -378,11 +400,12 @@ class MusicVaultViewModel(
         guardarPreferencias(emptySet(), emptySet())
     }
     private var playlistJob: Job? = null
-    private var activePlaylistId: String? = null
+    private var activePlaylistId: String? = preferences.getString("playback_playlist_id", null)
     // Playlist streaming is deliberately windowed. Only the current item plus
     // two successors are resolved/prebuffered, preventing a 300-song playlist
     // from becoming 300 yt-dlp requests while still keeping Next/crossfade hot.
     private var activePlaylistOrder: List<Track> = emptyList()
+    private var activePlaylistOriginalOrder: List<Track> = emptyList()
     private var activePlaylistAppendIndex: Int = -1
     private val playlistLookAheadMutex = Mutex()
     private var playlistLookAheadJob: Job? = null
@@ -395,21 +418,18 @@ class MusicVaultViewModel(
     private val pendingQueueEntries = mutableListOf<PendingQueueEntry>()
     private var queueGeneration = 0L
     private val djEngine = DjRecommendationEngine()
-    private val _djState = MutableStateFlow(DjUiState())
+    private val _djState = MutableStateFlow(DjUiState(upcoming = djRecommendationSnapshot?.tracks.orEmpty()))
     val djState: StateFlow<DjUiState> = _djState.asStateFlow()
     private var djGeneration = 0L
     private var djJob: Job? = null
     private val djMutex = Mutex()
-    private var explicitQueueMode = false
+    private var explicitQueueMode = activePlaylistId != null || player.restoredQueueState != null
         set(value) {
             field = value
             if (value) stopDj()
             queueGeneration++
             pendingQueueEntries.clear()
         }
-    // True when the current track was played directly from search results
-    // (not from a playlist, album, or DJ). Used to trigger DJ mode on track end.
-    private var currentTrackFromSearch = false
     private var albumJob: Job? = null
     private var remoteAlbumJob: Job? = null
     // Small in-memory LRU for album track lists. Home recommendations often point
@@ -536,34 +556,73 @@ class MusicVaultViewModel(
     private suspend fun fastestLyrics(track: Track, localReference: String?) =
         com.musicvault.app.lyrics.DownloadLyrics.fetch(appContext, track, localReference)
 
-    fun loadLyrics(track: Track) {
-        if (_lyrics.value.trackId == track.id && (_lyrics.value.loading ||
-                _lyrics.value.plain != null || _lyrics.value.synced.isNotEmpty())
-        ) return
+    fun adjustLyricsOffset(track: Track, deltaMs: Long) {
+        val key = "lyrics_offset_${track.id}"
+        preferences.edit().putLong(key, (preferences.getLong(key, 0L) + deltaMs).coerceIn(-30_000L, 30_000L)).apply()
+        loadLyrics(track, reloadLocal = true)
+    }
+
+    fun importLyrics(track: Track, uri: android.net.Uri) {
+        viewModelScope.launch {
+            try {
+                val parsed = withContext(Dispatchers.IO) {
+                    val raw = appContext.contentResolver.openInputStream(uri)?.use { input ->
+                        val output = java.io.ByteArrayOutputStream()
+                        val buffer = ByteArray(8192)
+                        while (true) {
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            require(output.size() + count <= 1_048_576) { "La letra supera 1 MB" }
+                            output.write(buffer, 0, count)
+                        }
+                        output.toByteArray().toString(Charsets.UTF_8)
+                    } ?: error("No se pudo abrir la letra")
+                    LyricsProvider.parseStoredLrc(raw)?.copy(origin = "user") ?: error("Letra vacía")
+                }
+                LyricsLocalStore.writeCached(appContext, track.id, parsed)
+                loadLyrics(track, reloadLocal = true)
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (e: Exception) { showError(e.message ?: "No se pudo importar la letra") }
+        }
+    }
+
+    fun loadLyrics(track: Track, force: Boolean = false, reloadLocal: Boolean = false) {
+        if (!force && !reloadLocal && _lyrics.value.trackId == track.id &&
+            (_lyrics.value.loading || _lyrics.value.plain != null || _lyrics.value.synced.isNotEmpty())) return
         lyricsJob?.cancel()
         val cacheKey = lyricsCacheKey(track)
-        lyricsCache[cacheKey]?.let {
-            _lyrics.value = it
-            return
-        }
+        if (!force && !reloadLocal) lyricsCache[cacheKey]?.let { _lyrics.value = it; return }
         _lyrics.value = LyricsUiState(trackId = track.id, loading = true)
         lyricsJob = viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                com.musicvault.app.lyrics.lyricsAttempt {
-                    val localReference = database.downloadRecordDao().get(track.id)?.path ?: track.audioUri
-                    val local = com.musicvault.app.lyrics.lyricsAttempt {
-                        LyricsLocalStore.read(appContext, localReference)
-                    }?.takeIf {
-                        com.musicvault.app.lyrics.DownloadLyrics.canUseStoredLyrics(track.source, it) && !it.isEmpty
+            var failure: String? = null
+            val result = try {
+                withContext(Dispatchers.IO) {
+                    val reference = database.downloadRecordDao().get(track.id)?.path ?: track.audioUri
+                    val stored = if (force) null else LyricsLocalStore.readCached(appContext, track.id)
+                        ?: LyricsLocalStore.read(appContext, reference)?.takeIf {
+                            com.musicvault.app.lyrics.DownloadLyrics.canUseStoredLyrics(track.source, it)
+                        }
+                    val found = stored ?: if (isOnline.value) fastestLyrics(track, reference) else {
+                        failure = "Sin conexión. Esta canción todavía no tiene una letra guardada."
+                        null
                     }
-                    if (local != null) LyricsProvider.keepOnlyTrustedSync(local, track.durationMs, exactTimeline = true)
-                    else if (isOnline.value) fastestLyrics(track, localReference) else null
+                    found?.let {
+                        val trusted = LyricsProvider.keepOnlyTrustedSync(it, track.durationMs,
+                            exactTimeline = it.origin == "youtube" || it.origin == "user")
+                        LyricsLocalStore.writeCached(appContext, track.id, trusted)
+                        trusted
+                    }
                 }
-            }
-            // A canceled lookup must never publish over the next song.
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (_: Exception) { failure = "No se pudo consultar o guardar la letra. Reintenta."; null }
             ensureActive()
-            val state = if (result == null || result.isEmpty) LyricsUiState(trackId = track.id, notFound = true)
-                else LyricsUiState(trackId = track.id, plain = result.plain, synced = result.synced)
+            val offset = preferences.getLong("lyrics_offset_${track.id}", 0L)
+            val state = when {
+                result == null || result.isEmpty -> LyricsUiState(trackId = track.id, notFound = true, message = failure)
+                result.instrumental -> LyricsUiState(trackId = track.id, notFound = true, message = "Canción instrumental: no tiene letra.")
+                else -> LyricsUiState(trackId = track.id, plain = result.plain,
+                    synced = result.synced.map { it.copy(timeMs = (it.timeMs + offset).coerceAtLeast(0L)) })
+            }
             if (lyricsCache.size >= 40) lyricsCache.clear()
             if (!state.notFound) lyricsCache[cacheKey] = state
             _lyrics.value = state
@@ -897,7 +956,6 @@ class MusicVaultViewModel(
         val prefs = v[7] as? PrefModel ?: PrefModel()
         val initialPreferencesLoaded = v[8] as? Boolean ?: false
         val history = (v[9] as? List<*>)?.filterIsInstance<PlayHistoryEntity>().orEmpty()
-        val historyScores = RecommendationRanker.historyScores(history, System.currentTimeMillis())
         val profileKey = HomeRecommendationCache.profileKey(prefs.generosFavoritos, prefs.artistasFavoritos)
 
         // Paint the last persisted Home immediately while Room/catalog flows are
@@ -910,6 +968,12 @@ class MusicVaultViewModel(
             }
             return@combine emptyList<Track>() to emptyList()
         }
+
+        // A fresh computed batch is reused verbatim, rather than rescored on every Room emission.
+        homeRecommendationSnapshot?.takeIf { HomeRecommendationCache.isFresh(it, profileKey) }?.let {
+            return@combine HomeRecommendationCache.forToday(it)
+        }
+        val historyScores = RecommendationRanker.historyScores(history, System.currentTimeMillis())
 
         // User profile: artists/albums already in the vault plus explicit
         // first-run preferences. This makes onboarding affect Home immediately
@@ -1042,13 +1106,18 @@ class MusicVaultViewModel(
         val visibleTracks = tracksList.ifEmpty { matchingCache?.tracks.orEmpty() }
         val visibleAlbums = albumsList.ifEmpty { matchingCache?.albums.orEmpty() }
         if (tracksList.isNotEmpty() || albumsList.isNotEmpty()) {
-            HomeRecommendationCache.save(preferences, profileKey, visibleTracks, visibleAlbums)
+            // Cache only completed discovery batches. Partial startup emissions must
+            // not suppress the background refresh before its candidates arrive.
+            if (related.isNotEmpty() || !isOnline.value) {
+                HomeRecommendationCache.save(preferences, profileKey, visibleTracks, visibleAlbums)
+                homeRecommendationSnapshot = HomeRecommendationCache.Snapshot(profileKey, visibleTracks, visibleAlbums, System.currentTimeMillis())
+            }
         }
         HomeRecommendationCache.forToday(
             HomeRecommendationCache.Snapshot(profileKey, visibleTracks, visibleAlbums)
         )
     }.flowOn(Dispatchers.Default)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList<Track>() to emptyList())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), initialHomeRecommendations)
 
     // Keep rapidly changing download/player state out of recommendation calculation.
     // _search is intentionally excluded from the combined state to avoid recomposing
@@ -1085,9 +1154,26 @@ class MusicVaultViewModel(
             spotifyImporting = v[29] as? Boolean ?: false,
             spotifyPlaylistReview = v[30] as? SpotifyPlaylist
         )
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MusicUiState())
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MusicUiState(recommendedTracks = initialHomeRecommendations.first, recommendedAlbums = initialHomeRecommendations.second))
 
     init {
+        viewModelScope.launch { isOnline.collect { if (it) jams.connectIdentity() } }
+        // Precompute the next DJ batch after startup, without blocking first paint.
+        viewModelScope.launch(Dispatchers.IO) {
+            combine(_estadoInicialCargado, _preferencias, isOnline) { loaded, prefs, online ->
+                Triple(loaded, HomeRecommendationCache.profileKey(prefs.generosFavoritos, prefs.artistasFavoritos), online)
+            }.distinctUntilChanged().collectLatest { (loaded, profile, _) ->
+                if (!loaded || HomeRecommendationCache.isFresh(djRecommendationSnapshot, profile)) return@collectLatest
+                delay(5_000)
+                try {
+                    val mix = djMutex.withLock { precomputedDj() }
+                    if (activePlaylistId == null && _selectedPlaylist.value?.id != DJ_MIX_ID) {
+                        _djState.value = _djState.value.copy(upcoming = mix.first, reason = mix.second)
+                    }
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) { /* Keep the saved batch available on refresh failure. */ }
+            }
+        }
         val filter = IntentFilter().apply {
             addAction(DownloadEvents.ACTION_PROGRESS)
             addAction(DownloadEvents.ACTION_RESULT)
@@ -1140,7 +1226,9 @@ class MusicVaultViewModel(
             }
         }
         player.onNextItemNeeded = nextNeeded@{ finishedTrackId ->
-            if (restoringPlaybackQueue) return@nextNeeded
+            if (jams.active) return@nextNeeded
+            if (restoringPlaybackQueue || _preparingTrackId.value != null ||
+                finishedTrackId != _selectedTrack.value?.id) return@nextNeeded
             if (explicitQueueMode && activePlaylistId != null) {
                 // Managed playlist: replenish the small streaming look-ahead
                 // window instead of resolving/downloading the whole playlist.
@@ -1156,7 +1244,10 @@ class MusicVaultViewModel(
             }
         }
         player.onPlaybackError = errorHandler@{ trackId ->
+            if (jams.active) { jams.playbackFailed(); return@errorHandler }
             val id = trackId ?: return@errorHandler
+            if (_selectedTrack.value?.id != id) return@errorHandler
+            val selectionGeneration = streamSelectionGeneration
             val now = android.os.SystemClock.elapsedRealtime()
             // One forced re-resolution per 30 s per track prevents retry loops
             // while transparently recovering an expired CDN signature/403.
@@ -1175,12 +1266,15 @@ class MusicVaultViewModel(
                 )
                 if (refreshed == null) {
                     withContext(Dispatchers.Main.immediate) {
+                        if (selectionGeneration != streamSelectionGeneration || _selectedTrack.value?.id != id) return@withContext
+                        player.pause()
                         if (_preparingTrackId.value == id) _preparingTrackId.value = null
                         showError("No se pudo reanudar ${logical.title} por streaming.")
                     }
                     return@launch
                 }
                 withContext(Dispatchers.Main.immediate) {
+                    if (selectionGeneration != streamSelectionGeneration || _selectedTrack.value?.id != id) return@withContext
                     player.retryCurrent(refreshed)
                     _selectedTrack.value = refreshed
                 }
@@ -1226,7 +1320,8 @@ class MusicVaultViewModel(
         // and the tastes chosen during onboarding. The small delay keeps this
         // network work away from the first frame.
         viewModelScope.launch(Dispatchers.IO) {
-            combine(localTracks, _preferencias) { list, prefs ->
+            combine(localTracks, _preferencias, _estadoInicialCargado, isOnline) { list, prefs, loaded, online ->
+                if (!loaded || !online) return@combine emptyList<String>()
                 val downloadedArtists = list.filter { it.isDownloaded }
                     .asSequence()
                     .map { it.artistName.trim() }
@@ -1251,8 +1346,10 @@ class MusicVaultViewModel(
                 .collect { terms ->
                     val signature = profileSignature(terms)
                     if (!isOnline.value || signature.isBlank() || signature == fetchedArtistProfile) return@collect
+                    val profile = HomeRecommendationCache.profileKey(_preferencias.value.generosFavoritos, _preferencias.value.artistasFavoritos)
+                    if (HomeRecommendationCache.isFresh(homeRecommendationSnapshot, profile)) return@collect
                     fetchedArtistProfile = signature
-                    delay(350)
+                    delay(1_500)
                     runCatching {
                         val groups = terms.map { term ->
                             async {
@@ -1313,7 +1410,15 @@ class MusicVaultViewModel(
                 }
             }
             launch {
-                player.ended.filter { it > 0L }.collect { nextTrack() }
+                player.ended.filter { it > 0L }.collect {
+                    if (jams.active) {
+                        // One online peer advances automatically; everyone may advance manually.
+                        jams.ended(player.progress.value.trackId)
+                        return@collect
+                    }
+                    if (_preparingTrackId.value == null &&
+                        player.progress.value.trackId == _selectedTrack.value?.id) nextTrack()
+                }
             }
             launch {
                 combine(player.progress, player.isPlaying) { progress, playing -> progress.trackId to playing }
@@ -1655,7 +1760,7 @@ class MusicVaultViewModel(
             SEARCH_TRACK_REFINE_TIMEOUT_MS, SEARCH_REFINE_TIMEOUT_MS,
             onTracks = { publishRemoteTracks(generation, it) },
             onAlbums = { publishRemoteAlbums(generation, it) },
-            onFailure = { if (generation == searchGeneration) showError("La búsqueda falló. Comprueba la conexión o actualiza el extractor en Ajustes → Proveedores.") },
+            onFailure = { if (generation == searchGeneration) showError("La búsqueda falló. Comprueba la conexión y reintenta. Si persiste, comprueba si hay una actualización de MusicVault.") },
             onFinished = {
                 if (generation == searchGeneration) {
                     _searching.value = false
@@ -1897,6 +2002,7 @@ class MusicVaultViewModel(
     }
 
     fun selectTrack(track: Track) {
+        if (jams.active) { jams.addTrack(track); return }
         recordUserSkip(track.id)
         selectTrackAtPosition(track, 0L)
     }
@@ -1910,7 +2016,6 @@ class MusicVaultViewModel(
 
     private fun selectTrackAtPosition(track: Track, startPositionMs: Long) {
         stopDj()
-        currentTrackFromSearch = true
         if (!canPlayNow(track)) {
             showError("Sin conexión. Descarga la canción para escucharla sin Internet.")
             return
@@ -1929,7 +2034,10 @@ class MusicVaultViewModel(
         if (restoredPlayback?.track?.id != track.id) restoredPlayback = null
         clearActivePlaylistPlayback()
         explicitQueueMode = false
+        queueGeneration++
         val generation = ++streamSelectionGeneration
+        // An explicit selection supersedes the saved session, including when resolution fails.
+        queueRestoreAttempted = true
 
         if (track.audioUri != null && track.isDownloaded) {
             _preparingTrackId.value = null
@@ -1939,11 +2047,11 @@ class MusicVaultViewModel(
 
         // Remote taps update the UI immediately: the mini-player switches to
         // the requested song at once and shows a loader in its play button while
-        // NewPipe/yt-dlp fallback + Media3 prepare playback. Pause the previous audio so the new
+        // NewPipe extraction + Media3 prepare playback. Clear the previous queue so the new
         // title can never be displayed while an older song keeps sounding.
-        player.pause()
-        _selectedTrack.value = track
         _preparingTrackId.value = track.id
+        player.clearQueue()
+        _selectedTrack.value = track
 
         viewModelScope.launch {
             val streamed = resolveForStreaming(track)
@@ -1952,7 +2060,7 @@ class MusicVaultViewModel(
             if (generation != streamSelectionGeneration || _selectedTrack.value?.id != track.id) return@launch
             if (streamed == null) {
                 _preparingTrackId.value = null
-                showError(Providers.lastFailure.value?.message ?: "No se pudo preparar el audio. Reintenta o actualiza el extractor en Ajustes → Proveedores.")
+                showError(Providers.lastFailure.value?.message ?: "No se pudo preparar el audio. Reintenta; si persiste, comprueba si hay una actualización de MusicVault.")
                 return@launch
             }
             playReadyTrack(streamed, startPositionMs)
@@ -2053,6 +2161,7 @@ class MusicVaultViewModel(
     private var restoringPlaybackQueue = false
     private var queueRestoreAttempted = false
     fun togglePlayback() {
+        if (jams.active) { jams.toggle(); return }
         if (preferences.getBoolean("offline_mode", false) && _selectedTrack.value?.let { !isAvailableOffline(it) } == true) {
             showError("Esta canción necesita conexión. Elige un archivo disponible en tu biblioteca.")
             return
@@ -2099,12 +2208,13 @@ class MusicVaultViewModel(
             player.toggle()
         }
     }
-    fun seekTo(positionMs: Long) = player.seekTo(positionMs)
+    fun seekTo(positionMs: Long) { if (jams.active) jams.seek(positionMs) else player.seekTo(positionMs) }
     fun refreshPlaybackState() = player.refreshPlaybackState()
     fun openFullPlayer() { if (_selectedTrack.value != null) { _fullPlayer.value = true; savedState["full_player"] = true } }
     fun closeFullPlayer() { _fullPlayer.value = false; savedState["full_player"] = false }
 
     fun toggleShuffle() {
+        if (jams.active) { showError("JAMS sigue el orden de la cola compartida."); return }
         val enabled = !_shuffle.value
         _shuffle.value = enabled
         if (explicitQueueMode && activePlaylistId != null) {
@@ -2112,8 +2222,7 @@ class MusicVaultViewModel(
             // Rebuild only the future window instead of asking Media3 to shuffle a
             // queue that intentionally contains just current + two successors.
             val currentId = player.progress.value.trackId ?: _selectedTrack.value?.id
-            val selectedTracks = if (activePlaylistId == DJ_MIX_ID) _djState.value.upcoming
-                else _selectedPlaylistTracks.value.ifEmpty { activePlaylistOrder }
+            val selectedTracks = activePlaylistOriginalOrder
             val current = selectedTracks.firstOrNull { it.id == currentId } ?: return
             val all = if (isOnline.value) {
                 selectedTracks
@@ -2144,10 +2253,13 @@ class MusicVaultViewModel(
         }
     }
 
-    fun cycleRepeatMode() = player.cycleRepeatMode()
+    fun cycleRepeatMode() {
+        if (jams.active) showError("La repetición individual no está disponible en JAMS.") else player.cycleRepeatMode()
+    }
     fun setSleepTimer(minutes: Int) = player.setSleepTimer(minutes)
 
     fun playPlaylist(playlist: Playlist, shuffle: Boolean = _shuffle.value) {
+        if (jams.active) { showError("Sal de JAMS para reproducir una playlist personal."); return }
         viewModelScope.launch(Dispatchers.IO) {
             val allTracks = if (playlist.id == DJ_MIX_ID) _djState.value.upcoming else repository.getPlaylistTracks(playlist.id)
             if (allTracks.isEmpty()) {
@@ -2166,6 +2278,7 @@ class MusicVaultViewModel(
     }
 
     fun playPlaylistTrack(playlist: Playlist, track: Track, shuffle: Boolean = if (playlist.id == DJ_MIX_ID) false else _shuffle.value) {
+        if (jams.active) { jams.addTrack(track); return }
         viewModelScope.launch(Dispatchers.IO) {
             val allTracks = if (playlist.id == DJ_MIX_ID) _djState.value.upcoming else repository.getPlaylistTracks(playlist.id)
             val current = allTracks.firstOrNull { it.id == track.id }
@@ -2215,11 +2328,11 @@ class MusicVaultViewModel(
         requested: Track,
         shuffle: Boolean
     ) {
+        if (jams.active) { showError("Sal de JAMS para reproducir una playlist personal."); return }
         val (generation, selection) = withContext(Dispatchers.Main.immediate) {
             stopDj()
             clearActivePlaylistPlayback()
             explicitQueueMode = false
-            currentTrackFromSearch = false
             _selectedTrack.value = requested
             _preparingTrackId.value = requested.id
             player.pause()
@@ -2244,7 +2357,9 @@ class MusicVaultViewModel(
             if (generation != queueGeneration || selection != streamSelectionGeneration) return@withContext
             playlistLookAheadJob?.cancel()
             activePlaylistId = playlist.id
+            preferences.edit().putString("playback_playlist_id", playlist.id).apply()
             activePlaylistOrder = order
+            activePlaylistOriginalOrder = allTracks
             activePlaylistAppendIndex = logicalIndex
             if (_selectedPlaylist.value?.id == playlist.id) {
                 _selectedPlaylist.value = playlist
@@ -2256,9 +2371,7 @@ class MusicVaultViewModel(
             // Our logical order is already shuffled when requested. Keep Media3
             // shuffle off so dynamic append order remains deterministic.
             player.setShuffle(false)
-            val playableOrder = order.filter { it.audioUri != null }
-            val playableIndex = playableOrder.indexOfFirst { it.id == requested.id }.coerceAtLeast(0)
-            player.playQueue(playableOrder, playableIndex, false)
+            player.playQueue(listOf(ready), 0, false)
             _selectedTrack.value = ready
         }
         schedulePlaylistLookAhead(ready.id)
@@ -2276,13 +2389,28 @@ class MusicVaultViewModel(
     private suspend fun ensurePlaylistLookAhead(currentTrackId: String?, generation: Long) {
         playlistLookAheadMutex.withLock {
             if (!explicitQueueMode || activePlaylistId == null || generation != queueGeneration) return
+            val playlistId = activePlaylistId ?: return
+            if (activePlaylistOrder.isEmpty()) {
+                val restored = withContext(Dispatchers.IO) { repository.getPlaylistTracks(playlistId) }
+                if (generation != queueGeneration || activePlaylistId != playlistId) return
+                activePlaylistOriginalOrder = restored
+                activePlaylistOrder = restored
+                // Keep only the restored current item. The next items must be
+                // rebuilt from the playlist, never from an unrelated saved queue.
+                withContext(Dispatchers.Main.immediate) { player.trimAfterCurrent() }
+            }
             val id = currentTrackId ?: player.progress.value.trackId ?: _selectedTrack.value?.id ?: return
             val currentLogical = activePlaylistOrder.indexOfFirst { it.id == id }
             if (currentLogical < 0) return
             if (activePlaylistAppendIndex < currentLogical) activePlaylistAppendIndex = currentLogical
-            val target = (currentLogical + 2).coerceAtMost(activePlaylistOrder.lastIndex)
+            fun successorCount(): Int {
+                val items = queue.value
+                val currentIndex = items.indexOfFirst { it.id == id }
+                return if (currentIndex < 0) 0 else items.size - currentIndex - 1
+            }
 
-            while (activePlaylistAppendIndex < target && generation == queueGeneration && explicitQueueMode) {
+            while (activePlaylistAppendIndex < activePlaylistOrder.lastIndex &&
+                successorCount() < 2 && generation == queueGeneration && explicitQueueMode) {
                 val nextIndex = activePlaylistAppendIndex + 1
                 val candidate = activePlaylistOrder[nextIndex]
                 // Resolve URL + cache a small prefix before adding it to Media3.
@@ -2301,7 +2429,9 @@ class MusicVaultViewModel(
         playlistLookAheadJob?.cancel()
         playlistLookAheadJob = null
         activePlaylistId = null
+        preferences.edit().remove("playback_playlist_id").apply()
         activePlaylistOrder = emptyList()
+        activePlaylistOriginalOrder = emptyList()
         activePlaylistAppendIndex = -1
     }
 
@@ -2341,13 +2471,14 @@ class MusicVaultViewModel(
         val cached = _djState.value.upcoming
         _selectedPlaylist.value = djPlaylist(cached)
         _selectedPlaylistTracks.value = cached
-        if (!refresh && (cached.isNotEmpty() || _djState.value.loading)) return
+        val profile = HomeRecommendationCache.profileKey(_preferencias.value.generosFavoritos, _preferencias.value.artistasFavoritos)
+        if (!refresh && (_djState.value.loading || (cached.isNotEmpty() && HomeRecommendationCache.isFresh(djRecommendationSnapshot, profile)))) return
         djJob?.cancel()
         val token = ++djGeneration
         _djState.value = _djState.value.copy(loading = true, message = null)
         djJob = viewModelScope.launch {
             try {
-                val (candidates, reason) = djMutex.withLock { loadDjCandidates(null) }
+                val (candidates, reason) = djMutex.withLock { precomputedDj(force = refresh) }
                 if (token != djGeneration) return@launch
                 _djState.value = _djState.value.copy(loading = false, reason = reason, upcoming = candidates,
                     message = if (candidates.isEmpty()) "dj_no_candidates" else null)
@@ -2386,12 +2517,24 @@ class MusicVaultViewModel(
 
     fun pauseDj() { stopDj(); player.pause() }
 
+    private suspend fun precomputedDj(force: Boolean = false): Pair<List<Track>, String> {
+        val profile = HomeRecommendationCache.profileKey(_preferencias.value.generosFavoritos, _preferencias.value.artistasFavoritos)
+        val snapshot = djRecommendationSnapshot
+        if (!force && HomeRecommendationCache.isFresh(snapshot, profile)) return snapshot!!.tracks to "dj_reason_learning"
+        val result = loadDjCandidates(null)
+        if (result.first.isNotEmpty()) {
+            HomeRecommendationCache.save(djCachePreferences, profile, result.first, emptyList())
+            djRecommendationSnapshot = HomeRecommendationCache.Snapshot(profile, result.first, emptyList(), System.currentTimeMillis())
+        }
+        return result
+    }
+
     private suspend fun loadDjCandidates(current: Track?): Pair<List<Track>, String> {
         val history = withContext(Dispatchers.IO) { database.historyDao().recent(1_000) }
         val known = (localTracks.first() + cachedCatalogTracks.first().map(::catalogTrackForStreaming)
             + queue.value + listOfNotNull(_selectedTrack.value)).distinctBy { it.id }
         return djEngine.recommendations(history, known, _preferencias.value.artistasFavoritos.toList(),
-            emptySet(), current, isOnline.value, _offlinePlayableIds.value, ::catalogTrackForStreaming)
+            emptySet(), current, isOnline.value, _offlinePlayableIds.value, ::catalogTrackForStreaming, state.value.favoriteIds)
     }
 
 
@@ -2416,6 +2559,7 @@ class MusicVaultViewModel(
     suspend fun relatedArtists(track: Track) = if (isOnline.value) com.musicvault.app.providers.RelatedArtists.related(track.artistName) else emptyList()
 
     fun addToQueue(track: Track) {
+        if (jams.active) { jams.addTrack(track); return }
         if (!canPlayNow(track)) {
             showError("Sin conexión. Descarga la canción antes de agregarla a la cola.")
             return
@@ -2472,9 +2616,13 @@ class MusicVaultViewModel(
         }
     }
 
-    fun removeFromQueue(index: Int) = player.removeQueueItem(index)
+    fun removeFromQueue(index: Int) {
+        if (jams.active) showError("Gestiona la cola compartida desde JAMS.") else player.removeQueueItem(index)
+    }
 
-    fun moveQueueItem(from: Int, to: Int) = player.moveQueueItem(from, to)
+    fun moveQueueItem(from: Int, to: Int) {
+        if (jams.active) showError("Gestiona la cola compartida desde JAMS.") else player.moveQueueItem(from, to)
+    }
 
     fun setEqualizerEnabled(enabled: Boolean) {
         preferences.edit().putBoolean("eq_enabled", enabled).apply()
@@ -2531,6 +2679,7 @@ class MusicVaultViewModel(
     }
 
     fun nextTrack() {
+        if (jams.active) { jams.next(); return }
         recordUserSkip(null)
         val current = _selectedTrack.value ?: return
 
@@ -2540,7 +2689,7 @@ class MusicVaultViewModel(
         if (explicitQueueMode && activePlaylistId != null) {
             viewModelScope.launch {
                 val generation = queueGeneration
-                if (!player.hasNext()) ensurePlaylistLookAhead(current.id, generation)
+                ensurePlaylistLookAhead(current.id, generation)
                 if (generation == queueGeneration && explicitQueueMode) player.next()
             }
             return
@@ -2601,6 +2750,7 @@ class MusicVaultViewModel(
     }
 
     fun previousTrack() {
+        if (jams.active) { jams.previous(); return }
         val current = _selectedTrack.value ?: return
         // Keep Previous inside the explicit queue too.
         if (explicitQueueMode && queue.value.isNotEmpty()) {
@@ -2650,13 +2800,8 @@ class MusicVaultViewModel(
             }
         }
 
-        // If track was played from search and no album context, switch to DJ mode
-        if (currentTrackFromSearch && isOnline.value) {
-            currentTrackFromSearch = false
-            viewModelScope.launch { openDjAlbum() }
-            return
-        }
-
+        // Preparing a successor must never navigate away from the current screen.
+        // DJ is opened only by an explicit user action.
         val pool = state.value.downloaded.filter { it.audioUri != null && it.id != current.id }
         if (pool.isNotEmpty()) {
             val next = if (_shuffle.value) {
@@ -2857,7 +3002,7 @@ class MusicVaultViewModel(
             player.clearQueue()
             _selectedTrack.value = null
             _fullPlayer.value = false
-            activePlaylistId = null
+            clearActivePlaylistPlayback()
             explicitQueueMode = false
         }
         viewModelScope.launch(Dispatchers.IO) {
@@ -2897,7 +3042,7 @@ class MusicVaultViewModel(
     }
 
     fun clearSelection() {
-        activePlaylistId = null
+        clearActivePlaylistPlayback()
         explicitQueueMode = false
         _selectedTrack.value = null
         _selectedPlaylist.value = null
@@ -2992,7 +3137,7 @@ class MusicVaultViewModel(
                 )
                 onReady?.invoke(local)
                 onFinished?.invoke(local)
-                if (autoPlay) {
+                if (autoPlay && !jams.active) {
                     _selectedTrack.value = local
                     player.play(local)
                     enqueueSmartNext(local)
@@ -3238,6 +3383,7 @@ class MusicVaultViewModel(
     }
 
     override fun onCleared() {
+        jams.close()
         stopDj()
         runCatching { appContext.unregisterReceiver(downloadReceiver) }
         connectivityMonitor.close()

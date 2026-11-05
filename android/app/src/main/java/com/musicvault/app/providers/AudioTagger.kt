@@ -31,9 +31,17 @@ object AudioTagger {
                 val bytes = runInterruptible {
                     if (uri.startsWith("https://") && com.musicvault.app.settings.AppPreferences.prefs(context).getBoolean("offline_mode", false)) null
                     else if (uri.startsWith("https://")) {
-                        http.newCall(Request.Builder().url(uri).build()).execute().use { response ->
-                            if (!response.isSuccessful) null else response.body?.byteStream()?.use { readLimited(it) }
+                        val candidates = listOf(com.musicvault.app.catalog.CoverArt.highResolution(uri), uri).distinct()
+                        var result: ByteArray? = null
+                        for (candidate in candidates) {
+                            result = runCatching {
+                                http.newCall(Request.Builder().url(candidate).build()).execute().use { response ->
+                                    if (!response.isSuccessful) null else response.body?.byteStream()?.use { readLimited(it) }
+                                }
+                            }.getOrNull()
+                            if (result != null) break
                         }
+                        result
                     } else context.contentResolver.openInputStream(Uri.parse(uri))?.use { readLimited(it) }
                 }
                 val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }

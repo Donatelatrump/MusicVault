@@ -230,7 +230,7 @@ internal fun SpotifyClipboardNotice(
                     color = VaultColors.TextSecondary,
                     fontSize = if (hybrid) 9.sp else 11.sp,
                     fontFamily = if (hybrid) VaultFonts.Mono else VaultFonts.Body,
-                    letterSpacing = if (hybrid) 0.6.sp else 0.sp,
+                    letterSpacing = 0.sp,
                     maxLines = 1
                 )
             }
@@ -277,6 +277,7 @@ fun MusicVaultApp(
     val favoriteIds = state.favoriteIds
     val downloadDirLabel by vm.downloadDirLabel.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val appUpdates: com.musicvault.app.updates.AppUpdateViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
     val rootView = LocalView.current
     val lifecycleOwner = LocalLifecycleOwner.current
     // SAF directory picker for the user-selected download destination.
@@ -284,6 +285,7 @@ fun MusicVaultApp(
         ActivityResultContracts.OpenDocumentTree()
     ) { uri -> uri?.let(vm::chooseDownloadTree) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
+    var showJams by rememberSaveable { mutableStateOf(false) }
     var libraryPermissionRequested by rememberSaveable { mutableStateOf(false) }
     var showSpotifyLogin by rememberSaveable { mutableStateOf(false) }
     val searchState = remember(
@@ -384,6 +386,8 @@ fun MusicVaultApp(
         )
         return
     }
+
+    AppUpdateHost(appUpdates, online = isOnline, enabled = !onboardingFinishing)
 
     // Android only exposes clipboard contents while an app is in the foreground.
     // Register for exactly that lifecycle window and also inspect once on resume.
@@ -498,8 +502,12 @@ fun MusicVaultApp(
         }
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
-            if (showSettings && !state.fullPlayer) {
+            if (showJams && !state.fullPlayer) {
+                androidx.activity.compose.BackHandler { showJams = false }
+                JamsScreen(vm.jams, state.selectedTrack) { showJams = false }
+            } else if (showSettings && !state.fullPlayer) {
                 SettingsScreen(
+                    appUpdates = appUpdates,
                     crossfadeSeconds = state.crossfadeSeconds,
                     playerStyle = state.playerStyle,
                     appDesign = state.appDesign,
@@ -529,7 +537,7 @@ fun MusicVaultApp(
                             when {
                                 state.section == AppSection.SEARCH -> "Buscar"
                                 state.section == AppSection.LIBRARY -> stringResource(com.musicvault.app.R.string.ui_biblioteca_497ac5)
-                                state.section == AppSection.PLAYLISTS -> stringResource(com.musicvault.app.R.string.ui_listas_2a4d9a)
+                                state.section == AppSection.PLAYLISTS -> "Playlists"
                                 else -> "MusicVault"
                             },
                             color = VaultColors.TextPrimary,
@@ -539,6 +547,7 @@ fun MusicVaultApp(
                             letterSpacing = (-0.75).sp,
                             modifier = Modifier.weight(1f)
                         )
+                        TextButton(onClick = { showJams = true }) { Text("JAMS") }
                         Box(
                             Modifier
                                 .size(if (state.appDesign == APP_DESIGN_HYBRID) 44.dp else 34.dp)
@@ -1621,7 +1630,7 @@ internal fun BottomBar(section: AppSection, hybrid: Boolean, onSelect: (AppSecti
             BottomBarItem(AppSection.LIBRARY, stringResource(com.musicvault.app.R.string.ui_biblioteca_0b4762), section, hybrid, onSelect) {
                 Icon(if (section == AppSection.LIBRARY) VaultIcons.LibraryMusic else VaultIcons.LibraryMusicOutline, null)
             }
-            BottomBarItem(AppSection.PLAYLISTS, stringResource(com.musicvault.app.R.string.ui_albumes_fca454), section, hybrid, onSelect) {
+            BottomBarItem(AppSection.PLAYLISTS, "Playlists", section, hybrid, onSelect) {
                 Icon(if (section == AppSection.PLAYLISTS) VaultIcons.QueueMusic else VaultIcons.QueueMusicOutline, null)
             }
         }
@@ -1687,7 +1696,7 @@ internal fun RowScope.BottomBarItem(
             fontFamily = VaultFonts.Mono,
             fontWeight = if (active && hybrid) FontWeight.Bold else if (active) FontWeight.Medium else FontWeight.Normal,
             color = if (active) VaultColors.TextPrimary else VaultColors.TextTertiary,
-            letterSpacing = 0.8.sp
+            letterSpacing = 0.sp
         )
     }
 }
@@ -1917,8 +1926,7 @@ internal fun TrackActionsMenu(
                 setPadding(inset, inset, inset, inset)
                 val shape = android.graphics.drawable.GradientDrawable().apply {
                     cornerRadius = 16 * density
-                    setColor(android.graphics.Color.rgb(30, 27, 24))
-                    setStroke(density.roundToInt().coerceAtLeast(1), android.graphics.Color.rgb(50, 44, 37))
+                    setColor(android.graphics.Color.TRANSPARENT)
                 }
                 background = android.graphics.drawable.RippleDrawable(
                     android.content.res.ColorStateList.valueOf(android.graphics.Color.argb(50, 224, 164, 88)),

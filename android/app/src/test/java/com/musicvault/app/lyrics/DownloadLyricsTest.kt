@@ -20,15 +20,15 @@ class DownloadLyricsTest {
     }
 
     @Test
-    fun `other sources use only YouTube even when captions are unavailable`() {
+    fun `other sources fall back to catalog when captions are unavailable`() {
         for (source in listOf("youtube", "local", null)) {
             var catalogCalls = 0
             val result = DownloadLyrics.fetchFromSource(source,
                 youtube = { null },
                 catalog = { catalogCalls++; Lyrics("Studio lyrics", emptyList()) }
             )
-            assertEquals(null, result)
-            assertEquals(0, catalogCalls)
+            assertEquals("Studio lyrics", result?.plain)
+            assertEquals(1, catalogCalls)
         }
     }
 

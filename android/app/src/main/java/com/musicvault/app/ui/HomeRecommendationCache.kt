@@ -15,7 +15,8 @@ internal object HomeRecommendationCache {
     data class Snapshot(
         val profileKey: String,
         val tracks: List<Track>,
-        val albums: List<Album>
+        val albums: List<Album>,
+        val computedAt: Long = 0L
     )
 
     fun profileKey(genres: Set<String>, artists: Set<String>): String = buildString {
@@ -47,16 +48,16 @@ internal object HomeRecommendationCache {
                 )
             }.getOrNull()
         }
-        Snapshot(root.getString("profileKey"), tracks, albums).takeIf { tracks.isNotEmpty() || albums.isNotEmpty() }
+        Snapshot(root.getString("profileKey"), tracks, albums, root.optLong("computedAt", 0L)).takeIf { tracks.isNotEmpty() || albums.isNotEmpty() }
     }.getOrNull()
 
     fun save(preferences: SharedPreferences, profileKey: String, tracks: List<Track>, albums: List<Album>) {
         if (tracks.isEmpty() && albums.isEmpty()) return
-        val root = JSONObject().put("profileKey", profileKey)
+        val root = JSONObject().put("profileKey", profileKey).put("computedAt", System.currentTimeMillis())
         root.put("tracks", JSONArray().apply { tracks.forEach { track ->
             put(JSONObject().put("id", track.id).put("title", track.title).put("artistName", track.artistName)
                 .put("albumId", track.albumId).put("albumTitle", track.albumTitle).put("durationMs", track.durationMs)
-                .put("audioUri", track.audioUri).put("isDownloaded", track.isDownloaded).put("coverUri", track.coverUri)
+                .put("audioUri", track.audioUri.takeIf { track.isDownloaded }).put("isDownloaded", track.isDownloaded).put("coverUri", track.coverUri)
                 .put("source", track.source).put("sourceId", track.sourceId).put("url", track.url))
         } })
         root.put("albums", JSONArray().apply { albums.forEach { album ->
@@ -65,6 +66,10 @@ internal object HomeRecommendationCache {
         } })
         preferences.edit().putString(CACHE_KEY, root.toString()).putString(PROFILE_KEY, profileKey).apply()
     }
+
+    fun isFresh(snapshot: Snapshot?, profileKey: String, now: Long = System.currentTimeMillis()): Boolean =
+        snapshot != null && snapshot.profileKey == profileKey && snapshot.computedAt > 0L &&
+            now >= snapshot.computedAt && now - snapshot.computedAt < 24L * 60L * 60L * 1000L
 
     fun persistedProfileKey(preferences: SharedPreferences): String? = preferences.getString(PROFILE_KEY, null)
 

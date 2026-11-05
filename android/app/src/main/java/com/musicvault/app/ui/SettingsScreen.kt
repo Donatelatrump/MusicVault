@@ -25,6 +25,7 @@ import com.musicvault.app.ui.theme.VaultIcons
 @Composable
 internal fun SettingsScreen(
     vm: MusicVaultViewModel,
+    appUpdates: com.musicvault.app.updates.AppUpdateViewModel,
     crossfadeSeconds: Int,
     playerStyle: String,
     appDesign: String,
@@ -63,6 +64,7 @@ internal fun SettingsScreen(
             IconButton(onClick = onClose) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.ui_atras_0e715a), tint = VaultColors.TextPrimary) }
             Text(stringResource(R.string.ui_ajustes_9751f8), color = VaultColors.TextPrimary, fontSize = if (hybrid) 24.sp else 26.sp, fontWeight = FontWeight.Bold, fontFamily = VaultFonts.Display, letterSpacing = (-0.75).sp)
         }
+        AppUpdateSettings(appUpdates)
         SettingsSection(stringResource(R.string.ui_conexion_y_herramientas_baa597)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(stringResource(R.string.ui_modo_sin_conexion_f73a84), modifier = Modifier.weight(1f), color = VaultColors.TextPrimary)

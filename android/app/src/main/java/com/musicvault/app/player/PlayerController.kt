@@ -53,7 +53,7 @@ class PlayerController(context: Context) {
     private val controllerFuture: ListenableFuture<MediaController> = MediaController.Builder(
         context.applicationContext,
         SessionToken(context.applicationContext, ComponentName(context, MusicPlaybackService::class.java))
-    ).buildAsync()
+    ).setConnectionHints(android.os.Bundle().apply { putBoolean("musicvault.internal_playback", true) }).buildAsync()
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying
     private val _progress = MutableStateFlow(restoredSnapshot?.let {
@@ -147,6 +147,8 @@ class PlayerController(context: Context) {
                         if (playbackState == androidx.media3.common.Player.STATE_ENDED) _ended.value = System.nanoTime()
                     }
                     override fun onPlayerError(error: PlaybackException) {
+                        android.util.Log.e("MusicVaultPlayback",
+                            "Playback failed track=${controller.currentMediaItem?.mediaId} code=${error.errorCodeName}", error)
                         onPlaybackError?.invoke(controller.currentMediaItem?.mediaId?.takeIf { it.isNotBlank() })
                     }
                     override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) { _shuffle.value = shuffleModeEnabled }

@@ -329,34 +329,26 @@ internal fun SearchScreen(
     ) {
         OutlinedTextField(
             value = searchText,
+            placeholder = { Text("Canciones, artistas o playlists", maxLines = 1, overflow = TextOverflow.Ellipsis) },
             onValueChange = { searchText = it },
-            Modifier.fillMaxWidth(),
-            leadingIcon = { Icon(Icons.Default.Search, null, tint = VaultColors.TextSecondary) },
-            trailingIcon = {
-                Row(
-                    Modifier
-                        .padding(horizontal = 8.dp)
-                        .widthIn(min = 48.dp),
-                    horizontalArrangement = Arrangement.End
-                ) {
-                    if (searchText.isNotBlank()) {
-                        IconButton(
-                            onClick = { searchText = ""; submittedQuery = "" },
-                            enabled = true
-                        ) {
-                            Icon(
-                                Icons.Default.Close,
-                                stringResource(R.string.ui_cerrar_4b0816),
-                                tint = VaultColors.TextSecondary,
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-                    }
-                    IconButton(onClick = ::submitCurrentSearch, enabled = searchText.isNotBlank()) {
-                        Icon(Icons.AutoMirrored.Filled.Send, stringResource(R.string.ui_buscar_a62405), tint = VaultColors.Accent)
-                    }
+            modifier = Modifier.fillMaxWidth(),
+            leadingIcon = {
+                IconButton(onClick = ::submitCurrentSearch, enabled = searchText.isNotBlank()) {
+                    Icon(Icons.Default.Search, stringResource(R.string.ui_buscar_a62405), tint = VaultColors.Accent)
                 }
             },
+            trailingIcon = if (searchText.isNotEmpty()) {
+                {
+                    IconButton(onClick = { searchText = ""; submittedQuery = "" }) {
+                        Icon(
+                            Icons.Default.Close,
+                            stringResource(R.string.ui_limpiar_busqueda_493ecd),
+                            tint = VaultColors.TextSecondary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+            } else null,
             singleLine = true,
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
             keyboardActions = KeyboardActions(onSearch = { submitCurrentSearch() }),
@@ -698,12 +690,17 @@ internal fun CachedCover(
         return
     }
     val context = LocalContext.current
-    val request = remember(url, targetSizePx) {
+    val preferred = remember(url, targetSizePx) {
+        if (targetSizePx >= 500) com.musicvault.app.catalog.CoverArt.highResolution(url) else url
+    }
+    var useOriginal by remember(url, targetSizePx) { mutableStateOf(false) }
+    val imageUrl = if (useOriginal) url else preferred
+    val request = remember(imageUrl, targetSizePx) {
         ImageRequest.Builder(context)
-            .data(url)
+            .data(imageUrl)
             .size(Size(targetSizePx, targetSizePx))
-            .memoryCacheKey("musicvault:$url:$targetSizePx")
-            .diskCacheKey(url)
+            .memoryCacheKey("musicvault:$imageUrl:$targetSizePx")
+            .diskCacheKey(imageUrl)
             .crossfade(false)
             .build()
     }
@@ -712,7 +709,8 @@ internal fun CachedCover(
         imageLoader = CoverImageCache.loader(context),
         contentDescription = contentDescription,
         modifier = modifier,
-        contentScale = contentScale
+        contentScale = contentScale,
+        onError = { if (imageUrl != url) useOriginal = true }
     )
 }
 

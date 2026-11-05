@@ -62,7 +62,7 @@ object Providers {
     private var appContext: Context? = null
     fun isOffline(): Boolean = appContext?.let { prefs(it).getBoolean("offline_mode", false) } ?: false
 
-    private val activeProcesses = ConcurrentHashMap<String, String>()
+    private val activeProcesses = ConcurrentHashMap<String, okhttp3.Call>()
     private val activeCacheWriters = ConcurrentHashMap<String, CacheWriter>()
     private val cancelledRequests = ConcurrentHashMap.newKeySet<String>()
     private val mutableFailure = MutableStateFlow<ProviderFailure?>(null)
@@ -128,6 +128,7 @@ object Providers {
             try {
                 // Primary path: NewPipeExtractor. It avoids the Python + QuickJS
                 // startup measured at ~16-20 s on the test phone.
+                var extractionFailure: Exception? = null
                 var direct = youtubeUrl(sourceUrl)
                 if (direct == null) {
                     youtubeMatches[key]?.takeIf { it.expiresAtMs > now }?.let { cached ->
@@ -147,6 +148,7 @@ object Providers {
                             "MusicVaultStreamPerf",
                             "newpipe-match failed ${SystemClock.elapsedRealtime() - matchStarted}ms key=$key: ${error.message}"
                         )
+                        extractionFailure = error
                         null
                     }
                     if (direct != null) {
@@ -168,6 +170,7 @@ object Providers {
                             "MusicVaultStreamPerf",
                             "newpipe-stream failed ${SystemClock.elapsedRealtime() - newPipeStarted}ms key=$key: ${error.message}"
                         )
+                        extractionFailure = error
                         null
                     }
                     if (newPipe != null) {
@@ -184,7 +187,7 @@ object Providers {
                     }
                 }
 
-                mutableFailure.value = ProviderErrors.classify(IllegalStateException("YouTube extractor returned no audio"))
+                mutableFailure.value = ProviderErrors.classify(extractionFailure ?: IllegalStateException("YouTube extractor returned no audio"))
                 android.util.Log.w("MusicVaultStreamPerf", "newpipe returned no audio key=$key")
                 null
             } catch (error: CancellationException) {
@@ -262,7 +265,7 @@ object Providers {
         cacheKey: String? = requestId,
         albumTitle: String? = null,
         coverUri: String? = null
-    ): ProviderResult = {
+    ): ProviderResult =
         withContext(Dispatchers.IO) {
             val context = appContext
                 ?: return@withContext ProviderResult.Error("El proveedor no ha sido inicializado")
@@ -272,7 +275,7 @@ object Providers {
                 requestId?.let { cancelledRequests.remove(it) }
 
                 // Reuse the streaming buffer before starting a traditional
-                // yt-dlp file download. A complete cache is promoted directly.
+                // a separate file download. A complete cache is promoted directly.
                 // If it is partial, CacheWriter fills only the missing ranges,
                 // then the same cached bytes are materialized as the offline file.
                 if (quality.reuseStreamingCache) requestId?.let { taskId ->
@@ -318,7 +321,7 @@ object Providers {
                                 currentCoroutineContext().ensureActive()
                                 // A CDN URL can occasionally expire while filling
                                 // the cache. Unless the user cancelled, fall back
-                                // to the existing yt-dlp downloader below.
+                                // to a fresh resolution and HTTP download below.
                             } finally {
                                 activeCacheWriters.remove(taskId, writer)
                             }
@@ -361,7 +364,7 @@ object Providers {
                     throw CancellationException("Descarga cancelada")
                 }
 
-                val streamUrl = stream ?: run {
+                val streamUrl = stream?.url ?: run {
                     stagingDir.deleteRecursively()
                     return@withContext ProviderResult.Error(
                         "No se pudo obtener el stream de audio de YouTube",
@@ -397,8 +400,9 @@ object Providers {
                         body.byteStream().use { input ->
                             tmpFile.outputStream().use { output ->
                                 val buffer = ByteArray(8192)
-                                var read: Int
-                                while ({ read = input.read(buffer); read >= 0 }()) {
+                                while (true) {
+                                    val read = input.read(buffer)
+                                    if (read < 0) break
                                     if (Thread.currentThread().isInterrupted) throw InterruptedException()
                                     output.write(buffer, 0, read)
                                     bytesRead += read
@@ -509,7 +513,6 @@ object Providers {
                 else ProviderResult.Error(failure.message, failure)
             }
         }
-    }
 
     suspend fun download(
         track: CatalogTrack,

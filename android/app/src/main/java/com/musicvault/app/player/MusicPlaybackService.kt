@@ -1,6 +1,7 @@
 package com.musicvault.app.player
 
 import android.util.Log
+import com.musicvault.app.jams.JamTransportBridge
 
 import android.app.PendingIntent
 import android.content.Intent
@@ -85,6 +86,7 @@ class MusicPlaybackService : MediaLibraryService() {
         settings = com.musicvault.app.settings.AppPreferences.prefs(this)
         settings.registerOnSharedPreferenceChangeListener(settingsListener)
         player = buildPlayer()
+        JamTransportBridge.onActiveChanged = { applyAudioOptions(player) }
         attachPlayerListeners(player)
         restoreLocalQueue()
         serviceScope.launch {
@@ -171,11 +173,27 @@ class MusicPlaybackService : MediaLibraryService() {
                     })
                 }
 
+                override fun onPlayerInteractionFinished(session: MediaSession, controllerInfo: MediaSession.ControllerInfo, commands: Player.Commands) {
+                    if (controllerInfo.connectionHints.getBoolean("musicvault.internal_playback", false) || !JamTransportBridge.active) return
+                    if (commands.contains(Player.COMMAND_PLAY_PAUSE))
+                        JamTransportBridge.dispatch(JamTransportBridge.Command.Play(player.playWhenReady))
+                    else if (commands.contains(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM) || commands.contains(Player.COMMAND_SEEK_BACK) || commands.contains(Player.COMMAND_SEEK_FORWARD))
+                        JamTransportBridge.dispatch(JamTransportBridge.Command.Seek(player.currentPosition))
+                }
+
                 override fun onPlayerCommandRequest(
                     session: MediaSession,
                     controller: MediaSession.ControllerInfo,
                     playerCommand: Int
                 ): Int {
+                    if (JamTransportBridge.active && !controller.connectionHints.getBoolean("musicvault.internal_playback", false)) {
+                        val command = when (playerCommand) {
+                            Player.COMMAND_SEEK_TO_NEXT, Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM -> JamTransportBridge.Command.Next
+                            Player.COMMAND_SEEK_TO_PREVIOUS, Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM -> JamTransportBridge.Command.Previous
+                            else -> null
+                        }
+                        if (command != null) { JamTransportBridge.dispatch(command); return SessionError.ERROR_NOT_SUPPORTED }
+                    }
                     if (playerCommand == Player.COMMAND_SEEK_TO_NEXT || playerCommand == Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM) {
                         if (!player.hasNextMediaItem()) {
                             Log.d("MusicPlaybackService", "Bluetooth Next requested with no next item: preventing song restart")
@@ -197,6 +215,15 @@ class MusicPlaybackService : MediaLibraryService() {
                         intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT)
                     }
                     if (keyEvent?.action == KeyEvent.ACTION_DOWN) {
+                        val sharedCommand = when (keyEvent.keyCode) {
+                            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_HEADSETHOOK -> JamTransportBridge.Command.Toggle
+                            KeyEvent.KEYCODE_MEDIA_PLAY -> JamTransportBridge.Command.Play(true)
+                            KeyEvent.KEYCODE_MEDIA_PAUSE, KeyEvent.KEYCODE_MEDIA_STOP -> JamTransportBridge.Command.Play(false)
+                            KeyEvent.KEYCODE_MEDIA_NEXT -> JamTransportBridge.Command.Next
+                            KeyEvent.KEYCODE_MEDIA_PREVIOUS -> JamTransportBridge.Command.Previous
+                            else -> null
+                        }
+                        if (sharedCommand != null && JamTransportBridge.dispatch(sharedCommand)) return true
                         when (keyEvent.keyCode) {
                             KeyEvent.KEYCODE_MEDIA_NEXT -> {
                                 if (!player.hasNextMediaItem()) {
@@ -345,8 +372,8 @@ class MusicPlaybackService : MediaLibraryService() {
     }
 
     private fun applyAudioOptions(target: ExoPlayer) {
-        target.setPlaybackSpeed(settings.getFloat("playback_speed", 1f).coerceIn(0.5f, 2f))
-        target.skipSilenceEnabled = settings.getBoolean("skip_silence", false)
+        target.setPlaybackSpeed(if (JamTransportBridge.active) 1f else settings.getFloat("playback_speed", 1f).coerceIn(0.5f, 2f))
+        target.skipSilenceEnabled = !JamTransportBridge.active && settings.getBoolean("skip_silence", false)
     }
     private fun normalizedGain(target: ExoPlayer): Float = if (settings.getBoolean("normalize_volume", false))
         replayGains[target.currentMediaItem?.mediaId] ?: normalizedGains[target.currentMediaItem?.mediaId] ?: 1f else 1f
@@ -636,6 +663,7 @@ class MusicPlaybackService : MediaLibraryService() {
         mediaSession
 
     override fun onDestroy() {
+        JamTransportBridge.onActiveChanged = null
         savePlaybackSnapshot()
         com.musicvault.app.scrobble.ListenBrainz.observe(this, PlaybackRouteState.track.value, false, player.currentPosition.coerceAtLeast(0L))
         snapshotJob?.cancel()

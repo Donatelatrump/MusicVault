@@ -26,8 +26,25 @@ object RelatedArtists {
             return json
         }
     }
-    private fun artistId(name: String): String? = get("search/artist", name, 1).optJSONArray("data")
-        ?.optJSONObject(0)?.optString("id")?.takeIf { it.matches(Regex("[0-9]+")) }
+    internal fun selectArtist(rows: org.json.JSONArray, name: String): JSONObject? {
+        fun key(value: String) = java.text.Normalizer.normalize(value.lowercase(java.util.Locale.ROOT), java.text.Normalizer.Form.NFD)
+            .replace(Regex("\\p{M}+"), "").trim()
+        return (0 until rows.length()).mapNotNull { rows.optJSONObject(it) }
+            .filter { key(it.optString("name")) == key(name) }
+            .maxByOrNull { it.optLong("nb_fan", 0L) }
+    }
+    private fun artistRecord(name: String): JSONObject? =
+        get("search/artist", name, 50).optJSONArray("data")?.let { selectArtist(it, name) }
+    private fun artistId(name: String): String? = artistRecord(name)?.optString("id")?.takeIf { it.matches(Regex("[0-9]+")) }
+
+    data class ArtistDetails(val name: String, val photo: String?, val fans: Long)
+    suspend fun artistDetails(name: String): ArtistDetails? = runInterruptible(Dispatchers.IO) {
+        val row = artistRecord(name) ?: return@runInterruptible null
+        ArtistDetails(row.optString("name"), listOf("picture_big", "picture_medium", "picture").firstNotNullOfOrNull { key ->
+            row.optString(key).takeIf { it.startsWith("https://") }
+        }, row.optLong("nb_fan", 0L))
+    }
+    suspend fun portrait(name: String): String? = artistDetails(name)?.photo
 
     suspend fun related(artistName: String, limit: Int = 12): List<CatalogArtist> = runInterruptible(Dispatchers.IO) {
         val id = artistId(artistName) ?: return@runInterruptible emptyList()

@@ -42,7 +42,7 @@ internal object LyricsRequest {
 
             override fun onResponse(call: Call, response: Response) {
                 val body = try {
-                    response.use { if (it.isSuccessful) it.body?.string() else null }
+                    response.use { if (it.isSuccessful) it.body?.string() else if (it.code == 404) null else throw IOException("Letras: HTTP ${it.code}") }
                 } catch (error: IOException) {
                     continuation.resumeWithException(error)
                     return

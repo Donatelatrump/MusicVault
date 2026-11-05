@@ -308,7 +308,7 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
 
     @Composable private fun GreetingContent() {
         Column {
-            Text(greetingForNow(), color = VaultColors.TextPrimary, fontSize = if (hybridDesign) 24.sp else 30.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.5).sp)
+            Text(greetingForNow(), color = VaultColors.TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.Medium, letterSpacing = 0.sp)
         }
     }
 
@@ -806,8 +806,8 @@ private fun makeTrackRow(context: Context, hybrid: Boolean): LinearLayout {
     }
     row.addView(image)
     val text = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER_VERTICAL; layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(12) } }
-    text.addView(TextView(context).apply { tag="title"; setTextColor(Color.rgb(241,234,217)); textSize=15f; maxLines=2; ellipsize=android.text.TextUtils.TruncateAt.END; setTypeface(typeface, android.graphics.Typeface.BOLD) })
-    text.addView(TextView(context).apply { tag="subtitle"; setTextColor(Color.rgb(179,169,146)); textSize=12f; maxLines=2; ellipsize=android.text.TextUtils.TruncateAt.END })
+    text.addView(TextView(context).apply { tag="title"; setTextColor(Color.rgb(241,234,217)); textSize=15f; maxLines=1; ellipsize=android.text.TextUtils.TruncateAt.END; setTypeface(typeface, android.graphics.Typeface.BOLD) })
+    text.addView(TextView(context).apply { tag="subtitle"; setTextColor(Color.rgb(179,169,146)); textSize=12f; maxLines=1; ellipsize=android.text.TextUtils.TruncateAt.END })
     text.addView(ProgressBar(context, null, android.R.attr.progressBarStyleHorizontal).apply { tag="progress"; visibility=View.GONE; max=100; layoutParams=LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(2)).apply { topMargin=dp(3) } })
     row.addView(text)
     row.addView(NativePlayButton(context).apply { tag="play"; layoutParams=LinearLayout.LayoutParams(dp(48), dp(48)) })
@@ -1245,7 +1245,7 @@ private fun makeAlbumHeader(context: Context, hybrid: Boolean): LinearLayout {
         layoutParams = RecyclerView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
     }
     val text = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f) }
-    text.addView(TextView(context).apply { this.text = context.getString(R.string.ui_albumes_797807); setTextColor(Color.rgb(241,234,217)); textSize = if (hybrid) 24f else 28f; setTypeface(typeface, android.graphics.Typeface.BOLD) })
+    text.addView(TextView(context).apply { this.text = ""; setTextColor(Color.rgb(241,234,217)); textSize = if (hybrid) 24f else 28f; setTypeface(typeface, android.graphics.Typeface.BOLD) })
     root.addView(text)
     root.addView(ImageButton(context).apply {
         tag = "addAlbum"; background = null; setImageResource(android.R.drawable.ic_input_add); setColorFilter(Color.rgb(241,234,217));
@@ -1265,7 +1265,15 @@ private class AlbumCardHolder(context: Context, private val vm: MusicVaultViewMo
         itemView.setOnClickListener { playlist?.let(vm::openPlaylist) }
         more.setOnClickListener {
             val current = playlist ?: return@setOnClickListener
-            if (current.id != "playlist:favorites") onDelete?.invoke(current)
+            if (current.id != "playlist:favorites") {
+                android.widget.PopupMenu(itemView.context, more).apply {
+                    menu.add("Eliminar playlist").setOnMenuItemClickListener {
+                        onDelete?.invoke(current)
+                        true
+                    }
+                    show()
+                }
+            }
         }
     }
     fun bind(value: Playlist, onDelete: ((Playlist) -> Unit)?) {
@@ -1275,7 +1283,7 @@ private class AlbumCardHolder(context: Context, private val vm: MusicVaultViewMo
         description.text = value.description
         NativeAccessibility.describe(itemView, "${value.title}, ${value.description}", clickLabel = itemView.context.getString(R.string.ui_abrir_playlist_b7a8ce),
             decorative = listOf(cover, title, description))
-        NativeAccessibility.button(more, "Eliminar playlist ${value.title}")
+        NativeAccessibility.button(more, "Opciones de ${value.title}")
         more.visibility = if (value.id == "playlist:favorites") View.GONE else View.VISIBLE
         if (value.id == "playlist:favorites") {
             cover.setImageDrawable(HeartDrawable())
@@ -1307,15 +1315,15 @@ private fun makeAlbumCard(context: Context, hybrid: Boolean): LinearLayout {
             if (hybrid) setStroke(dp(1), Color.rgb(58,52,44))
         }
     }
-    root.addView(ImageView(context).apply { tag="albumCover"; layoutParams=LinearLayout.LayoutParams(dp(92), dp(92)); scaleType=ImageView.ScaleType.CENTER_INSIDE })
+    root.addView(ImageView(context).apply { tag="albumCover"; layoutParams=LinearLayout.LayoutParams(dp(60), dp(60)); scaleType=ImageView.ScaleType.CENTER_INSIDE })
     val text=LinearLayout(context).apply { orientation=LinearLayout.VERTICAL; gravity=Gravity.CENTER_VERTICAL; layoutParams=LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart=dp(14); marginEnd=dp(12) } }
-    text.addView(TextView(context).apply { tag="albumTitle"; setTextColor(Color.rgb(241,234,217)); textSize=16f; setTypeface(typeface, android.graphics.Typeface.BOLD); maxLines=2; ellipsize=android.text.TextUtils.TruncateAt.END })
-    text.addView(TextView(context).apply { tag="albumDescription"; setTextColor(Color.rgb(179,169,146)); textSize=13f; maxLines=2; ellipsize=android.text.TextUtils.TruncateAt.END })
+    text.addView(TextView(context).apply { tag="albumTitle"; setTextColor(Color.rgb(241,234,217)); textSize=15f; setTypeface(typeface, android.graphics.Typeface.BOLD); maxLines=1; ellipsize=android.text.TextUtils.TruncateAt.END })
+    text.addView(TextView(context).apply { tag="albumDescription"; setTextColor(Color.rgb(179,169,146)); textSize=12f; maxLines=1; ellipsize=android.text.TextUtils.TruncateAt.END })
     root.addView(text)
     root.addView(ImageButton(context).apply {
         tag = "albumMore"
         background = null
-        setImageResource(android.R.drawable.ic_menu_delete)
+        setImageResource(R.drawable.ic_vault_more)
         setColorFilter(Color.WHITE)
         contentDescription = context.getString(R.string.ui_eliminar_playlist_12e613)
         layoutParams = LinearLayout.LayoutParams(dp(48), dp(48))

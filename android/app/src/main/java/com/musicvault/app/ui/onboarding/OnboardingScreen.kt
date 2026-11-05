@@ -85,6 +85,12 @@ import com.musicvault.app.ui.theme.VaultColors
 import com.musicvault.app.ui.theme.VaultFonts
 import com.musicvault.app.ui.theme.VaultIcons
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.runtime.derivedStateOf
 
 private enum class OnboardingStep { GENRES, ARTISTS }
 
@@ -215,57 +221,48 @@ private fun GenreSelectionPage(
     onContinue: () -> Unit,
     onSkip: () -> Unit
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var taxonomy by remember { mutableStateOf(genreOptions) }
+    var query by remember { mutableStateOf("") }
+    var visibleCount by remember(query) { mutableIntStateOf(36) }
+    LaunchedEffect(Unit) {
+        val all = withContext(Dispatchers.IO) { context.assets.open("music_genres.txt").bufferedReader().use { it.readLines() } }
+        taxonomy = (genreOptions + all).distinctBy { it.lowercase(java.util.Locale.ROOT) }
+    }
+    val matches = remember(taxonomy, query) { taxonomy.filter { it.contains(query, ignoreCase = true) } }
+    val grid = rememberLazyGridState()
+    LaunchedEffect(query) { grid.scrollToItem(0) }
+    val nearEnd by remember { derivedStateOf {
+        val info = grid.layoutInfo
+        info.totalItemsCount > 0 && (info.visibleItemsInfo.lastOrNull()?.index ?: 0) >= info.totalItemsCount - 6
+    } }
+    LaunchedEffect(nearEnd, visibleCount, matches.size) {
+        if (nearEnd && visibleCount < matches.size) visibleCount = (visibleCount + 36).coerceAtMost(matches.size)
+    }
     Box(Modifier.fillMaxSize()) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 116.dp)
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive(140.dp), state = grid,
+            modifier = Modifier.fillMaxSize().padding(horizontal = 20.dp),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(top = 16.dp, bottom = 122.dp),
+            horizontalArrangement = Arrangement.spacedBy(9.dp), verticalArrangement = Arrangement.spacedBy(9.dp)
         ) {
-            OnboardingTopBar(step = 1)
-            Spacer(Modifier.height(34.dp))
-            Text(
-                text = "¿Qué suena en tu bóveda?",
-                color = VaultColors.TextPrimary,
-                fontFamily = VaultFonts.Display,
-                fontWeight = FontWeight.Bold,
-                fontSize = 31.sp,
-                lineHeight = 35.sp,
-                letterSpacing = (-0.8).sp
-            )
-            Spacer(Modifier.height(10.dp))
-            Text(
-                text = "Elige uno o varios géneros. Mezcla sin miedo: esto solo afina tu inicio.",
-                color = VaultColors.TextSecondary,
-                style = MaterialTheme.typography.bodyLarge
-            )
-            Spacer(Modifier.height(26.dp))
-
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(9.dp),
-                verticalArrangement = Arrangement.spacedBy(9.dp)
-            ) {
-                genreOptions.forEach { genre ->
-                    GenreChip(
-                        genre = genre,
-                        selected = genre in selected,
-                        onClick = { onToggle(genre) }
-                    )
+            item(span = { GridItemSpan(maxLineSpan) }) { OnboardingTopBar(step = 1) }
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                Column(Modifier.padding(vertical = 20.dp)) {
+                    Text("¿Qué suena en tu bóveda?", color = VaultColors.TextPrimary, fontSize = 29.sp, lineHeight = 35.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(10.dp))
+                    Text("Elige tus géneros. Desliza para descubrir más.", color = VaultColors.TextSecondary)
+                    Spacer(Modifier.height(14.dp))
+                    OutlinedTextField(value = query, onValueChange = { query = it }, singleLine = true,
+                        placeholder = { Text("Buscar género") }, modifier = Modifier.fillMaxWidth())
+                    Text("${matches.size} géneros · catálogo MusicBrainz", color = VaultColors.TextTertiary, fontSize = 11.sp)
                 }
             }
-
-            Spacer(Modifier.height(22.dp))
-            TextButton(
-                onClick = onSkip,
-                modifier = Modifier.align(Alignment.CenterHorizontally)
-            ) {
-                Text(
-                    stringResource(R.string.ui_prefiero_configurarlo_despues_fc6294),
-                    color = VaultColors.TextTertiary,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium
-                )
+            items(matches.take(visibleCount), key = { "genre:$it" }) { genre ->
+                GenreChip(genre = genre, selected = genre in selected, onClick = { onToggle(genre) })
+            }
+            item(span = { GridItemSpan(maxLineSpan) }) {
+                TextButton(onClick = onSkip) { Text(stringResource(R.string.ui_prefiero_configurarlo_despues_fc6294), color = VaultColors.TextTertiary) }
             }
         }
 
@@ -288,6 +285,37 @@ private fun ArtistSelectionPage(
     onBack: () -> Unit,
     onContinue: () -> Unit
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
+    val catalog = remember(genres) { com.musicvault.app.catalog.OnboardingCatalog() }
+    var remoteArtists by remember(genres) { mutableStateOf(emptyList<com.musicvault.app.providers.RelatedArtists.ArtistDetails>()) }
+    var loadingMore by remember(genres) { mutableStateOf(false) }
+    var hasMore by remember(genres) { mutableStateOf(true) }
+    var loadError by remember(genres) { mutableStateOf(false) }
+    val artistGrid = rememberLazyGridState()
+    fun loadMore() {
+        if (loadingMore || !hasMore) return
+        loadingMore = true
+        loadError = false
+        scope.launch {
+            try {
+                val page = catalog.next(context.applicationContext, genres)
+                remoteArtists = (remoteArtists + page.artists).distinctBy { it.name.lowercase(java.util.Locale.ROOT) }
+                hasMore = page.hasMore
+            } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (_: Exception) { loadError = true }
+            finally { loadingMore = false }
+        }
+    }
+    val displayedArtists = remember(remoteArtists, suggestions) {
+        (remoteArtists.sortedByDescending { it.fans }.map { it.name } + suggestions).distinct()
+    }
+    val nearEnd by remember { derivedStateOf {
+        val info = artistGrid.layoutInfo
+        (info.visibleItemsInfo.lastOrNull()?.index ?: 0) >= info.totalItemsCount - 6
+    } }
+    LaunchedEffect(genres) { loadMore() }
+    LaunchedEffect(nearEnd, displayedArtists.size) { if (nearEnd && !loadError) loadMore() }
     var artistInput by remember { mutableStateOf("") }
 
     fun addCustomArtist() {
@@ -300,8 +328,8 @@ private fun ArtistSelectionPage(
 
     // Keep the expensive set/list work outside individual grid cells. The grid
     // itself receives stable artist keys and only composes what is visible.
-    val customArtists = remember(selected, suggestions) {
-        selected.filterNot { it in suggestions }
+    val customArtists = remember(selected, displayedArtists) {
+        selected.filterNot { it in displayedArtists }
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -379,7 +407,7 @@ private fun ArtistSelectionPage(
                     letterSpacing = 1.sp
                 )
                 Text(
-                    text = "${suggestions.size} artistas",
+                    text = "${displayedArtists.size} artistas",
                     color = VaultColors.TextTertiary,
                     fontFamily = VaultFonts.Mono,
                     fontSize = 9.sp
@@ -393,6 +421,7 @@ private fun ArtistSelectionPage(
             // almost no remeasurement while scrolling.
             LazyVerticalGrid(
                 columns = GridCells.Fixed(2),
+                state = artistGrid,
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f),
@@ -401,7 +430,7 @@ private fun ArtistSelectionPage(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(
-                    items = suggestions,
+                    items = displayedArtists,
                     key = { "suggestion:$it" },
                     contentType = { "artist" }
                 ) { artist ->
@@ -410,6 +439,16 @@ private fun ArtistSelectionPage(
                         selected = artist in selected,
                         onClick = { onToggle(artist) }
                     )
+                }
+
+                item(key = "load-more", span = { GridItemSpan(maxLineSpan) }) {
+                    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                        if (loadingMore) Text("Cargando artistas…", color = VaultColors.TextSecondary)
+                        else if (hasMore) TextButton(onClick = { loadMore() }) {
+                            Text(if (loadError) "Reintentar carga" else "Cargar más artistas")
+                        }
+                        Text("Ordenados por popularidad disponible en el catálogo", color = VaultColors.TextTertiary, fontSize = 10.sp)
+                    }
                 }
 
                 if (customArtists.isNotEmpty()) {
@@ -546,6 +585,11 @@ private fun ArtistCard(
     modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var portrait by remember(artist) { mutableStateOf<String?>(null) }
+    LaunchedEffect(artist) {
+        portrait = com.musicvault.app.catalog.ArtistPortraits.load(context.applicationContext, artist)
+    }
     val accent = remember(artist) {
         VaultColors.SpineAccents[(artist.hashCode() and Int.MAX_VALUE) % VaultColors.SpineAccents.size]
     }
@@ -582,7 +626,7 @@ private fun ArtistCard(
         ) {
             Box(
                 modifier = Modifier
-                    .size(34.dp)
+                    .size(44.dp)
                     .clip(CircleShape)
                     .background(accent.copy(alpha = if (selected) 0.26f else 0.18f)),
                 contentAlignment = Alignment.Center
@@ -594,6 +638,15 @@ private fun ArtistCard(
                     fontWeight = FontWeight.Bold,
                     fontSize = 10.sp
                 )
+                if (portrait != null) {
+                    coil.compose.AsyncImage(
+                        model = coil.request.ImageRequest.Builder(context).data(portrait).size(160).crossfade(true).build(),
+                        imageLoader = com.musicvault.app.catalog.CoverImageCache.loader(context),
+                        contentDescription = null,
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
             }
             Spacer(Modifier.width(8.dp))
             Text(
