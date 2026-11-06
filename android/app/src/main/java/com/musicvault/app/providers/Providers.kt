@@ -7,7 +7,6 @@ import com.musicvault.app.catalog.CatalogTrack
 import com.musicvault.app.player.StreamingCache
 import com.musicvault.app.download.DownloadQuality
 import androidx.media3.datasource.cache.CacheWriter
-import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
@@ -104,8 +103,7 @@ object Providers {
         sourceUrl: String? = null,
         cacheKey: String? = null,
         forceRefresh: Boolean = false,
-        audioQuality: DownloadQuality? = null,
-        forDownload: Boolean = false
+        audioQuality: DownloadQuality? = null
     ): StreamResolution? = withContext(Dispatchers.IO) {
         val context = appContext ?: return@withContext null
         if (prefs(context).getBoolean("offline_mode", false)) {
@@ -114,11 +112,7 @@ object Providers {
             return@withContext null
         }
         val selectedQuality = audioQuality ?: com.musicvault.app.download.DownloadPreferences.streamQuality(context)
-        val key = streamResolutionKey(cacheKey, sourceUrl, name, author) + ":" + selectedQuality.name + ":" + forDownload
-        if (selectedQuality == DownloadQuality.BETA) {
-            val beta = runInterruptible(Dispatchers.IO) { BetaAudioResolver.resolve(context, name, author, forDownload) }
-            if (beta != null) return@withContext beta
-        }
+        val key = streamResolutionKey(cacheKey, sourceUrl, name, author) + ":" + selectedQuality.name
         val lock = streamResolutionLocks.getOrPut(key) { Mutex() }
 
         lock.withLock {
@@ -353,8 +347,7 @@ object Providers {
                     author = author,
                     sourceUrl = sourceUrl,
                     cacheKey = cacheKey,
-                    audioQuality = quality,
-                    forDownload = true
+                    audioQuality = quality
                 )
                 if (cancelledRequests.remove(requestId ?: "")) {
                     throw CancellationException("Descarga cancelada")

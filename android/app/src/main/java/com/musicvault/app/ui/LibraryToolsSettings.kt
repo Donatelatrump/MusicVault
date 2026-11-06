@@ -83,38 +83,25 @@ internal fun LibraryToolsSettings() {
             .onSuccess { storage = it }
     }
     SettingsSection(stringResource(R.string.streaming_quality_title)) {
-        listOf(DownloadQuality.SAVER, DownloadQuality.BEST, DownloadQuality.BETA).forEach { option ->
+        listOf(DownloadQuality.SAVER, DownloadQuality.BEST).forEach { option ->
             Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                 RadioButton(selected = streamQuality == option, onClick = {
                     streamQuality = option
                     DownloadPreferences.prefs(context).edit().putString(DownloadPreferences.STREAM_QUALITY, option.name).apply()
                 })
-                if (option == DownloadQuality.BETA) Text("Beta") else Text(stringResource(if (option == DownloadQuality.BEST) R.string.streaming_quality_best else R.string.streaming_quality_fast))
-            }
-        }
-    }
-    if (streamQuality == DownloadQuality.BETA || quality == DownloadQuality.BETA) {
-        SettingsSection("Beta") {
-            listOf("beta_jamendo_client" to "Jamendo Client ID", "beta_subsonic_server" to "Navidrome / OpenSubsonic HTTPS", "beta_subsonic_key" to "OpenSubsonic API key").forEach { (key, label) ->
-                var value by remember(key) { mutableStateOf(DownloadPreferences.prefs(context).getString(key, "") ?: "") }
-                OutlinedTextField(value = value, onValueChange = {
-                    value = it
-                    DownloadPreferences.prefs(context).edit().putString(key, it).apply()
-                }, label = { Text(label) }, singleLine = true,
-                    visualTransformation = if (key.endsWith("key")) androidx.compose.ui.text.input.PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
-                    modifier = Modifier.fillMaxWidth())
+                Text(stringResource(if (option == DownloadQuality.BEST) R.string.streaming_quality_best else R.string.streaming_quality_fast))
             }
         }
     }
     SettingsSection(stringResource(R.string.ui_descargas_2b98b7)) {
         Text(context.getString(R.string.ui_calidad_del_audio_954893), style = MaterialTheme.typography.titleSmall)
-        listOf(DownloadQuality.SAVER, DownloadQuality.BEST, DownloadQuality.BETA).forEach { option ->
+        listOf(DownloadQuality.SAVER, DownloadQuality.BEST).forEach { option ->
             Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                 RadioButton(selected = quality == option, onClick = {
                     quality = option
                     DownloadPreferences.prefs(context).edit().putString(DownloadPreferences.QUALITY, option.name).apply()
                 })
-                if (option == DownloadQuality.BETA) Text("Beta") else Text(if (option == DownloadQuality.BEST) stringResource(com.musicvault.app.R.string.ui_mejor_calidad_disponible_719e83) else stringResource(com.musicvault.app.R.string.ui_ahorrar_datos_59622d))
+                Text(if (option == DownloadQuality.BEST) stringResource(com.musicvault.app.R.string.ui_mejor_calidad_disponible_719e83) else stringResource(com.musicvault.app.R.string.ui_ahorrar_datos_59622d))
             }
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
