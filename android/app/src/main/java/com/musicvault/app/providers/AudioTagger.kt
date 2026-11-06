@@ -23,10 +23,12 @@ object AudioTagger {
     suspend fun embed(context: Context, audio: File, tags: AudioTags, requestId: String?): File = withContext(Dispatchers.IO) {
         ensureActive()
         FFmpeg.getInstance().init(context.applicationContext)
-        val ext = if (audio.extension.equals("mp3", true)) "mp3" else "m4a"
+        val nativeWebm = audio.extension.lowercase() in setOf("webm", "opus", "ogg")
+        val nativeLossless = audio.extension.lowercase() in setOf("flac", "alac", "wav", "aiff")
+        val ext = if (nativeLossless) audio.extension.lowercase() else if (nativeWebm) (if (audio.extension.equals("webm", true)) "webm" else "ogg") else if (audio.extension.equals("mp3", true)) "mp3" else "m4a"
         val output = File(audio.parentFile, "${audio.nameWithoutExtension}.tagged.$ext")
         val artwork = File(audio.parentFile, "${audio.nameWithoutExtension}.cover.jpg")
-        val cover = tags.coverUri?.let { uri ->
+        val cover = tags.coverUri?.takeUnless { nativeWebm || nativeLossless }?.let { uri ->
             try {
                 val bytes = runInterruptible {
                     if (uri.startsWith("https://") && com.musicvault.app.settings.AppPreferences.prefs(context).getBoolean("offline_mode", false)) null
@@ -60,12 +62,12 @@ object AudioTagger {
         if (cover != null) command.addAll(listOf("-i", cover.absolutePath))
         command.addAll(listOf("-map", "0:a:0"))
         if (cover != null) command.addAll(listOf("-map", "1:v:0", "-c:v", "mjpeg", "-disposition:v:0", "attached_pic"))
-        val copyAudio = audio.extension.lowercase() in setOf("mp3", "m4a", "aac", "mp4")
+        val copyAudio = nativeLossless || nativeWebm || audio.extension.lowercase() in setOf("mp3", "m4a", "aac", "mp4")
         command.addAll(if (copyAudio) listOf("-c:a", "copy") else listOf("-c:a", "aac", "-b:a", "192k"))
         command.addAll(listOf("-metadata", "title=${tags.title}", "-metadata", "artist=${tags.artist}"))
         tags.album?.takeIf { it.isNotBlank() }?.let { command.addAll(listOf("-metadata", "album=$it")) }
         if (ext == "mp3") command.addAll(listOf("-id3v2_version", "3"))
-        else command.addAll(listOf("-movflags", "+faststart"))
+        else if (ext == "m4a") command.addAll(listOf("-movflags", "+faststart"))
         command.add(output.absolutePath)
         var process: Process? = null
         try {

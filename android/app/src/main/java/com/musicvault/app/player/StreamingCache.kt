@@ -345,6 +345,7 @@ object StreamingCache {
      * Media3 choose an extractor for the cached bytes.
      */
     fun playbackUriIfComplete(context: Context, trackId: String): String? {
+        if (com.musicvault.app.download.DownloadPreferences.streamQuality(context) == com.musicvault.app.download.DownloadQuality.BETA) return null
         if (!isComplete(context, trackId)) return null
         touch(context, trackId)
         val ext = cachedFormat(context, trackId).extension

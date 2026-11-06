@@ -25,8 +25,9 @@ object DownloadMetadata {
 }
 
 enum class DownloadQuality(val label: String, val reuseStreamingCache: Boolean, val format: String) {
+    BETA("Beta", false, "bestaudio/best"),
     BEST("Mejor calidad disponible", false, "bestaudio/best"),
-    SAVER("Ahorrar datos", true, "bestaudio[abr<=128]/worstaudio/best");
+    SAVER("Ahorrar datos", false, "bestaudio[abr<=128]/worstaudio/best");
 
     companion object {
         fun parse(value: String?) = entries.firstOrNull { it.name == value } ?: BEST

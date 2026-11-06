@@ -6,6 +6,8 @@ import android.net.NetworkCapabilities
 
 object DownloadPreferences {
     const val FILE = "musicvault.settings"
+    const val STREAM_QUALITY = "stream_quality"
+    fun streamQuality(context: Context) = DownloadQuality.parse(prefs(context).getString(STREAM_QUALITY, "SAVER"))
     const val QUALITY = "download_quality"
     const val WIFI_ONLY = "download_wifi_only"
     const val CACHE_MB = "stream_cache_mb"

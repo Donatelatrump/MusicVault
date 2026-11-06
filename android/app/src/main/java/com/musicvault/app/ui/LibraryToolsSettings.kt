@@ -30,6 +30,7 @@ internal fun LibraryToolsSettings() {
     val scope = rememberCoroutineScope()
     val db = remember { MusicDatabase.get(context) }
     val queue by remember { db.downloadQueueDao().observeAll() }.collectAsState(initial = emptyList())
+    var streamQuality by remember { mutableStateOf(DownloadPreferences.streamQuality(context)) }
     var quality by remember { mutableStateOf(DownloadPreferences.quality(context)) }
     var wifiOnly by remember { mutableStateOf(DownloadPreferences.wifiOnly(context)) }
     var cacheLimit by remember { mutableIntStateOf(DownloadPreferences.cacheMb(context)) }
@@ -81,15 +82,39 @@ internal fun LibraryToolsSettings() {
         runCatching { withContext(Dispatchers.IO) { StorageUsage.read(context) } }
             .onSuccess { storage = it }
     }
+    SettingsSection(stringResource(R.string.streaming_quality_title)) {
+        listOf(DownloadQuality.SAVER, DownloadQuality.BEST, DownloadQuality.BETA).forEach { option ->
+            Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                RadioButton(selected = streamQuality == option, onClick = {
+                    streamQuality = option
+                    DownloadPreferences.prefs(context).edit().putString(DownloadPreferences.STREAM_QUALITY, option.name).apply()
+                })
+                if (option == DownloadQuality.BETA) Text("Beta") else Text(stringResource(if (option == DownloadQuality.BEST) R.string.streaming_quality_best else R.string.streaming_quality_fast))
+            }
+        }
+    }
+    if (streamQuality == DownloadQuality.BETA || quality == DownloadQuality.BETA) {
+        SettingsSection("Beta") {
+            listOf("beta_jamendo_client" to "Jamendo Client ID", "beta_subsonic_server" to "Navidrome / OpenSubsonic HTTPS", "beta_subsonic_key" to "OpenSubsonic API key").forEach { (key, label) ->
+                var value by remember(key) { mutableStateOf(DownloadPreferences.prefs(context).getString(key, "") ?: "") }
+                OutlinedTextField(value = value, onValueChange = {
+                    value = it
+                    DownloadPreferences.prefs(context).edit().putString(key, it).apply()
+                }, label = { Text(label) }, singleLine = true,
+                    visualTransformation = if (key.endsWith("key")) androidx.compose.ui.text.input.PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
+                    modifier = Modifier.fillMaxWidth())
+            }
+        }
+    }
     SettingsSection(stringResource(R.string.ui_descargas_2b98b7)) {
         Text(context.getString(R.string.ui_calidad_del_audio_954893), style = MaterialTheme.typography.titleSmall)
-        DownloadQuality.entries.forEach { option ->
+        listOf(DownloadQuality.SAVER, DownloadQuality.BEST, DownloadQuality.BETA).forEach { option ->
             Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                 RadioButton(selected = quality == option, onClick = {
                     quality = option
                     DownloadPreferences.prefs(context).edit().putString(DownloadPreferences.QUALITY, option.name).apply()
                 })
-                Text(if (option == DownloadQuality.BEST) stringResource(com.musicvault.app.R.string.ui_mejor_calidad_disponible_719e83) else stringResource(com.musicvault.app.R.string.ui_ahorrar_datos_59622d))
+                if (option == DownloadQuality.BETA) Text("Beta") else Text(if (option == DownloadQuality.BEST) stringResource(com.musicvault.app.R.string.ui_mejor_calidad_disponible_719e83) else stringResource(com.musicvault.app.R.string.ui_ahorrar_datos_59622d))
             }
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
@@ -99,7 +124,6 @@ internal fun LibraryToolsSettings() {
                 DownloadPreferences.prefs(context).edit().putBoolean(DownloadPreferences.WIFI_ONLY, it).apply()
             })
         }
-        Text(context.getString(R.string.ui_se_aplica_a_nuevas_descargas_y_reintentos_d4b60e), style = MaterialTheme.typography.bodySmall)
         Spacer(Modifier.height(8.dp))
         Button(onClick = { showDownloads = true }) {
             Text("Ver descargas · ${queue.count { DownloadQueue.isActive(it.state) }} pendientes")
@@ -120,15 +144,12 @@ internal fun LibraryToolsSettings() {
                     } }, label = { Text(if (size >= 1024) "${size / 1024} GB" else "$size MB") })
             }
         }
-        Text(context.getString(R.string.ui_la_cache_acelera_el_streaming_las_canciones_de_69b689), style = MaterialTheme.typography.bodySmall)
         Row {
             TextButton(enabled = !busy && queue.none { DownloadQueue.isActive(it.state) }, onClick = { confirmClear = true }) { Text(context.getString(R.string.ui_vaciar_cache_d6ee09)) }
             TextButton(enabled = !busy, onClick = { revision++ }) { Text(context.getString(R.string.ui_actualizar_espacio_1dd9d2)) }
         }
     }
     SettingsSection(context.getString(R.string.ui_respaldo_de_biblioteca_b8f7e1)) {
-        Text(context.getString(R.string.ui_exporta_playlists_favoritos_canciones_y_ajuste_ec0bd1), style = MaterialTheme.typography.bodyMedium)
-        Text(context.getString(R.string.ui_los_archivos_de_audio_y_las_sesiones_de_spotif_4c3bd3), style = MaterialTheme.typography.bodySmall)
         Row {
             TextButton(enabled = !busy, onClick = { export.launch("MusicVault-biblioteca.json") }) { Text(stringResource(R.string.ui_exportar_9a8523)) }
             TextButton(enabled = !busy, onClick = { restore.launch(arrayOf("application/json", "text/plain", "application/octet-stream")) }) { Text(stringResource(R.string.ui_importar_b28a54)) }

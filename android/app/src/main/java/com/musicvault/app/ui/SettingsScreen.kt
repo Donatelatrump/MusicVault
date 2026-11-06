@@ -70,7 +70,6 @@ internal fun SettingsScreen(
                 Text(stringResource(R.string.ui_modo_sin_conexion_f73a84), modifier = Modifier.weight(1f), color = VaultColors.TextPrimary)
                 Switch(checked = offline, onCheckedChange = vm::setOfflineMode)
             }
-            Text(stringResource(R.string.ui_busca_y_reproduce_archivos_disponibles_en_este_3d8022), color = VaultColors.TextSecondary)
             TextButton(onClick = { tool = "playback" }) { Text(stringResource(R.string.ui_reproduccion_y_chromecast_1abd2c)) }
             TextButton(onClick = { tool = "library" }) { Text(stringResource(R.string.ui_almacenamiento_m3u_y_respaldos_59647b)) }
             TextButton(onClick = { tool = "providers" }) { Text(stringResource(R.string.ui_proveedores_fallos_y_listenbrainz_801ea2)) }
@@ -78,11 +77,6 @@ internal fun SettingsScreen(
         SettingsSection(stringResource(R.string.ui_apariencia_0f2c3a)) {
             Text(stringResource(R.string.ui_diseno_de_la_aplicacion_c99ac9), color = VaultColors.TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
             Spacer(Modifier.height(4.dp))
-            Text(
-                stringResource(R.string.ui_puedes_volver_al_diseno_anterior_en_cualquier_3556d6),
-                color = VaultColors.TextTertiary,
-                fontSize = 12.sp
-            )
             Spacer(Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 StyleOption(
@@ -256,6 +250,5 @@ private fun StyleOption(
         Spacer(Modifier.height(8.dp))
         Text(title, color = VaultColors.TextPrimary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, lineHeight = 16.sp)
         Spacer(Modifier.height(2.dp))
-        Text(description, color = VaultColors.TextTertiary, fontSize = 10.sp, lineHeight = 13.sp)
     }
 }

@@ -7,6 +7,7 @@ import com.musicvault.app.catalog.CatalogTrack
 import com.musicvault.app.player.StreamingCache
 import com.musicvault.app.download.DownloadQuality
 import androidx.media3.datasource.cache.CacheWriter
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
@@ -102,7 +103,9 @@ object Providers {
         author: String,
         sourceUrl: String? = null,
         cacheKey: String? = null,
-        forceRefresh: Boolean = false
+        forceRefresh: Boolean = false,
+        audioQuality: DownloadQuality? = null,
+        forDownload: Boolean = false
     ): StreamResolution? = withContext(Dispatchers.IO) {
         val context = appContext ?: return@withContext null
         if (prefs(context).getBoolean("offline_mode", false)) {
@@ -110,7 +113,12 @@ object Providers {
                 "Modo sin conexión activo. Desactívalo en Ajustes para buscar audio en línea.", ProviderAction.RECONNECT, false)
             return@withContext null
         }
-        val key = streamResolutionKey(cacheKey, sourceUrl, name, author)
+        val selectedQuality = audioQuality ?: com.musicvault.app.download.DownloadPreferences.streamQuality(context)
+        val key = streamResolutionKey(cacheKey, sourceUrl, name, author) + ":" + selectedQuality.name + ":" + forDownload
+        if (selectedQuality == DownloadQuality.BETA) {
+            val beta = runInterruptible(Dispatchers.IO) { BetaAudioResolver.resolve(context, name, author, forDownload) }
+            if (beta != null) return@withContext beta
+        }
         val lock = streamResolutionLocks.getOrPut(key) { Mutex() }
 
         lock.withLock {
@@ -162,7 +170,7 @@ object Providers {
                 if (direct != null) {
                     val newPipeStarted = SystemClock.elapsedRealtime()
                     val newPipe = try {
-                        NewPipeStreamResolver.resolveAudio(direct!!, cacheKey)
+                        NewPipeStreamResolver.resolveAudio(direct!!, cacheKey, selectedQuality)
                     } catch (error: Exception) {
                         if (error is CancellationException) throw error
                         currentCoroutineContext().ensureActive()
@@ -213,7 +221,8 @@ object Providers {
         if (youtubeUrl(sourceUrl) != null) return@withContext true
         val context = appContext ?: return@withContext false
         if (prefs(context).getBoolean("offline_mode", false)) return@withContext false
-        val key = streamResolutionKey(cacheKey, sourceUrl, name, author)
+        val selectedQuality = com.musicvault.app.download.DownloadPreferences.streamQuality(context)
+        val key = streamResolutionKey(cacheKey, sourceUrl, name, author) + ":" + selectedQuality.name
         val now = SystemClock.elapsedRealtime()
         youtubeMatches[key]?.takeIf { it.expiresAtMs > now }?.let { return@withContext true }
         val lock = streamResolutionLocks.getOrPut(key) { Mutex() }
@@ -343,7 +352,9 @@ object Providers {
                     name = name,
                     author = author,
                     sourceUrl = sourceUrl,
-                    cacheKey = cacheKey
+                    cacheKey = cacheKey,
+                    audioQuality = quality,
+                    forDownload = true
                 )
                 if (cancelledRequests.remove(requestId ?: "")) {
                     throw CancellationException("Descarga cancelada")

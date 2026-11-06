@@ -21,7 +21,8 @@ internal object PlaybackItems {
                 .setExtras(Bundle().apply { putString(PlaybackSnapshot.KEY, PlaybackSnapshot(track, 0).encode()) }).build())
         if (remote && !track.isDownloaded) {
             StreamingCache.touch(context, track.id)
-            builder.setCustomCacheKey(StreamingCache.cacheKey(track.id))
+            val beta = com.musicvault.app.download.DownloadPreferences.streamQuality(context) == com.musicvault.app.download.DownloadQuality.BETA
+            builder.setCustomCacheKey(if (beta) "musicvault-beta:${track.id}:" + java.security.MessageDigest.getInstance("SHA-256").digest(reference.toByteArray()).joinToString("") { "%02x".format(it) } else StreamingCache.cacheKey(track.id))
         }
         return builder.build()
     }

@@ -23,9 +23,9 @@ class DownloadMetadataTest {
         assertEquals(track().copy(audioUri = "file://song", isDownloaded = true), saved)
     }
 
-    @Test fun qualityPolicyDoesNotPromoteStreamingCacheForBestQuality() {
+    @Test fun qualityPolicyResolvesDownloadsIndependentlyFromStreaming() {
         assertFalse(DownloadQuality.BEST.reuseStreamingCache)
-        assertTrue(DownloadQuality.SAVER.reuseStreamingCache)
+        assertFalse(DownloadQuality.SAVER.reuseStreamingCache)
         assertEquals(DownloadQuality.BEST, DownloadQuality.parse("invalid"))
     }
 }

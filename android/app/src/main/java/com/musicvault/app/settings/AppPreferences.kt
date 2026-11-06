@@ -70,7 +70,7 @@ object AppPreferences {
                 }
             }
             val portable = context.getSharedPreferences("musicvault.portable.settings", Context.MODE_PRIVATE).edit().clear()
-            values.filterKeys { it in setOf("player_style", "app_design", "crossfade_seconds", "download_quality", "download_wifi_only", "stream_cache_mb", "playback_speed", "skip_silence", "normalize_volume") }.forEach { (key, value) ->
+            values.filterKeys { it in setOf("player_style", "app_design", "crossfade_seconds", "stream_quality", "download_quality", "download_wifi_only", "stream_cache_mb", "playback_speed", "skip_silence", "normalize_volume") }.forEach { (key, value) ->
                 when (value) {
                     is String -> portable.putString(key, value)
                     is Int -> portable.putInt(key, value)

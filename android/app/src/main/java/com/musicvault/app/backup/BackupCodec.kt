@@ -17,7 +17,7 @@ object BackupCodec {
     const val MAX_BYTES = 20 * 1024 * 1024
     private const val MAX_ROWS = 50000
     private val settingKeys = setOf("player_style", "app_design", "crossfade_seconds",
-        "download_quality", "download_wifi_only", "stream_cache_mb")
+        "stream_quality", "download_quality", "download_wifi_only", "stream_cache_mb")
 
     fun settings(values: Map<String, *>): Map<String, Any> = values.filterKeys { it in settingKeys }
         .mapNotNull { (key, value) -> if (validSetting(key, value)) key to value!! else null }.toMap()
@@ -26,7 +26,7 @@ object BackupCodec {
         "player_style" -> value == "vinyl" || value == "circular"
         "app_design" -> value == "hybrid" || value == "classic"
         "crossfade_seconds" -> value is Int && value in 0..12
-        "download_quality" -> value == "BEST" || value == "SAVER"
+        "stream_quality", "download_quality" -> value == "BEST" || value == "SAVER" || value == "BETA"
         "download_wifi_only" -> value is Boolean
         "stream_cache_mb" -> value in listOf(256, 512, 1024, 2048)
         else -> false

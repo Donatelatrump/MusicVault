@@ -334,4 +334,8 @@
     <string name="jams_track_added">✓ Añadida a JAMS</string>
     <string name="jams_track_failed">No se pudo añadir. Reintenta.</string>
     <string name="jams_six_digit_code">Código de 6 dígitos o enlace</string>
+    <string name="streaming_quality_title">Calidad de streaming</string>
+    <string name="streaming_quality_best">Máxima calidad disponible</string>
+    <string name="streaming_quality_fast">Más rápida y menor consumo</string>
+    <string name="streaming_quality_hint">Se aplica al resolver las siguientes canciones. La calidad depende de la fuente; no ofrece audio sin pérdidas.</string>
 </resources>
