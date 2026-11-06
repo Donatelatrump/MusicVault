@@ -3,7 +3,7 @@ import {readFileSync} from 'node:fs';
 import {randomUUID} from 'node:crypto';
 import {initializeApp, deleteApp} from 'firebase/app';
 import {getAuth, signInAnonymously, deleteUser} from 'firebase/auth';
-import {getDatabase, ref, set, get, runTransaction, remove, goOffline, serverTimestamp} from 'firebase/database';
+import {getDatabase, ref, set, get, runTransaction, remove, goOffline, serverTimestamp, update} from 'firebase/database';
 import assert from 'node:assert/strict';
 if (!process.argv.includes('--live')) throw new Error('Pass --live to exercise the configured Firebase project');
 const raw = JSON.parse(readFileSync(new URL('../../android/app/google-services.json', import.meta.url)));
@@ -39,6 +39,17 @@ try {
     assert.equal(other.playing,playing);
     assert.equal(other.positionMs,position);
   }
+  const hostSong = {videoId:'QAGZJg_OGVU',title:'Host song',artist:'Test',durationMs:134000,addedBy:users[0].uid};
+  await set(ref(dbs[0],`${path}/queue/song2`),hostSong);
+  await remove(ref(dbs[1],`${path}/queue/song2`));
+  assert.equal((await get(ref(dbs[0],`${path}/queue/song2`))).exists(),false);
+  await set(ref(dbs[0],`${path}/queue/song3`),hostSong);
+  const previous = (await get(ref(dbs[1],`${path}/playback`))).val();
+  await set(ref(dbs[1],`${path}/playback`),{...previous,songKey:'song3',revision:previous.revision+1});
+  await update(ref(dbs[1],path),{'queue/song3':null,playback:{...previous,songKey:'song1',revision:previous.revision+2}});
+  assert.equal((await get(ref(dbs[0],`${path}/queue/song3`))).exists(),false);
+  assert.equal((await get(ref(dbs[0],`${path}/playback/songKey`))).val(),'song1');
+  console.log('PASS: guest removes host queued and current songs; current removal updates shared playback atomically');
   console.log('PASS: two distinct anonymous UIDs; six digit lookup; readiness; shared queue; both users play/pause/seek; revisions replicated');
 } finally {
   try {if (users[0]) { await remove(ref(dbs[0],`roomCodes/${short}`)); await remove(ref(dbs[0],path)); }} finally {

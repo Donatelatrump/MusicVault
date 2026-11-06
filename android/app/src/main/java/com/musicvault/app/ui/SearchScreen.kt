@@ -193,6 +193,7 @@ internal fun SearchScreen(
     var newAlbumName by remember { mutableStateOf("") }
     var deleteSearchTrack by remember { mutableStateOf<CatalogTrack?>(null) }
     var searchTab by rememberSaveable { mutableStateOf(SearchTab.TRACKS) }
+    var showArtistSearch by rememberSaveable { mutableStateOf(false) }
     var submittedQuery by rememberSaveable { mutableStateOf("") }
     var remotePlaylists by remember { mutableStateOf<List<CatalogPlaylist>>(emptyList()) }
     var playlistsLoading by remember { mutableStateOf(false) }
@@ -409,6 +410,7 @@ internal fun SearchScreen(
             )
         }
 
+        if (online) TextButton(onClick = { showArtistSearch = true }) { Text(stringResource(R.string.artist_profiles)) }
         Spacer(Modifier.height(8.dp))
 
         if (!online) {
@@ -491,6 +493,8 @@ internal fun SearchScreen(
             )
         }
     }
+
+    if (showArtistSearch) ArtistBrowserDialog(initialQuery = submittedQuery, onDismiss = { showArtistSearch = false }, onPlay = vm::playRemote, onDownload = vm::requestRemoteDownload)
 
     val selectedTrack = actionTrack
     when (actionAction) {

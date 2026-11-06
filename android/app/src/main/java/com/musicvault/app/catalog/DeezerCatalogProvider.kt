@@ -9,9 +9,9 @@ import java.net.URL
 
 /** Public Deezer endpoints used only for metadata/artwork. */
 class DeezerCatalogProvider : CatalogProvider {
-    private suspend fun getSearchJson(path: String, query: String, limit: Int): JSONObject = withContext(Dispatchers.IO) {
+    private suspend fun getSearchJson(path: String, query: String, limit: Int, offset: Int = 0): JSONObject = withContext(Dispatchers.IO) {
         val encoded = URLEncoder.encode(query.trim(), "UTF-8")
-        val url = URL("https://api.deezer.com/$path?q=$encoded&limit=${limit.coerceIn(1, 50)}")
+        val url = URL("https://api.deezer.com/$path?q=$encoded&limit=${limit.coerceIn(1, 50)}&index=${offset.coerceAtLeast(0)}")
         val c = url.openConnection() as HttpURLConnection
         c.requestMethod = "GET"
         c.connectTimeout = 5_000
@@ -51,7 +51,30 @@ class DeezerCatalogProvider : CatalogProvider {
         }.filter { it.id.isNotBlank() && it.title.isNotBlank() }
     }
 
-    override suspend fun searchArtists(query: String, limit: Int): List<CatalogArtist> = emptyList()
+    override suspend fun searchArtists(query: String, limit: Int): List<CatalogArtist> {
+        val data = getSearchJson("search/artist", query, limit).optJSONArray("data") ?: return emptyList()
+        return (0 until data.length()).map { data.getJSONObject(it) }.mapNotNull {
+            val id = it.optString("id"); val name = it.optString("name")
+            if (id.isBlank() || name.isBlank()) null else CatalogArtist(id, name, portraitUri = it.optString("picture_xl").takeIf(String::isNotBlank))
+        }
+    }
+    suspend fun artistTracks(artist: CatalogArtist, query: String): List<CatalogTrack> {
+        val name = artist.name.replace("\"", "")
+        val title = query.replace("\"", "")
+        return searchTracks("$name $title", 50).filter { it.artistId == artist.id }
+    }
+    suspend fun artistTopTracks(artistId: String): List<CatalogTrack> {
+        require(artistId.matches(Regex("[0-9]+")))
+        return parseAlbumTracks("", getSearchJson("artist/$artistId/top", "", 50), 50)
+    }
+    suspend fun artistAlbums(artistId: String, offset: Int = 0): List<CatalogAlbum> {
+        require(artistId.matches(Regex("[0-9]+")))
+        val data = getSearchJson("artist/$artistId/albums", "", 50, offset).optJSONArray("data") ?: return emptyList()
+        return (0 until data.length()).map { data.getJSONObject(it) }.map {
+            CatalogAlbum(it.getString("id"), it.optString("title"), artistId, "", it.optString("release_date").take(4).toIntOrNull(),
+                it.optString("cover_xl").takeIf(String::isNotBlank), "deezer")
+        }
+    }
 
     /**
      * Use Deezer's album search directly. The previous implementation derived

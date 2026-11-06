@@ -15,8 +15,8 @@ android {
         applicationId = "com.musicvault.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 40
-        versionName = "0.6.17"
+        versionCode = 41
+        versionName = "0.6.18"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         testProguardFiles("test-proguard-rules.pro")
 

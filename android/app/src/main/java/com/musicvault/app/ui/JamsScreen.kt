@@ -46,7 +46,7 @@ import kotlin.math.sin
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun JamsScreen(jams: JamsController, friends: JamFriendsController, selected: Track?,
-    searchSongs: suspend (String) -> List<Track>, onOpenRoom: (String) -> Unit, onClose: () -> Unit) {
+    searchSongs: suspend (String) -> List<Track>, onOpenRoom: (String) -> Unit, favoriteIds: Set<String> = emptySet(), playlists: List<com.musicvault.app.data.Playlist> = emptyList(), onAddToPlaylist: (Track, String) -> Unit = { _, _ -> }, onFavorite: (Track) -> Unit = {}, onClose: () -> Unit) {
     val state by jams.state.collectAsStateWithLifecycle()
     val contacts by friends.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -146,7 +146,20 @@ internal fun JamsScreen(jams: JamsController, friends: JamFriendsController, sel
                             Text(song.artist, maxLines = 1, overflow = TextOverflow.Ellipsis, color = VaultColors.TextSecondary, style = MaterialTheme.typography.bodySmall)
                         }
                         if (song.key == state.playback.songKey) Icon(VaultIcons.GraphicEq, null, tint = VaultColors.Accent)
-                        else if (state.isHost) IconButton(enabled = !state.busy, onClick = { jams.removeSong(song.key) }) { Icon(Icons.Default.Close, stringResource(R.string.jams_remove), modifier = Modifier.size(18.dp)) }
+                        IconButton(onClick = { onFavorite(song.track()) }) {
+                            Icon(if (song.track().id in favoriteIds) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                                stringResource(R.string.jams_like), tint = if (song.track().id in favoriteIds) VaultColors.Accent else VaultColors.TextSecondary)
+                        }
+                        if (playlists.isNotEmpty()) Box {
+                            var choosePlaylist by remember(song.key) { mutableStateOf(false) }
+                            IconButton(onClick = { choosePlaylist = true }) { Icon(Icons.Default.Add, stringResource(R.string.jams_add_local_playlist)) }
+                            DropdownMenu(expanded = choosePlaylist, onDismissRequest = { choosePlaylist = false }) {
+                                playlists.forEach { playlist -> DropdownMenuItem(text = { Text(playlist.title) }, onClick = {
+                                    onAddToPlaylist(song.track(), playlist.id); choosePlaylist = false
+                                }) }
+                            }
+                        }
+                        IconButton(enabled = !state.busy && state.connected, onClick = { jams.removeSong(song.key) }) { Icon(Icons.Default.Close, stringResource(R.string.jams_remove), modifier = Modifier.size(18.dp)) }
                     }
                 }
             }

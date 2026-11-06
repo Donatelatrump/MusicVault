@@ -338,4 +338,13 @@
     <string name="streaming_quality_best">Highest available quality</string>
     <string name="streaming_quality_fast">Faster, less data</string>
     <string name="streaming_quality_hint">Applies when resolving subsequent tracks. Quality depends on the source; lossless audio is not provided.</string>
+    <string name="jams_like">Like</string>
+    <string name="artist_profiles">Artists</string>
+    <string name="artist_search">Search</string>
+    <string name="artist_retry">Retry</string>
+    <string name="artist_download">Download</string>
+    <string name="artist_more">More albums</string>
+    <string name="artist_empty">No results</string>
+    <string name="jams_add_local_playlist">Add to local playlist</string>
+    <string name="artist_song_search">Search this artist’s songs</string>
 </resources>

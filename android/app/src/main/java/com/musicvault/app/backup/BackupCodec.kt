@@ -26,7 +26,7 @@ object BackupCodec {
         "player_style" -> value == "vinyl" || value == "circular"
         "app_design" -> value == "hybrid" || value == "classic"
         "crossfade_seconds" -> value is Int && value in 0..12
-        "stream_quality", "download_quality" -> value == "BEST" || value == "SAVER"
+        "stream_quality", "download_quality" -> value == "BEST" || value == "SAVER" || value == "BETA"
         "download_wifi_only" -> value is Boolean
         "stream_cache_mb" -> value in listOf(256, 512, 1024, 2048)
         else -> false

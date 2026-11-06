@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { before, after, beforeEach, test } from 'node:test';
 import { readFileSync } from 'node:fs';
 import { initializeTestEnvironment, assertFails, assertSucceeds } from '@firebase/rules-unit-testing';
-import { ref, set, get, remove, runTransaction } from 'firebase/database';
+import { ref, set, get, remove, runTransaction, update } from 'firebase/database';
 let env;
 const code = 'a'.repeat(32);
 const room = () => `rooms/${code}`;
@@ -124,4 +124,22 @@ test('members publish only their own readiness and share buffered playback',asyn
   await assertFails(set(ref(client('host'),`${room()}/ready/guest`),'song1'));
   await assertFails(set(ref(client('guest'),`${room()}/ready/guest`),'missing'));
   await assertSucceeds(remove(ref(client('guest'),`${room()}/ready/guest`)));
+});
+
+test('any member removes another users queued song while outsiders cannot', async () => {
+  await create();
+  await set(ref(client('guest'), `${room()}/members/guest`), true);
+  const song = {videoId:'QTzZqdJ-oXw',title:'Song',artist:'Artist',durationMs:1000,addedBy:'host'};
+  await set(ref(client('host'), `${room()}/queue/song1`), song);
+  await assertFails(remove(ref(client('outsider'), `${room()}/queue/song1`)));
+  await assertSucceeds(remove(ref(client('guest'), `${room()}/queue/song1`)));
+});
+test('removing the current song requires an atomic playback change', async () => {
+  await create();
+  await set(ref(client('guest'), `${room()}/members/guest`), true);
+  const song = {videoId:'QTzZqdJ-oXw',title:'Song',artist:'Artist',durationMs:1000,addedBy:'host'};
+  await set(ref(client('host'), `${room()}/queue/song1`), song);
+  await set(ref(client('host'), `${room()}/playback`), {...playback(1,true),songKey:'song1'});
+  await assertFails(remove(ref(client('guest'), `${room()}/queue/song1`)));
+  await assertSucceeds(update(ref(client('guest'), room()), {'queue/song1': null, playback: playback(2)}));
 });

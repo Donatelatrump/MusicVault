@@ -7,6 +7,8 @@ import com.musicvault.app.catalog.CatalogTrack
 import com.musicvault.app.player.StreamingCache
 import com.musicvault.app.download.DownloadQuality
 import androidx.media3.datasource.cache.CacheWriter
+import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
@@ -97,6 +99,8 @@ object Providers {
      * The returned URL is intentionally kept out of Room; callers resolve it
      * again when needed while Media3 reuses bytes through a stable cache key.
      */
+    internal fun streamingQualityKey(): String = appContext?.let { com.musicvault.app.download.DownloadPreferences.streamQuality(it).name } ?: "SAVER"
+
     suspend fun resolveStream(
         name: String,
         author: String,
@@ -126,6 +130,19 @@ object Providers {
                 resolvedStreams.remove(key)
             }
 
+            if (selectedQuality == DownloadQuality.BETA) {
+                val beta = withTimeoutOrNull(5_000L) {
+                    try { runInterruptible(Dispatchers.IO) { AudiusAudioResolver.resolve(name, author) } }
+                    catch (cancelled: CancellationException) { throw cancelled }
+                    catch (_: Exception) { null }
+                }
+                currentCoroutineContext().ensureActive()
+                if (beta != null) {
+                    resolvedStreams[key] = CachedStream(beta, SystemClock.elapsedRealtime() + STREAM_URL_TTL_MS)
+                    mutableFailure.value = null
+                    return@withLock beta
+                }
+            }
             val totalStarted = SystemClock.elapsedRealtime()
             try {
                 // Primary path: NewPipeExtractor. It avoids the Python + QuickJS

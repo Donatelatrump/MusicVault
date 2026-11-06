@@ -15,7 +15,7 @@ class PlaybackCoordinator(private val context: Context, private val online: () -
         val sourceUrl = track.url ?: track.sourceId?.takeIf { track.source.equals("youtube", true) || track.id.startsWith("youtube:", true) }?.let { "https://www.youtube.com/watch?v=$it" }
         val resolved = withTimeoutOrNull(20_000L) { Providers.resolveStream(track.title, track.artistName, sourceUrl, track.id, forceRefresh) } ?: return null
         StreamingCache.rememberFormat(context, track.id, resolved.extension, resolved.mimeType)
-        if (prebuffer && !StreamingCache.hasPrefetchedPrefix(context, track.id)) StreamingCache.prefetchPrefix(context, track.id, resolved.url)
+        if (com.musicvault.app.download.DownloadPreferences.streamQuality(context) != com.musicvault.app.download.DownloadQuality.BETA && prebuffer && !StreamingCache.hasPrefetchedPrefix(context, track.id)) StreamingCache.prefetchPrefix(context, track.id, resolved.url)
         return track.copy(audioUri = resolved.url, isDownloaded = false)
     }
 }

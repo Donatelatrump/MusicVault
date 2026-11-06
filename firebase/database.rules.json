@@ -46,7 +46,7 @@
         },
         "queue": {
           "$song": {
-            ".write": "auth != null && root.child('rooms').child($room).child('members').child(auth.uid).val() == true && root.child('rooms').child($room).child('meta/expiresAt').val() > now && ((!data.exists() && newData.child('addedBy').val() == auth.uid) || (!newData.exists() && (data.child('addedBy').val() == auth.uid || root.child('rooms').child($room).child('meta/hostUid').val() == auth.uid) && root.child('rooms').child($room).child('playback/songKey').val() != $song))",
+            ".write": "auth != null && root.child('rooms').child($room).child('members').child(auth.uid).val() == true && root.child('rooms').child($room).child('meta/expiresAt').val() > now && ((!data.exists() && newData.child('addedBy').val() == auth.uid) || (!newData.exists() && newData.parent().parent().child('playback/songKey').val() != $song))",
             ".validate": "newData.hasChildren(['videoId','title','artist','durationMs','addedBy'])",
             "videoId": {
               ".validate": "newData.isString() && newData.val().matches(/^[A-Za-z0-9_-]{11}$/)"

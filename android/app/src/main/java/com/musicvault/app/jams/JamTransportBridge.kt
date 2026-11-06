@@ -10,7 +10,15 @@ internal object JamTransportBridge {
         data class Seek(val positionMs: Long) : Command
     }
     var listener: ((Command) -> Unit)? = null
-        set(value) { field = value; onActiveChanged?.invoke() }
+        set(value) { field = value; if (value == null) { canPrevious = false; canNext = false }; onActiveChanged?.invoke() }
+    var canPrevious = false
+        private set
+    var canNext = false
+        private set
+    fun updateNavigation(previous: Boolean, next: Boolean) {
+        if (canPrevious == previous && canNext == next) return
+        canPrevious = previous; canNext = next; onActiveChanged?.invoke()
+    }
     var onActiveChanged: (() -> Unit)? = null
     val active get() = listener != null
     fun dispatch(command: Command): Boolean {

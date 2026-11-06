@@ -190,6 +190,8 @@ internal class JamsController(
                 val ready = snapshot.child("ready").children.mapNotNull { child -> child.getValue(String::class.java)?.let { child.key!! to it } }.toMap()
                 mutable.value = mutable.value.copy(songs = songs, playback = pending.receive(parsePlayback(snapshot.child("playback"))),
                     leaderUid = members.firstOrNull(), hostOnline = host in members, members = members, memberCount = members.size, readySongs = ready)
+                JamTransportBridge.updateNavigation(mutable.value.canPrevious, mutable.value.canNext)
+                if (songs.isEmpty()) { preparation?.cancel(); player.pause(); player.clearQueue(); onPreparing(null) }
                 prepareCurrent(); alignPlayback()
             }
             override fun onCancelled(error: DatabaseError) { if (room == ref) { detach(); message("La sala JAMS ya no está disponible.") } }
@@ -405,9 +407,17 @@ internal class JamsController(
         }
     }
     fun removeSong(key: String) = operation {
-        check(mutable.value.isHost) { "JAMS: solo el creador puede quitar canciones." }
-        check(key != mutable.value.playback.songKey) { "JAMS: cambia de canción antes de quitarla." }
-        room?.child("queue/$key")?.removeValue()?.await()
+        val s = mutable.value
+        check(s.active && s.connected && s.uid in s.members) { "JAMS necesita conexión." }
+        val ref = room ?: return@operation
+        if (key == s.playback.songKey) {
+            val next = s.songAfterRemoval(key)
+            ref.updateChildren(mapOf("queue/$key" to null, "playback" to mapOf(
+                "songKey" to (next?.key ?: ""), "playing" to (next != null && s.playback.playing),
+                "positionMs" to 0, "effectiveAt" to serverNow(), "revision" to s.playback.revision + 1,
+                "buffering" to (next != null), "commandId" to UUID.randomUUID().toString(), "action" to "select"
+            ))).await()
+        } else ref.child("queue/$key").removeValue().await()
     }
     fun playbackFailed() {
         preparation?.cancel(); loadedSong = null; readyPublishedKey = null; player.pause(); onPreparing(null)

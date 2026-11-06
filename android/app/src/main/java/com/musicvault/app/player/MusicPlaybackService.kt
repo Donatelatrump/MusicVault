@@ -47,6 +47,17 @@ import com.musicvault.app.MainActivity
 class MusicPlaybackService : MediaLibraryService() {
     private lateinit var player: ExoPlayer
     private var mediaSession: MediaLibrarySession? = null
+    private fun updateJamButtons() {
+        val buttons = if (JamTransportBridge.active) listOf(
+            androidx.media3.session.CommandButton.Builder(androidx.media3.session.CommandButton.ICON_PREVIOUS)
+                .setDisplayName("Anterior").setSessionCommand(SessionCommand("musicvault.jam_previous", Bundle.EMPTY))
+                .setSlots(androidx.media3.session.CommandButton.SLOT_BACK).setEnabled(JamTransportBridge.canPrevious).build(),
+            androidx.media3.session.CommandButton.Builder(androidx.media3.session.CommandButton.ICON_NEXT)
+                .setDisplayName("Siguiente").setSessionCommand(SessionCommand("musicvault.jam_next", Bundle.EMPTY))
+                .setSlots(androidx.media3.session.CommandButton.SLOT_FORWARD).setEnabled(JamTransportBridge.canNext).build()
+        ) else emptyList()
+        mediaSession?.setMediaButtonPreferences(buttons)
+    }
     private var localCatalog: List<Track> = emptyList()
     private var queueInstalled = false
     private var loudnessJob: Job? = null
@@ -86,7 +97,7 @@ class MusicPlaybackService : MediaLibraryService() {
         settings = com.musicvault.app.settings.AppPreferences.prefs(this)
         settings.registerOnSharedPreferenceChangeListener(settingsListener)
         player = buildPlayer()
-        JamTransportBridge.onActiveChanged = { applyAudioOptions(player) }
+        JamTransportBridge.onActiveChanged = { applyAudioOptions(player); updateJamButtons() }
         attachPlayerListeners(player)
         restoreLocalQueue()
         serviceScope.launch {
@@ -109,6 +120,7 @@ class MusicPlaybackService : MediaLibraryService() {
         PlaybackOptions.onRepeatChanged?.invoke()
         PlaybackOptions.onTimerChanged = ::scheduleSleepTimer
         scheduleSleepTimer()
+        updateJamButtons()
         AudioSessionBridge.sessionId = player.audioSessionId
         updateCrossfadeMonitor()
 
@@ -125,9 +137,16 @@ class MusicPlaybackService : MediaLibraryService() {
                     val result = super.onConnect(session, controller)
                     return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
                         .setAvailableSessionCommands(result.availableSessionCommands.buildUpon()
+                            .add(SessionCommand("musicvault.jam_next", Bundle.EMPTY)).add(SessionCommand("musicvault.jam_previous", Bundle.EMPTY))
                             .add(SessionCommand("musicvault.restore_order", Bundle.EMPTY)).build()).build()
                 }
                 override fun onCustomCommand(session: MediaSession, controller: MediaSession.ControllerInfo, command: SessionCommand, args: Bundle): ListenableFuture<SessionResult> {
+                    if (command.customAction in setOf("musicvault.jam_next", "musicvault.jam_previous")) {
+                        val next = command.customAction == "musicvault.jam_next"
+                        val allowed = JamTransportBridge.active && if (next) JamTransportBridge.canNext else JamTransportBridge.canPrevious
+                        if (allowed) JamTransportBridge.dispatch(if (next) JamTransportBridge.Command.Next else JamTransportBridge.Command.Previous)
+                        return Futures.immediateFuture(SessionResult(if (allowed) SessionResult.RESULT_SUCCESS else SessionError.ERROR_INVALID_STATE))
+                    }
                     if (command.customAction != "musicvault.restore_order" || controller.packageName != packageName)
                         return Futures.immediateFuture(SessionResult(SessionError.ERROR_PERMISSION_DENIED))
                     val order = args.getIntArray("order") ?: intArrayOf()
@@ -246,6 +265,7 @@ class MusicPlaybackService : MediaLibraryService() {
             })
             .setSessionActivity(pendingIntent)
             .build()
+        updateJamButtons()
     }
 
 

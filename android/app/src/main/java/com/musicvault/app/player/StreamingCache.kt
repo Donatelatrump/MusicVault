@@ -61,7 +61,7 @@ object StreamingCache {
     // pre-downloading whole playlists or wasting meaningful mobile data.
     const val PRELOAD_BYTES: Long = 192L * 1024L
 
-    fun cacheKey(trackId: String): String = "musicvault-stream:$trackId"
+    fun cacheKey(trackId: String): String = "musicvault-stream:${com.musicvault.app.providers.Providers.streamingQualityKey()}:$trackId"
 
     /** Local-only startup telemetry. Nothing is uploaded; logcat can correlate
      * user/request time with yt-dlp resolution, prebuffer and Media3 READY. */
@@ -345,6 +345,7 @@ object StreamingCache {
      * Media3 choose an extractor for the cached bytes.
      */
     fun playbackUriIfComplete(context: Context, trackId: String): String? {
+        if (com.musicvault.app.download.DownloadPreferences.streamQuality(context) == com.musicvault.app.download.DownloadQuality.BETA) return null
         if (!isComplete(context, trackId)) return null
         touch(context, trackId)
         val ext = cachedFormat(context, trackId).extension

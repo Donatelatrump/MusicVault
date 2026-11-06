@@ -533,7 +533,7 @@ fun MusicVaultApp(
             if (showJams && !state.fullPlayer) {
                 androidx.activity.compose.BackHandler { showJams = false }
                 JamsScreen(vm.jams, vm.jamFriends, state.selectedTrack, vm::searchJamSongs,
-                    onOpenRoom = { vm.openJamLink(com.musicvault.app.jams.JamInvitation.roomUrl(it)) }) { showJams = false }
+                    onOpenRoom = { vm.openJamLink(com.musicvault.app.jams.JamInvitation.roomUrl(it)) }, favoriteIds = state.favoriteIds, playlists = state.playlists, onAddToPlaylist = vm::addTrackToPlaylist, onFavorite = vm::toggleFavorite) { showJams = false }
             } else if (showSettings && !state.fullPlayer) {
                 SettingsScreen(
                     appUpdates = appUpdates,

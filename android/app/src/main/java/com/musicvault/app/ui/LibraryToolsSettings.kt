@@ -83,25 +83,25 @@ internal fun LibraryToolsSettings() {
             .onSuccess { storage = it }
     }
     SettingsSection(stringResource(R.string.streaming_quality_title)) {
-        listOf(DownloadQuality.SAVER, DownloadQuality.BEST).forEach { option ->
+        listOf(DownloadQuality.SAVER, DownloadQuality.BEST, DownloadQuality.BETA).forEach { option ->
             Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                 RadioButton(selected = streamQuality == option, onClick = {
                     streamQuality = option
                     DownloadPreferences.prefs(context).edit().putString(DownloadPreferences.STREAM_QUALITY, option.name).apply()
                 })
-                Text(stringResource(if (option == DownloadQuality.BEST) R.string.streaming_quality_best else R.string.streaming_quality_fast))
+                if (option == DownloadQuality.BETA) Text("Beta") else Text(stringResource(if (option == DownloadQuality.BEST) R.string.streaming_quality_best else R.string.streaming_quality_fast))
             }
         }
     }
     SettingsSection(stringResource(R.string.ui_descargas_2b98b7)) {
         Text(context.getString(R.string.ui_calidad_del_audio_954893), style = MaterialTheme.typography.titleSmall)
-        listOf(DownloadQuality.SAVER, DownloadQuality.BEST).forEach { option ->
+        listOf(DownloadQuality.SAVER, DownloadQuality.BEST, DownloadQuality.BETA).forEach { option ->
             Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                 RadioButton(selected = quality == option, onClick = {
                     quality = option
                     DownloadPreferences.prefs(context).edit().putString(DownloadPreferences.QUALITY, option.name).apply()
                 })
-                Text(if (option == DownloadQuality.BEST) stringResource(com.musicvault.app.R.string.ui_mejor_calidad_disponible_719e83) else stringResource(com.musicvault.app.R.string.ui_ahorrar_datos_59622d))
+                if (option == DownloadQuality.BETA) Text("Beta") else Text(if (option == DownloadQuality.BEST) stringResource(com.musicvault.app.R.string.ui_mejor_calidad_disponible_719e83) else stringResource(com.musicvault.app.R.string.ui_ahorrar_datos_59622d))
             }
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {

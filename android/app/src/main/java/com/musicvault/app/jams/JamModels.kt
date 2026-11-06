@@ -19,6 +19,12 @@ internal data class JamState(val installationUid: String, val uid: String? = nul
     val isHost get() = uid != null && hostUid == uid
     val isLeader get() = uid != null && leaderUid == uid
     val currentSong get() = songs.firstOrNull { it.key == playback.songKey }
+    val canPrevious get() = songs.indexOfFirst { it.key == playback.songKey } > 0
+    val canNext get() = songs.isNotEmpty() && songs.indexOfFirst { it.key == playback.songKey } < songs.lastIndex
+    fun songAfterRemoval(key: String): JamSong? {
+        val index = songs.indexOfFirst { it.key == key }
+        return songs.getOrNull(index + 1)?.takeUnless { it.key == key } ?: songs.firstOrNull { it.key != key }
+    }
     val allReady get() = members.isNotEmpty() && members.all { readySongs[it] == playback.songKey }
 }
 internal object JamSync {

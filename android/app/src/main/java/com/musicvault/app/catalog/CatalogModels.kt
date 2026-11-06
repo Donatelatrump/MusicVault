@@ -32,7 +32,8 @@ data class CatalogArtist(
     val id: String,
     val name: String,
     val country: String? = null,
-    val disambiguation: String? = null
+    val disambiguation: String? = null,
+    val portraitUri: String? = null
 )
 
 @Immutable
