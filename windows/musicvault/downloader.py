@@ -7,6 +7,8 @@ import subprocess
 import sys
 from .processes import process_options
 
+_javascript_runtime_cache = None
+
 
 def downloader_command():
     override = os.environ.get("MUSICVAULT_YTDLP")
@@ -25,7 +27,7 @@ def downloader_command():
 
 
 def javascript_runtime():
-    _javascript_runtime_cache = None
+    global _javascript_runtime_cache
 
     def _resolve():
         candidates = []

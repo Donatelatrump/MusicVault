@@ -56,11 +56,14 @@ def build_window(self):
     side.addSpacing(18)
     self.nav = {}
     routes = (("Inicio", "home"), ("Buscar", "search"), ("Biblioteca", "library"),
-              ("Favoritos", "heart"), ("Álbumes", "album"))
+              ("Favoritos", "heart"), ("Álbumes", "album"), ("Jam", "queue"))
     for name, glyph in routes:
         if name == "Biblioteca":
             side.addSpacing(18)
-        item = button(name, lambda checked=False, route=name: self.show_route(route))
+        if name == "Jam":
+            item = button(name, self.toggle_jam)
+        else:
+            item = button(name, lambda checked=False, route=name: self.show_route(route))
         item.setObjectName("nav")
         item.setCheckable(True)
         item.setIcon(icon(glyph, "#B3A992", 20))

@@ -15,7 +15,6 @@ from urllib.parse import urlencode, urlsplit
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtGui import QImageReader
 
-from .services import get_json, USER_AGENT
 from .models import stable_id, data_dir
 
 
@@ -217,6 +216,7 @@ class MusicBrainzProvider:
 
     def search_albums(self, query: str, limit: int = 10) -> list[dict]:
         self._throttle()
+        from .services import get_json
         params = {"query": query, "fmt": "json", "limit": str(min(limit, 25))}
         data = get_json("https://musicbrainz.org/ws/2/release/", **params)
         albums = []
@@ -245,6 +245,7 @@ class MusicBrainzProvider:
 
     def search_artists(self, query: str, limit: int = 10) -> list[dict]:
         self._throttle()
+        from .services import get_json
         params = {"query": query, "fmt": "json", "limit": str(min(limit, 25))}
         data = get_json("https://musicbrainz.org/ws/2/artist/", **params)
         artists = []

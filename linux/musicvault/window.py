@@ -23,7 +23,7 @@ from .spotify import spotify_url_from_text
 from .songmirror_spotify import clear_session, save_session, session_configured, validate_session
 from .downloader import explain_download_error
 from .streaming import StreamingService, StreamCancelled
-from .experience import artist_matches, round_robin, taste_signature
+from .experience import artist_matches, DjRecommendationEngine, DjUiState, JAM_MIX_ID, round_robin, taste_signature
 from .experience_ui import OnboardingDialog, StartupOverlay, TrackPickerDialog
 from .widgets import Cover, Record, STYLE, ElidedLabel, icon, load_fonts
 
@@ -74,6 +74,9 @@ class Window(QMainWindow):
         self.search_loading_playlists = False
         self.home_recommendations, self.home_recommendation_albums = [], []
         self.taste_generation = 0
+        self.jam_engine = DjRecommendationEngine()
+        self.jam_state = DjUiState()
+        self.jam_discover_job = None
         self._startup_overlay = None
         self.download_jobs, self.download_callbacks = {}, {}
         self.download_items = {}
@@ -253,7 +256,7 @@ class Window(QMainWindow):
         for name, widget in self.nav.items():
             active = name == route
             widget.setChecked(active)
-            glyph = {"Inicio":"home","Buscar":"search","Biblioteca":"library","Álbumes":"album","Descargas":"download","Favoritos":"heart"}[name]
+            glyph = {"Inicio":"home","Buscar":"search","Biblioteca":"library","Álbumes":"album","Descargas":"download","Favoritos":"heart","Jam":"queue"}[name]
             widget.setIcon(icon(glyph,"#E0A458" if active else "#B3A992",20))
         self.heading.setText(route)
         self.heading.setVisible(route != "Inicio")
@@ -307,7 +310,7 @@ class Window(QMainWindow):
         self.playlist_list.hide()
         self.new_collection_button.setVisible(route == "Álbumes")
         self.rescan_button.setVisible(route == "Biblioteca")
-        self.play_all_button.setVisible(route in ("Biblioteca","Favoritos","Buscar"))
+        self.play_all_button.setVisible(route in ("Biblioteca","Favoritos","Buscar","Jam"))
         self.album_list.hide()
         self.album_render_signature = None
         if route == "Álbumes":
@@ -316,6 +319,9 @@ class Window(QMainWindow):
         elif route == "Descargas":
             self.stack.setCurrentWidget(self.downloads_list)
             self.refresh_downloads()
+        elif route == "Jam":
+            self.stack.setCurrentWidget(self.track_page)
+            self.refresh_tracks()
         else:
             self.stack.setCurrentWidget(self.track_page)
             self.refresh_tracks()
@@ -362,6 +368,8 @@ class Window(QMainWindow):
             local = self.db.tracks(query)
             seen = {t.id for t in local}
             tracks = local + [self.db.get_track(t.id) or t for t in self.remote_tracks if t.id not in seen] if query else []
+        elif self.route == "Jam":
+            tracks = list(self.jam_state.upcoming)
         else:
             tracks = self.db.library_tracks(query, availability=availability)
         self.render_tracks(tracks, availability)
@@ -666,6 +674,110 @@ class Window(QMainWindow):
         # handoff itself is one-shot.
         if show_overlay and first_finish:
             self._wait_home_visual_ready(generation)
+
+    # ── Jam (DJ para ti) integration ──────────────────────────────────────
+
+    def toggle_jam(self):
+        """Activate or deactivate the DJ jam mix."""
+        if self.jam_state.active:
+            self.stop_jam()
+        else:
+            self.start_jam()
+
+    def start_jam(self):
+        """Generate a jam mix from local play history and show it."""
+        if self.jam_state.loading:
+            return
+        self.jam_state = DjUiState(active=True, loading=True, reason="dj_reason_learning")
+        self._refresh_jam_ui()
+        self._generate_jam_mix()
+
+    def stop_jam(self):
+        """Deactivate the DJ jam mix and return to normal home view."""
+        self.jam_state = DjUiState()
+        if self.route == "Jam":
+            self.show_route("Inicio")
+        self._refresh_jam_ui()
+
+    def _generate_jam_mix(self):
+        """Build the jam mix using the recommendation engine, off the UI thread."""
+        if self.jam_discover_job:
+            self.jam_discover_job.cancel.set()
+            self.jam_discover_job = None
+
+        def work(cancel, progress):
+            known = self.db.tracks()
+            preferred = list(self.db.setting("favorite_artists", []) or [])
+            history = []
+            with self.db.connect() as db:
+                for row in db.execute(
+                    "SELECT track_id, played, completion FROM history ORDER BY played DESC"
+                ):
+                    history.append({
+                        "track_id": row[0],
+                        "played_at": row[1] * 1000,
+                        "completion_ratio": row[2],
+                    })
+            current = self.player.current
+            playable_offline = {
+                t.id for t in known
+                if t.path and __import__("pathlib").Path(t.path).is_file()
+            }
+
+            def discover(seed, limit):
+                if cancel.is_set():
+                    return []
+                results = self.catalog.search_tracks(seed, "catalog", cancel)
+                return results[:limit]
+
+            mix, reason = self.jam_engine.recommendations(
+                history, known, preferred, set(), current, True, playable_offline,
+                discover_fn=discover,
+            )
+            return mix, reason
+
+        def ready(payload):
+            mix, reason = payload
+            if self.jam_state.loading:
+                self.jam_state = DjUiState(
+                    active=True,
+                    loading=False,
+                    reason=reason,
+                    upcoming=list(mix),
+                    message=f"Mezcla DJ: {len(mix)} canciones",
+                )
+                self._refresh_jam_ui()
+                if self.route != "Jam":
+                    self.show_route("Jam")
+                else:
+                    self.refresh_tracks()
+
+        def failed(error):
+            self.jam_state = DjUiState(active=True, loading=False, message=str(error))
+            self._refresh_jam_ui()
+
+        self.jam_discover_job = self.jobs.submit(work, ready, failed)
+
+    def _refresh_jam_ui(self):
+        """Update nav/button states to reflect jam active/inactive."""
+        jam_btn = self.nav.get("Jam")
+        if jam_btn:
+            jam_btn.setChecked(self.jam_state.active)
+            jam_btn.setIcon(
+                icon("queue", "#E0A458" if self.jam_state.active else "#B3A992", 20)
+            )
+        if hasattr(self, "heading") and self.route == "Jam":
+            self.heading.setText("Mezcla DJ")
+            self.heading.setVisible(True)
+            self.description.setText(self.jam_state.reason or "")
+            self.description.setVisible(bool(self.jam_state.reason))
+        if self.jam_state.loading and self.route == "Jam":
+            self.notify("Preparando mezcla DJ…")
+
+    def _jam_discover_fn(self, seed, limit):
+        """Online discovery callback for the jam engine."""
+        results = self.catalog.search_tracks(seed, "catalog", None)
+        return results[:limit]
 
     def _wait_home_visual_ready(self, generation):
         if generation != self.taste_generation:
