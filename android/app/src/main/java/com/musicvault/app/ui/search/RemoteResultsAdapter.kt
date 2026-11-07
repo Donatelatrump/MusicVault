@@ -48,7 +48,7 @@ sealed interface RemoteResultItem {
     }
 }
 
-enum class MoreAction { QUEUE, ALBUM, DOWNLOAD, CANCEL_DOWNLOAD, DELETE, RADIO }
+enum class MoreAction { QUEUE, ALBUM, DOWNLOAD, CANCEL_DOWNLOAD, DELETE, RADIO, FAVORITE }
 
 class RemoteResultsAdapter(
     private val onAlbumClick: (CatalogAlbum) -> Unit,
@@ -64,6 +64,7 @@ class RemoteResultsAdapter(
     private var selectedTrackId: String? = null
     private var isPlaying: Boolean = false
     private var jamFeedback: Map<String, JamTrackFeedback> = emptyMap()
+    private var favoriteIds: Set<String> = emptySet()
     private val positionByLocalId = HashMap<String, Int>(128)
 
     init {
@@ -107,38 +108,45 @@ class RemoteResultsAdapter(
         progress: Map<String, Int>,
         selectedTrackId: String?,
         isPlaying: Boolean,
-        jamFeedback: Map<String, JamTrackFeedback> = emptyMap()
+        jamFeedback: Map<String, JamTrackFeedback> = emptyMap(),
+        favoriteIds: Set<String> = emptySet()
     ) {
         if (this.downloadedIds === downloadedIds &&
             this.progress === progress &&
             this.selectedTrackId == selectedTrackId &&
-            this.isPlaying == isPlaying && this.jamFeedback == jamFeedback
+            this.isPlaying == isPlaying && this.jamFeedback == jamFeedback &&
+            this.favoriteIds === favoriteIds
         ) return
         if (this.downloadedIds == downloadedIds &&
             this.progress == progress &&
             this.selectedTrackId == selectedTrackId &&
-            this.isPlaying == isPlaying && this.jamFeedback == jamFeedback
+            this.isPlaying == isPlaying && this.jamFeedback == jamFeedback &&
+            this.favoriteIds == favoriteIds
         ) return
 
         val oldDownloadedIds = this.downloadedIds
         val oldProgress = this.progress
         val oldSelectedTrackId = this.selectedTrackId
         val oldJamFeedback = this.jamFeedback
+        val oldFavoriteIds = this.favoriteIds
         this.jamFeedback = jamFeedback
 
         this.downloadedIds = downloadedIds
         this.progress = progress
         this.selectedTrackId = selectedTrackId
         this.isPlaying = isPlaying
+        this.favoriteIds = favoriteIds
 
         if (positionByLocalId.isNotEmpty()) {
-            val changedIds = HashSet<String>(oldProgress.size + progress.size + oldDownloadedIds.size + downloadedIds.size + 2)
+            val changedIds = HashSet<String>(oldProgress.size + progress.size + oldDownloadedIds.size + downloadedIds.size + oldFavoriteIds.size + favoriteIds.size + 2)
             changedIds.addAll(oldProgress.keys)
             changedIds.addAll(progress.keys)
             changedIds.addAll(oldJamFeedback.keys)
             changedIds.addAll(jamFeedback.keys)
             changedIds.addAll(oldDownloadedIds)
             changedIds.addAll(downloadedIds)
+            changedIds.addAll(oldFavoriteIds)
+            changedIds.addAll(favoriteIds)
             oldSelectedTrackId?.let(changedIds::add)
             selectedTrackId?.let(changedIds::add)
             changedIds.forEach { localId ->
@@ -261,7 +269,7 @@ class RemoteResultsAdapter(
         }
     }
 
-    private class TrackHolder(
+    private inner class TrackHolder(
         context: Context,
         private val onClick: (CatalogTrack) -> Unit,
         private val onCancel: (String) -> Unit,
@@ -356,6 +364,8 @@ class RemoteResultsAdapter(
             NativeAccessibility.describe(itemView, "${value.title}, ${buildSubtitle(value)}", state,
                 clickLabel = itemView.context.getString(R.string.ui_reproducir_cancion_e47bd3), actions = buildList {
                     add(NativeAccessibility.Action(playbackLabel) { onPlayToggle(value) })
+                    val isFav = localId in favoriteIds
+                    add(NativeAccessibility.Action(if (isFav) itemView.context.getString(R.string.ui_quitar_de_me_gusta_d81660) else itemView.context.getString(R.string.ui_me_gusta_f3b81e)) { onMoreAction(value, MoreAction.FAVORITE) })
                     add(NativeAccessibility.Action(itemView.context.getString(R.string.ui_agregar_a_cola_ca3388)) { onMoreAction(value, MoreAction.QUEUE) })
                     if (!downloaded) add(NativeAccessibility.Action(if (downloading) itemView.context.getString(R.string.ui_cancelar_descarga_f42d93) else itemView.context.getString(R.string.ui_descargar_8b98cb)) {
                         if (downloading) onCancel(localId) else onMoreAction(value, MoreAction.DOWNLOAD)
@@ -474,10 +484,12 @@ class RemoteResultsAdapter(
                 }
             })
         }
+        val localId = "${track.provider}:recording:${track.id}"
+        val isFav = localId in favoriteIds
+        addItem(if (isFav) context.getString(R.string.ui_quitar_de_me_gusta_d81660) else context.getString(R.string.ui_me_gusta_f3b81e), MoreAction.FAVORITE)
         addItem(context.getString(R.string.ui_agregar_a_cola_de_reproduccion_f8c617), MoreAction.QUEUE)
         addItem(context.getString(R.string.ui_agregar_a_album_7c4ad3), MoreAction.ALBUM)
         addItem(context.getString(R.string.ui_iniciar_radio_de_esta_cancion_cc8ac4), MoreAction.RADIO)
-        val localId = "${track.provider}:recording:${track.id}"
         when {
             localId in downloadedIds -> addItem(context.getString(R.string.ui_eliminar_cancion_descargada_8c5b0a), MoreAction.DELETE)
             progress.containsKey(localId) -> addItem(context.getString(R.string.ui_cancelar_descarga_f42d93), MoreAction.CANCEL_DOWNLOAD)

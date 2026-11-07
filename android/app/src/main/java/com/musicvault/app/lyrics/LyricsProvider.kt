@@ -12,7 +12,7 @@ data class LyricLine(val timeMs: Long, val text: String)
 
 /** Plain and/or synced lyrics for a track. */
 data class Lyrics(val plain: String?, val synced: List<LyricLine>, val origin: String? = null, val instrumental: Boolean = false) {
-    val isEmpty: Boolean get() = !instrumental && plain.isNullOrBlank() && synced.isEmpty()
+    val isEmpty: Boolean get() = !instrumental && (plain.isNullOrBlank() || plain == "null") && synced.isEmpty()
 }
 
 /**
@@ -137,7 +137,7 @@ object LyricsProvider {
         if (body == "[musicvault-instrumental:true]") return Lyrics(null, emptyList(), origin, instrumental = true)
         val synced = parseLrc(body)
         if (synced.isNotEmpty()) return Lyrics(plain = null, synced = synced, origin = origin)
-        return body.takeIf { it.isNotBlank() }?.let { Lyrics(plain = it, synced = emptyList(), origin = origin) }
+        return body.takeIf { it.isNotBlank() && it != "null" }?.let { Lyrics(plain = it, synced = emptyList(), origin = origin) }
     }
 
     suspend fun fetch(
@@ -207,8 +207,8 @@ object LyricsProvider {
     }
 
     private fun toLyrics(record: JSONObject): Lyrics? = runCatching {
-        val plain = record.optString("plainLyrics").takeIf { it.isNotBlank() }
-        val synced = record.optString("syncedLyrics").takeIf { it.isNotBlank() }?.let(::parseLrc) ?: emptyList()
+        val plain = record.optString("plainLyrics").takeIf { it.isNotBlank() && it != "null" }
+        val synced = record.optString("syncedLyrics").takeIf { it.isNotBlank() && it != "null" }?.let(::parseLrc) ?: emptyList()
         Lyrics(plain, synced, instrumental = record.optBoolean("instrumental", false))
     }.getOrNull()
 

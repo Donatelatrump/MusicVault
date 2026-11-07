@@ -2913,14 +2913,16 @@ class MusicVaultViewModel(
         createPlaylist(title, tracks)
     }
 
-    fun createAlbumFromRemote(title: String, track: CatalogTrack) {
-        if (title.isBlank()) return
+    fun createAlbumFromRemote(title: String, tracks: List<CatalogTrack>) {
+        if (title.isBlank() || tracks.isEmpty()) return
         viewModelScope.launch(Dispatchers.IO) {
             val id = "playlist:custom:${java.util.UUID.randomUUID()}"
             repository.createPlaylist(id, title.trim(), "Álbum creado por ti")
-            addRemoteTrackToPlaylist(track, id)
+            addRemoteTracksToPlaylist(tracks, id)
         }
     }
+
+    fun createAlbumFromRemote(title: String, track: CatalogTrack) = createAlbumFromRemote(title, listOf(track))
 
     fun openRemoteAlbum(album: CatalogAlbum) {
         savedState["remote_album_json"] = org.json.JSONObject().put("id", album.id).put("title", album.title).put("artistId", album.artistId).put("artist", album.artistName).put("provider", album.provider).put("cover", album.coverUri).put("year", album.year).toString()
@@ -3204,6 +3206,42 @@ class MusicVaultViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             val stored = persistTrackReference(catalogTrackForStreaming(track))
             repository.addTrackToPlaylist(playlistId, stored)
+        }
+    }
+
+    fun addRemoteTracksToPlaylist(tracks: List<CatalogTrack>, playlistId: String) {
+        if (tracks.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            tracks.forEach { track ->
+                val stored = persistTrackReference(catalogTrackForStreaming(track))
+                repository.addTrackToPlaylist(playlistId, stored)
+            }
+            showProvider("${tracks.size} canciones añadidas a la playlist.")
+        }
+    }
+
+    fun toggleRemoteFavorite(track: CatalogTrack) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val stored = persistTrackReference(catalogTrackForStreaming(track))
+            repository.toggleFavorite(stored)
+        }
+    }
+
+    fun toggleAlbumFavorites(tracks: List<CatalogTrack>) {
+        if (tracks.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val favIds = state.value.favoriteIds
+            val allLiked = tracks.all { "${it.provider}:recording:${it.id}" in favIds }
+            tracks.forEach { track ->
+                val localTrack = catalogTrackForStreaming(track)
+                val isFav = localTrack.id in favIds
+                if (allLiked && isFav) {
+                    repository.toggleFavorite(localTrack)
+                } else if (!allLiked && !isFav) {
+                    val stored = persistTrackReference(localTrack)
+                    repository.toggleFavorite(stored)
+                }
+            }
         }
     }
 

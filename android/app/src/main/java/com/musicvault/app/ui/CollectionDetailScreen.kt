@@ -215,6 +215,8 @@ internal fun RemoteAlbumDetail(
     vm: MusicVaultViewModel
 ) {
     val hybrid = LocalHybridDesign.current
+    val appState by vm.state.collectAsStateWithLifecycle()
+    val favoriteIds = appState.favoriteIds
     val downloadProgress by vm.downloadProgress.collectAsStateWithLifecycle()
     val downloadedIds = remember(localTracks) {
         localTracks.asSequence()
@@ -327,22 +329,106 @@ internal fun RemoteAlbumDetail(
 
         if (tracks.isNotEmpty()) {
             Spacer(Modifier.height(10.dp))
-            Button(
-                onClick = { if (!albumDownloading) vm.downloadRemoteAlbum(album, tracks) },
-                enabled = !albumDownloading,
-                shape = RoundedCornerShape(50),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = VaultColors.Surface2,
-                    contentColor = VaultColors.TextPrimary,
-                    disabledContainerColor = VaultColors.Surface2,
-                    disabledContentColor = VaultColors.TextPrimary
-                ),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+            var showAlbumPlaylistChoice by remember { mutableStateOf(false) }
+            var showCreateAlbumForAlbum by remember { mutableStateOf(false) }
+            var newAlbumNameForAlbum by remember { mutableStateOf("") }
+            val allAlbumTracksLiked = remember(tracks, favoriteIds) {
+                tracks.isNotEmpty() && tracks.all { "${it.provider}:recording:${it.id}" in favoriteIds }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                if (albumDownloading) ThinDownloadProgress(modifier = Modifier.width(24.dp))
-                else Icon(VaultIcons.Download, contentDescription = null, modifier = Modifier.size(20.dp))
-                Spacer(Modifier.width(6.dp))
-                Text(if (albumDownloading) "Descargando álbum" else "Descargar álbum", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                Button(
+                    onClick = { if (!albumDownloading) vm.downloadRemoteAlbum(album, tracks) },
+                    enabled = !albumDownloading,
+                    shape = RoundedCornerShape(50),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = VaultColors.Surface2,
+                        contentColor = VaultColors.TextPrimary,
+                        disabledContainerColor = VaultColors.Surface2,
+                        disabledContentColor = VaultColors.TextPrimary
+                    ),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                ) {
+                    if (albumDownloading) ThinDownloadProgress(modifier = Modifier.width(22.dp))
+                    else Icon(VaultIcons.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(if (albumDownloading) "Descargando" else "Descargar", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                }
+
+                Button(
+                    onClick = { showAlbumPlaylistChoice = true },
+                    shape = RoundedCornerShape(50),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = VaultColors.Surface2,
+                        contentColor = VaultColors.TextPrimary
+                    ),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
+                ) {
+                    Icon(VaultIcons.QueueMusic, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Añadir a playlist", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                }
+
+                IconButton(
+                    onClick = { vm.toggleAlbumFavorites(tracks) },
+                    modifier = Modifier
+                        .size(38.dp)
+                        .background(VaultColors.Surface2, CircleShape)
+                ) {
+                    Icon(
+                        imageVector = if (allAlbumTracksLiked) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                        contentDescription = if (allAlbumTracksLiked) "Quitar de Me gusta" else "Me gusta",
+                        tint = if (allAlbumTracksLiked) VaultColors.Accent else VaultColors.TextSecondary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+
+            if (showAlbumPlaylistChoice) {
+                AlbumChoiceDialog(
+                    albums = playlists.map { Album(it.id, it.title, "custom", it.description, 0, it.coverUri) },
+                    onDismiss = { showAlbumPlaylistChoice = false },
+                    onSelect = { playlistId ->
+                        vm.addRemoteTracksToPlaylist(tracks, playlistId)
+                        showAlbumPlaylistChoice = false
+                    },
+                    onCreate = {
+                        showCreateAlbumForAlbum = true
+                        showAlbumPlaylistChoice = false
+                    },
+                    onDelete = vm::deletePlaylist
+                )
+            }
+
+            if (showCreateAlbumForAlbum) {
+                AlertDialog(
+                    onDismissRequest = { showCreateAlbumForAlbum = false },
+                    title = { Text(stringResource(R.string.ui_crear_nuevo_album_5d97f7)) },
+                    text = {
+                        OutlinedTextField(
+                            value = newAlbumNameForAlbum,
+                            onValueChange = { newAlbumNameForAlbum = it },
+                            label = { Text(stringResource(R.string.ui_nombre_e68491)) },
+                            singleLine = true
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(
+                            enabled = newAlbumNameForAlbum.isNotBlank(),
+                            onClick = {
+                                vm.createAlbumFromRemote(newAlbumNameForAlbum, tracks)
+                                showCreateAlbumForAlbum = false
+                                newAlbumNameForAlbum = ""
+                            }
+                        ) { Text(stringResource(R.string.ui_crear_48a068)) }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showCreateAlbumForAlbum = false }) { Text(stringResource(R.string.ui_cancelar_c111e0)) }
+                    }
+                )
             }
         }
 
@@ -389,7 +475,8 @@ internal fun RemoteAlbumDetail(
                         downloadedIds = downloadedIds,
                         progress = downloadProgress,
                         selectedTrackId = selectedTrackId,
-                        isPlaying = isPlaying
+                        isPlaying = isPlaying,
+                        favoriteIds = favoriteIds
                     )
                     if (recyclerView.adapter !== adapter) recyclerView.adapter = adapter
                 }
@@ -399,6 +486,11 @@ internal fun RemoteAlbumDetail(
 
     val selectedTrack = actionTrack
     when (actionAction) {
+        MoreAction.FAVORITE -> if (selectedTrack != null) {
+            vm.toggleRemoteFavorite(selectedTrack)
+            actionTrack = null
+            actionAction = null
+        }
         MoreAction.RADIO -> if (selectedTrack != null) {
             LaunchedEffect(selectedTrack.id, actionAction) {
                 vm.startRadio(selectedTrack)

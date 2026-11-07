@@ -184,6 +184,8 @@ internal fun SearchScreen(
         else trackFeedback
     val jamSelectedTrackId = if (jam.active) jam.currentSong?.sourceTrackId ?: state.selectedTrackId else state.selectedTrackId
     val offlineTracks by vm.offlineSearchResults.collectAsStateWithLifecycle()
+    val appState by vm.state.collectAsStateWithLifecycle()
+    val favoriteIds = appState.favoriteIds
     val offlineAdapter = remember { LibraryFeedAdapter(vm) }
     val hybrid = LocalHybridDesign.current
     val downloadProgress by vm.downloadProgress.collectAsStateWithLifecycle()
@@ -486,7 +488,8 @@ internal fun SearchScreen(
                             progress = downloadProgress,
                             selectedTrackId = jamSelectedTrackId,
                             isPlaying = isPlaying,
-                            jamFeedback = displayJamFeedback
+                            jamFeedback = displayJamFeedback,
+                            favoriteIds = favoriteIds
                         )
                     }
                 }
@@ -498,6 +501,11 @@ internal fun SearchScreen(
 
     val selectedTrack = actionTrack
     when (actionAction) {
+        MoreAction.FAVORITE -> if (selectedTrack != null) {
+            vm.toggleRemoteFavorite(selectedTrack)
+            actionTrack = null
+            actionAction = null
+        }
         MoreAction.RADIO -> if (selectedTrack != null) {
             LaunchedEffect(selectedTrack.id, actionAction) {
                 vm.startRadio(selectedTrack)

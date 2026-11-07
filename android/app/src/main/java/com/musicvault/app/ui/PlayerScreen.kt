@@ -1369,6 +1369,7 @@ internal fun LyricsPanel(
             modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
+                .padding(bottom = 80.dp)
         ) {
             Text(
                 lyrics.plain.orEmpty(),
@@ -1496,7 +1497,8 @@ internal fun SyncedLyricsList(lines: List<LyricLine>, positionState: State<Long>
                     itemAnimator = null
                     setItemViewCacheSize(16)
                     recycledViewPool.setMaxRecycledViews(0, 20)
-                    setPadding(0, 0, 0, 0)
+                    val bottomPaddingPx = (96 * context.resources.displayMetrics.density).roundToInt()
+                    setPadding(0, 0, 0, bottomPaddingPx)
                     clipToPadding = false
                     clipChildren = true
                     overScrollMode = RecyclerView.OVER_SCROLL_IF_CONTENT_SCROLLS
@@ -1529,7 +1531,10 @@ internal fun SyncedLyricsList(lines: List<LyricLine>, positionState: State<Long>
         if (!following) {
             TextButton(
                 onClick = { lastAutoScrolledIndex[0] = Int.MIN_VALUE; following = true },
-                modifier = Modifier.align(Alignment.BottomCenter).background(VaultColors.Surface1, RoundedCornerShape(20.dp))
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 16.dp)
+                    .background(VaultColors.Surface1, RoundedCornerShape(20.dp))
             ) { Text("Volver a la línea actual", color = VaultColors.Accent) }
         }
     }

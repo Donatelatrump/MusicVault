@@ -52,7 +52,17 @@ object RelatedArtists {
         (0 until data.length()).mapNotNull { index ->
             val item = data.optJSONObject(index) ?: return@mapNotNull null
             val name = item.optString("name").takeIf { it.isNotBlank() } ?: return@mapNotNull null
-            CatalogArtist(item.optString("id"), name)
+            val portrait = listOf("picture_medium", "picture_big", "picture", "picture_small").firstNotNullOfOrNull { key ->
+                item.optString(key).takeIf { it.startsWith("https://") }
+            }
+            val fans = item.optLong("nb_fan", 0L)
+            val albums = item.optInt("nb_album", 0)
+            val info = when {
+                fans > 0 -> "${java.text.NumberFormat.getIntegerInstance().format(fans)} fans"
+                albums > 0 -> "$albums álbumes"
+                else -> null
+            }
+            CatalogArtist(item.optString("id"), name, disambiguation = info, portraitUri = portrait)
         }.distinctBy { it.id }.take(limit.coerceIn(1, 50))
     }
 
