@@ -347,4 +347,7 @@
     <string name="artist_empty">Sin resultados</string>
     <string name="jams_add_local_playlist">Añadir a playlist local</string>
     <string name="artist_song_search">Buscar canción del artista</string>
+    <string name="ui_repetir_una_cancion">Repetir una canción</string>
+    <string name="ui_repetir_playlist">Repetir playlist</string>
+    <string name="ui_repeticion_desactivada">Repetición desactivada</string>
 </resources>

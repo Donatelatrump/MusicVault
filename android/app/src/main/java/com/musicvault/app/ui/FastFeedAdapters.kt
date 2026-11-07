@@ -353,13 +353,13 @@ internal class HomeFeedAdapter(private val vm: MusicVaultViewModel) :
             Text(stringResource(R.string.ui_albumes_para_ti_9c66e7), color = VaultColors.TextPrimary, fontSize = if (hybridDesign) 19.sp else 20.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(10.dp))
             LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                item(key = DJ_MIX_ID) {
-                    AlbumCard(
-                        album = Album(DJ_MIX_ID, stringResource(R.string.dj_title), "dj", stringResource(R.string.dj_subtitle), 0),
-                        onClick = vm::openDjAlbum,
-                        hybrid = hybridDesign
-                    )
-                }
+                    item(key = DJ_MIX_ID) {
+                        AlbumCard(
+                            album = Album(DJ_MIX_ID, stringResource(R.string.dj_title), "dj", "", 0),
+                            onClick = vm::openDjAlbum,
+                            hybrid = hybridDesign
+                        )
+                    }
                 items(albums, key = { it.id }) { album ->
                     AlbumCard(
                         album = album,

@@ -746,25 +746,27 @@ internal fun PlaylistDetailHeader(
             fontFamily = if (hybrid) VaultFonts.Mono else VaultFonts.Body
         )
         Spacer(Modifier.height(14.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
                 onClick = onPlay,
                 enabled = trackCount > 0 && !loading,
                 shape = RoundedCornerShape(50),
-                colors = ButtonDefaults.buttonColors(containerColor = VaultColors.Accent, contentColor = Color.Black)
+                colors = ButtonDefaults.buttonColors(containerColor = VaultColors.Accent, contentColor = Color.Black),
+                modifier = Modifier.weight(1f)
             ) {
                 Icon(Icons.Default.PlayArrow, null)
                 Spacer(Modifier.width(6.dp))
-                Text(stringResource(R.string.ui_reproducir_d1a188), fontWeight = FontWeight.Bold)
+                Text(stringResource(R.string.ui_reproducir_d1a188), fontWeight = FontWeight.Bold, maxLines = 1)
             }
             OutlinedButton(
                 onClick = onShuffle,
                 enabled = trackCount > 0 && !loading,
-                shape = RoundedCornerShape(50)
+                shape = RoundedCornerShape(50),
+                modifier = Modifier.weight(1f)
             ) {
                 Icon(VaultIcons.Shuffle, null, tint = VaultColors.TextPrimary)
                 Spacer(Modifier.width(6.dp))
-                Text(stringResource(R.string.ui_aleatorio_a7567a), color = VaultColors.TextPrimary, fontWeight = FontWeight.Bold)
+                Text(stringResource(R.string.ui_aleatorio_a7567a), color = VaultColors.TextPrimary, fontWeight = FontWeight.Bold, maxLines = 1)
             }
         }
         Spacer(Modifier.height(10.dp))

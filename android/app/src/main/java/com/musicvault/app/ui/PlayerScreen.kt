@@ -19,6 +19,7 @@ import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import android.widget.Toast
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
@@ -661,21 +662,45 @@ internal fun FullPlayerScreen(track: Track, isPlaying: Boolean, shuffle: Boolean
                 }
             }
             Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                val context = LocalContext.current
+                LaunchedEffect(repeatMode) {
+                    val msg = when (repeatMode) {
+                        Player.REPEAT_MODE_ONE -> context.getString(R.string.ui_repetir_una_cancion)
+                        Player.REPEAT_MODE_ALL -> context.getString(R.string.ui_repetir_playlist)
+                        else -> context.getString(R.string.ui_repeticion_desactivada)
+                    }
+                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                }
                 IconButton(onClick = vm::cycleRepeatMode, modifier = Modifier.size(44.dp)) {
-                    Icon(
-                        if (repeatMode == Player.REPEAT_MODE_ONE) VaultIcons.RepeatOne else VaultIcons.Repeat,
-                        when (repeatMode) {
-                            Player.REPEAT_MODE_ONE -> "Repetir una vez"
-                            Player.REPEAT_MODE_ALL -> "Repetir siempre"
-                            else -> "Repetir"
-                        },
-                        tint = when (repeatMode) {
-                            Player.REPEAT_MODE_ONE -> VaultColors.Accent
-                            Player.REPEAT_MODE_ALL -> VaultColors.RepeatAll
-                            else -> VaultColors.TextTertiary
-                        },
-                        modifier = Modifier.size(22.dp)
-                    )
+                    Box(modifier = Modifier.size(22.dp), contentAlignment = Alignment.Center) {
+                        Icon(
+                            if (repeatMode == Player.REPEAT_MODE_ONE) VaultIcons.RepeatOne else VaultIcons.Repeat,
+                            when (repeatMode) {
+                                Player.REPEAT_MODE_ONE -> "Repetir una vez"
+                                Player.REPEAT_MODE_ALL -> "Repetir siempre"
+                                else -> "Repetir"
+                            },
+                            tint = when (repeatMode) {
+                                Player.REPEAT_MODE_ONE -> VaultColors.Accent
+                                Player.REPEAT_MODE_ALL -> VaultColors.RepeatAll
+                                else -> VaultColors.TextTertiary
+                            },
+                            modifier = Modifier.size(20.dp)
+                        )
+                        if (repeatMode == Player.REPEAT_MODE_ONE) {
+                            Box(
+                                modifier = Modifier.size(12.dp).align(Alignment.TopEnd)
+                                    .background(VaultColors.Accent, CircleShape)
+                            )
+                            Text(
+                                "1",
+                                color = VaultColors.OnAccent,
+                                fontSize = 7.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.align(Alignment.TopEnd)
+                            )
+                        }
+                    }
                 }
             }
         }
