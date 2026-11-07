@@ -45,3 +45,10 @@ __pycache__/
 *.egg-info/
 .venv/
 dist/
+
+# Desktop JAMS dependencies and local identity
+node_modules/
+identity.json
+
+windows/python/
+windows/Data/

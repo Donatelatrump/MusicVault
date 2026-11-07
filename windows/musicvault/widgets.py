@@ -4,7 +4,7 @@ import math
 
 from PyQt6.QtCore import Qt, QRectF, QTimer, QPointF, QSize, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen, QPixmap, QFont, QFontDatabase, QIcon, QPainterPath
-from PyQt6.QtWidgets import QLabel, QWidget, QStyledItemDelegate, QStyle, QSlider
+from PyQt6.QtWidgets import QLabel, QWidget, QStyledItemDelegate, QStyle, QSlider, QPushButton
 
 
 def load_fonts():
@@ -32,10 +32,13 @@ def icon(name, color="#F1EAD9", size=24):
             p.drawLine(19, 5, 19, 19)
     elif name == "pause":
         p.fillRect(QRectF(6, 5, 4, 14), QColor(color)); p.fillRect(QRectF(14, 5, 4, 14), QColor(color))
-    elif name == "heart":
+    elif name in ("heart", "heart_filled"):
         path = QPainterPath(QPointF(12, 20))
         path.cubicTo(9, 17, 3, 13, 3, 8); path.cubicTo(3, 2, 10, 2, 12, 7)
         path.cubicTo(14, 2, 21, 2, 21, 8); path.cubicTo(21, 13, 15, 17, 12, 20)
+        if name == "heart_filled":
+            path.closeSubpath()
+            p.fillPath(path, QColor(color))
         p.drawPath(path)
     elif name == "search":
         p.drawEllipse(QRectF(4, 3, 12, 12)); p.drawLine(14, 14, 21, 21)
@@ -235,6 +238,53 @@ QToolTip { color: #f0e9df; background: #30261c; border: 1px solid #74522d; }
 QStatusBar { color: #B3A992; font-size: 10px; background: #121110; }
 QScrollArea, QScrollArea > QWidget > QWidget { border: none; background: transparent; }
 """
+
+
+class CircularPlayButton(QPushButton):
+    """Paint an antialiased circle at every size, independent of Qt stylesheets."""
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        color = '#B8894E' if not self.isEnabled() else '#C98D45' if self.isDown() else '#E9B66F' if self.underMouse() else '#E0A458'
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(color))
+        diameter = min(self.width(), self.height())-1
+        bounds = QRectF((self.width()-diameter)/2, (self.height()-diameter)/2, diameter, diameter)
+        painter.drawEllipse(bounds)
+        size = self.iconSize()
+        rect = QRectF((self.width()-size.width())/2, (self.height()-size.height())/2, size.width(), size.height()).toRect()
+        self.icon().paint(painter, rect)
+        if self.hasFocus():
+            painter.setPen(QPen(QColor('#F1EAD9'), 1, Qt.PenStyle.DotLine))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(bounds.adjusted(3, 3, -3, -3))
+
+    def hitButton(self, point):
+        radius = min(self.width(), self.height())/2
+        return (point.x()-self.width()/2)**2 + (point.y()-self.height()/2)**2 <= radius**2
+
+
+class ArtistLinkLabel(QLabel):
+    clicked = pyqtSignal()
+
+    def __init__(self, text='', parent=None):
+        super().__init__(text,parent)
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setToolTip('Abrir perfil del artista')
+        self.setAccessibleName('Abrir perfil del artista')
+        self.setStyleSheet('QLabel:hover { color: #F1EAD9; text-decoration: underline; }')
+
+    def mouseReleaseEvent(self, event):
+        if event.button()==Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return,Qt.Key.Key_Enter,Qt.Key.Key_Space):
+            self.clicked.emit();event.accept();return
+        super().keyPressEvent(event)
 
 
 class ElidedLabel(QLabel):

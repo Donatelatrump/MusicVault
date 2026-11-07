@@ -30,9 +30,12 @@ def doctor():
         checks["yt-dlp"] = None
     checks["javascript_runtime"] = javascript_runtime()
     checks["youtube_extractor"] = "NewPipeExtractor 0.26.5" if newpipe_command('health') else None
+    checks["jams_firebase"] = ((Path(__file__).parent / "jams_backend/bridge.bundle.mjs").is_file()
+                               or (Path(__file__).parent / "jams_backend/node_modules/firebase/package.json").is_file())
+    checks["jams_node"] = shutil.which("node")
     print(json.dumps(checks, indent=2, ensure_ascii=False))
     critical = ("windows_x86_64", "libmpv", "PyQt6", "mutagen", "PyQt6.QtWebEngineWidgets",
-                "ffmpeg", "ffprobe", "yt-dlp", "javascript_runtime", "youtube_extractor")
+                "ffmpeg", "ffprobe", "yt-dlp", "javascript_runtime", "youtube_extractor", "jams_firebase", "jams_node")
     return 0 if all(checks.get(k) for k in critical) else 1
 
 
@@ -46,6 +49,8 @@ def main():
     parser.add_argument("--smoke-test", action="store_true", help="Abrir y cerrar automáticamente (audio nulo)")
     parser.add_argument("--screenshot", help="Guardar captura de la ventana (usado con --smoke-test)")
     args = parser.parse_args()
+    if args.smoke_test:
+        os.environ['MUSICVAULT_DISABLE_UPDATES'] = '1'
     if args.doctor:
         return doctor()
     if args.data_dir:

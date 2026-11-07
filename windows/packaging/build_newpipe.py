@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import urllib.request
 import zipfile
+import runpy
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -53,7 +54,8 @@ def main():
     shutil.copy2(lock_path, bundle / lock_path.name)
     (bundle / 'source').mkdir(exist_ok=True)
     shutil.copy2(ROOT / 'packaging/newpipe/MusicVaultNewPipe.java', bundle / 'source/MusicVaultNewPipe.java')
-    stage = ROOT / 'dist/MusicVault-Windows-x64-0.9.7/runtime/newpipe'
+    version = runpy.run_path(str(ROOT / 'musicvault/__init__.py'))['__version__']
+    stage = ROOT / ('dist/MusicVault-Windows-x64-' + version) / 'runtime/newpipe'
     shutil.copytree(bundle, stage, dirs_exist_ok=True)
     print('NewPipeExtractor', lock['extractor_version'], 'packaged at', stage)
 

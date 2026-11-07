@@ -102,12 +102,12 @@ class FakePlayer:
         return None
 
 
-def test_jam_nav_button_exists(app, db):
+def test_personal_dj_is_on_home_without_duplicate_sidebar_entry(app, db):
     window = Window(db, FakePlayer(db))
     try:
-        assert "Jam" in window.nav
-        jam_btn = window.nav["Jam"]
-        assert jam_btn.text() == "Jam"
+        assert "Jam" not in window.nav
+        jam_btn = window.dj_button
+        assert jam_btn.text() == "DJ para ti"
         assert not window.jam_state.active
     finally:
         window.quit_app()
@@ -179,7 +179,8 @@ def test_stop_jam_returns_to_inicio(app, db):
 def test_jam_button_icon_changes_with_active_state(app, db):
     window = Window(db, FakePlayer(db))
     try:
-        jam_btn = window.nav["Jam"]
+        assert "Jam" not in window.nav
+        jam_btn = window.dj_button
         default_icon = jam_btn.icon()
         window.jam_state = DjUiState(active=True)
         window._refresh_jam_ui()

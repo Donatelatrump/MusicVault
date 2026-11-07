@@ -13,6 +13,8 @@ VERSION = "0.9.4"
 
 
 def copy_app(destination):
+    if not (ROOT / "musicvault/jams_backend/node_modules/firebase").is_dir():
+        raise SystemExit("Run python3 packaging/setup_jams.py before packaging.")
     shutil.copytree(ROOT / "musicvault", destination / "musicvault",
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     shutil.copy2(ROOT / "README.md", destination / "README.md")
@@ -61,7 +63,7 @@ Priority: optional
 Architecture: amd64
 Maintainer: MusicVault contributors <musicvault@localhost>
 Installed-Size: {size}
-Depends: python3 (>= 3.10), python3-pyqt6, python3-pyqt6.qtwebengine, python3-mutagen, python3-dbus, python3-gi, libmpv2, ffmpeg, yt-dlp
+Depends: python3 (>= 3.10), python3-pyqt6, python3-pyqt6.qtwebengine, python3-mutagen, python3-certifi, python3-dbus, python3-gi, libmpv2, ffmpeg, yt-dlp, nodejs (>= 22)
 Recommends: nodejs (>= 22) | deno (>= 2.3)
 Description: Native desktop music library for Linux
  Local and streaming playback, editable queues, YouTube playlists, downloads and MPRIS controls.

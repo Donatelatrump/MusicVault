@@ -124,6 +124,7 @@ class TrackTable(QTableView):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.outer_scroll = None
+        self.page_scroll = None
         self.cover_timer = QTimer(self)
         self.cover_timer.setSingleShot(True)
         self.cover_timer.setInterval(60)

@@ -28,6 +28,8 @@ def doctor():
     except RuntimeError:
         checks["yt-dlp"] = None
     checks["javascript_runtime"] = javascript_runtime()
+    checks["jams_firebase"] = (Path(__file__).parent / "jams_backend/node_modules/firebase/package.json").is_file()
+    checks["jams_node"] = shutil.which("node")
     print(json.dumps(checks, indent=2, ensure_ascii=False))
     return 0 if all(checks.values()) else 1
 

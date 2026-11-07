@@ -1,4 +1,25 @@
-# Verificación de la sincronización 0.8.0 — 2026-09-18
+# Verificación Windows 0.10.0 — 2026-11-07
+
+Pruebas en Windows x64 con Python embebido 3.12.10 y Qt 6.10.2:
+
+- 24 pruebas dirigidas de actualizaciones, JAMS, perfiles, favoritos, carátulas,
+  géneros y retratos. Las de audio real se ejecutan por separado.
+- Políticas de actualizaciones: filtrar Android/borradores/prereleases, elegir
+  Windows por manifiesto y código creciente, restricciones de URL, tamaño y SHA-256,
+  descarga cancelada/corrupta, reutilización de caché y revisión manual tras Ahora no.
+- Perfiles reales de Arctic Monkeys: 50 canciones, 33 álbumes, búsqueda de 505 y
+  detalle del álbum The Car con diez canciones.
+- Catálogo Android incorporado con 2,234 géneros combinados y páginas remotas de artistas.
+- Fotos y carátulas descargadas y renderizadas; pruebas del círculo de reproducción
+  y corazón relleno, y Favoritos de pistas remotas sin descarga.
+- Pruebas reales de dos cuentas temporales Firebase para JAMS, amigos y controles.
+  La sincronización acústica con teléfonos físicos sigue pendiente.
+
+El SDK Firebase distribuido se compila en un archivo JavaScript y se ejecuta con
+el Node incluido. No se distribuyen Data, sesiones ni identidades de desarrollo.
+Las pruebas de despliegue finales de esta release se registran en sus notas de GitHub.
+
+## Registro histórico de 0.8.0 — 2026-09-18
 
 - `python -m compileall` completó sin errores para `windows/musicvault`, empaquetado, pruebas y `launch.py`.
 - Smoke SQLite desde esquema antiguo: migración de columnas/FTS5, búsqueda, portada automática y lectura de biblioteca verificados usando el código Windows.

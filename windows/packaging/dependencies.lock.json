@@ -4,8 +4,8 @@
     "sha256": "4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3"
   },
   "mpv.7z": {
-    "url": "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20260903/mpv-dev-x86_64-20260903-git-69e63f425a.7z",
-    "sha256": "fac135c68a35b7639e39d72c0c365104edbaebdea39a0dfdd8c36e8c8e80faef"
+    "url": "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261107/mpv-dev-x86_64-20261107-git-9028187538.7z",
+    "sha256": "df7c433a2d481fdaf6163b201f26abbb0eff0c215c51368397088c6d8f7a001b"
   },
   "yt-dlp.exe": {
     "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp.exe",
@@ -19,28 +19,32 @@
     "url": "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.1.2-essentials_build.zip",
     "sha256": "db580001caa24ac104c8cb856cd113a87b0a443f7bdf47d8c12b1d740584a2ec"
   },
-  "mutagen-1.47.0-py3-none-any.whl": {
-    "sha256": "edd96f50c5907a9539d8e5bba7245f62c9f520aef333d13392a79a4f70aca719",
+  "certifi-2026.10.23-py3-none-any.whl": {
+    "sha256": "e9b54de76e530bb6cf0ccd036787103acb58fd42ba930ea8bf948ddbaa2f61d1",
     "url": "https://pypi.org/"
   },
-  "pyqt6_sip-13.11.1-cp312-cp312-win_amd64.whl": {
-    "sha256": "1d1c67179c1924b28e3d7f04585639e7a7c0946f62390efc6ccf2a6206e595d3",
+  "mutagen-1.47.0-py3-none-any.whl": {
+    "sha256": "edd96f50c5907a9539d8e5bba7245f62c9f520aef333d13392a79a4f70aca719",
     "url": "https://pypi.org/"
   },
   "pyqt6-6.10.2-cp39-abi3-win_amd64.whl": {
     "sha256": "bd328cb70bc382c48861cd5f0a11b2b8ae6f5692d5a2d6679ba52785dced327b",
     "url": "https://pypi.org/"
   },
-  "pyqt6_webengine_qt6-6.10.2-py3-none-win_amd64.whl": {
-    "sha256": "91f64339c5d4ac0bc69157d0baeae2fd5a7d5aa15c31500b6bfc8441e7ae7732",
+  "pyqt6_qt6-6.10.2-py3-none-win_amd64.whl": {
+    "sha256": "c4b7f7d66cc58bddf1bc1ca28dfcf7a45f58cfcb11d81d13a0510409dd4957ac",
+    "url": "https://pypi.org/"
+  },
+  "pyqt6_sip-13.11.1-cp312-cp312-win_amd64.whl": {
+    "sha256": "1d1c67179c1924b28e3d7f04585639e7a7c0946f62390efc6ccf2a6206e595d3",
     "url": "https://pypi.org/"
   },
   "pyqt6_webengine-6.10.0-cp39-abi3-win_amd64.whl": {
     "sha256": "3794edbefd62ae95cd5e760b7a91b7b6473e83b635ad3f3c4a78e58c95e1e460",
     "url": "https://pypi.org/"
   },
-  "pyqt6_qt6-6.10.2-py3-none-win_amd64.whl": {
-    "sha256": "c4b7f7d66cc58bddf1bc1ca28dfcf7a45f58cfcb11d81d13a0510409dd4957ac",
+  "pyqt6_webengine_qt6-6.10.2-py3-none-win_amd64.whl": {
+    "sha256": "91f64339c5d4ac0bc69157d0baeae2fd5a7d5aa15c31500b6bfc8441e7ae7732",
     "url": "https://pypi.org/"
   }
 }

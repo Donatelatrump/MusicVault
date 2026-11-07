@@ -2,8 +2,8 @@
 1 ICON "musicvault.ico"
 1 RT_MANIFEST "launcher.manifest"
 1 VERSIONINFO
-FILEVERSION 0,9,7,0
-PRODUCTVERSION 0,9,7,0
+FILEVERSION 0,10,0,0
+PRODUCTVERSION 0,10,0,0
 FILEOS VOS_NT_WINDOWS32
 FILETYPE VFT_APP
 BEGIN
@@ -13,11 +13,11 @@ BEGIN
   BEGIN
    VALUE "CompanyName", "MusicVault\0"
    VALUE "FileDescription", "MusicVault portable launcher\0"
-   VALUE "FileVersion", "0.9.7.0\0"
+   VALUE "FileVersion", "0.10.0.0\0"
    VALUE "InternalName", "MusicVault\0"
    VALUE "OriginalFilename", "MusicVault.exe\0"
    VALUE "ProductName", "MusicVault\0"
-   VALUE "ProductVersion", "0.9.7\0"
+   VALUE "ProductVersion", "0.10.0\0"
   END
  END
  BLOCK "VarFileInfo"

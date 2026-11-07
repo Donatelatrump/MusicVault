@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "musicvault-windows"
-version = "0.8.0"
+version = "0.10.0"
 description = "Biblioteca musical nativa para Windows x64"
 requires-python = ">=3.10"
-dependencies = ["PyQt6>=6.4,<7", "PyQt6-WebEngine>=6.4,<7", "mutagen>=1.46,<2"]
+dependencies = ["PyQt6>=6.4,<7", "PyQt6-WebEngine>=6.4,<7", "mutagen>=1.46,<2", "certifi>=2024.2.2"]
 
 [project.scripts]
 musicvault = "musicvault.__main__:main"
@@ -16,7 +16,7 @@ musicvault = "musicvault.__main__:main"
 packages = ["musicvault"]
 
 [tool.setuptools.package-data]
-musicvault = ["assets/*.png", "assets/fonts/*.ttf", "vendor/*"]
+musicvault = ["assets/*.png", "assets/*.txt", "assets/fonts/*.ttf", "vendor/*", "jams_backend/*.mjs", "jams_backend/*.json", "jams_backend/*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

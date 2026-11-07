@@ -7,7 +7,7 @@ name = "musicvault-linux"
 version = "0.9.4"
 description = "Biblioteca musical nativa para Linux x86_64"
 requires-python = ">=3.10"
-dependencies = ["PyQt6>=6.4,<7", "PyQt6-WebEngine>=6.4,<7", "mutagen>=1.46,<2"]
+dependencies = ["PyQt6>=6.4,<7", "PyQt6-WebEngine>=6.4,<7", "mutagen>=1.46,<2", "certifi>=2024.2.2"]
 
 [project.scripts]
 musicvault = "musicvault.__main__:main"
@@ -16,7 +16,7 @@ musicvault = "musicvault.__main__:main"
 packages = ["musicvault"]
 
 [tool.setuptools.package-data]
-musicvault = ["assets/*.png", "assets/fonts/*.ttf", "vendor/*"]
+musicvault = ["assets/*.png", "assets/*.txt", "assets/fonts/*.ttf", "vendor/*", "jams_backend/*.mjs", "jams_backend/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

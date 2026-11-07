@@ -8,13 +8,15 @@ import subprocess
 import sys
 import urllib.request
 import zipfile
+import runpy
 
 ROOT = Path(__file__).resolve().parents[1]
 CACHE = ROOT / 'build/downloads'
-STAGE = ROOT / 'dist/MusicVault-Windows-x64-0.9.7'
+VERSION = runpy.run_path(str(ROOT / 'musicvault/__init__.py'))['__version__']
+STAGE = ROOT / ('dist/MusicVault-Windows-x64-' + VERSION)
 SOURCES = {
  'python.zip': ('https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip', None),
- 'mpv.7z': ('https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20260903/mpv-dev-x86_64-20260903-git-69e63f425a.7z', 'fac135c68a35b7639e39d72c0c365104edbaebdea39a0dfdd8c36e8c8e80faef'),
+ 'mpv.7z': ('https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/20261107/mpv-dev-x86_64-20261107-git-9028187538.7z', 'df7c433a2d481fdaf6163b201f26abbb0eff0c215c51368397088c6d8f7a001b'),
  'yt-dlp.exe': ('https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp.exe', '66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a'),
  'node.zip': ('https://nodejs.org/dist/v22.16.0/node-v22.16.0-win-x64.zip', None),
  'ffmpeg.zip': ('https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.1.2-essentials_build.zip', None),
@@ -36,8 +38,11 @@ def fetch(name, url, digest):
 
 
 def main():
-    if not (ROOT / 'MusicVault.exe').is_file():
+    launcher = ROOT / 'build/launcher/MusicVault.exe'
+    if not launcher.is_file(): launcher = ROOT / 'MusicVault.exe'
+    if not launcher.is_file():
         raise RuntimeError('Run python packaging/build_launcher.py with MinGW-w64 first.')
+    subprocess.run([sys.executable, str(ROOT / 'packaging/setup_jams.py')], check=True)
     CACHE.mkdir(parents=True, exist_ok=True)
     lock_path = ROOT / 'packaging/dependencies.lock.json'
     locked = json.loads(lock_path.read_text()) if lock_path.exists() else {}
@@ -53,9 +58,9 @@ def main():
                     '--abi', 'cp312', '--find-links', str(wheels), '--dest', str(wheels), '-r', str(ROOT / 'requirements.txt')], check=True)
     STAGE.mkdir(parents=True, exist_ok=True)
     shutil.copytree(ROOT / 'musicvault', STAGE / 'musicvault', dirs_exist_ok=True,
-                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc', 'yt-dlp', 'mpris.py'))
-    for name in ('MusicVault.exe', 'MusicVault.cmd', 'Diagnostico.cmd', 'launch.py', 'README.md', 'VERIFICATION.md', 'THIRD_PARTY_NOTICES.md'):
-        shutil.copy2(ROOT / name, STAGE / name)
+                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc', 'yt-dlp', 'mpris.py', 'node_modules'))
+    for name in ('MusicVault.exe', 'MusicVault.cmd', 'Diagnostico.cmd', 'launch.py', 'README.md', 'UPDATES.md', 'RELEASE_0.10.0.md', 'VERIFICATION.md', 'THIRD_PARTY_NOTICES.md'):
+        shutil.copy2(launcher if name == 'MusicVault.exe' else ROOT / name, STAGE / name)
     runtime, python = STAGE / 'runtime', STAGE / 'python'
     runtime.mkdir(exist_ok=True)
     python.mkdir(exist_ok=True)
@@ -82,6 +87,9 @@ def main():
     mpv = ROOT / 'build/mpv'
     seven = shutil.which('7z') or shutil.which('7zz') or shutil.which('7zr')
     if not seven:
+        portable_seven = ROOT.parent / 'build/downloads/7zr.exe'
+        if portable_seven.is_file(): seven = str(portable_seven)
+    if not seven:
         raise RuntimeError('Install 7-Zip or the standalone 7zr extractor on the build machine.')
     subprocess.run([seven, 'x', '-y', str(CACHE / 'mpv.7z'), '-o' + str(mpv)], check=True, stdout=subprocess.DEVNULL)
     for dll in mpv.rglob('*.dll'):
@@ -93,6 +101,10 @@ def main():
     subprocess.run([sys.executable, str(ROOT / 'packaging/build_newpipe.py')], check=True)
     lock_path.write_text(json.dumps(manifest, indent=2) + '\n')
     (STAGE / 'dependencies.lock.json').write_text(lock_path.read_text())
+    archive_stage()
+
+
+def archive_stage():
     archive = Path(str(STAGE) + '.zip')
     with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED) as bundle:
         for path in STAGE.rglob('*'):
@@ -107,4 +119,13 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    if '--repack' in sys.argv:
+        if not (STAGE / 'python/python.exe').is_file():
+            raise SystemExit('Build the portable dependencies before repacking.')
+        shutil.copytree(ROOT / 'musicvault', STAGE / 'musicvault', dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns('__pycache__', '*.pyc', 'yt-dlp', 'mpris.py', 'node_modules'))
+        for name in ('README.md', 'UPDATES.md', 'RELEASE_0.10.0.md', 'VERIFICATION.md', 'THIRD_PARTY_NOTICES.md'):
+            shutil.copy2(ROOT / name, STAGE / name)
+        archive_stage()
+    else:
+        main()

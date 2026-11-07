@@ -150,3 +150,11 @@ Las pruebas de audio usan libmpv real con salida `null` y archivos WAV generados
 | `packaging/build.py` | Paquete amd64 y archivo reubicable |
 
 Referencias técnicas: [API de libmpv](https://github.com/mpv-player/mpv/blob/master/include/mpv/client.h), [manual de mpv](https://mpv.io/manual/stable/), [MPRIS 2](https://specifications.freedesktop.org/mpris/latest/Player_Interface.html), [Qt](https://doc.qt.io/qt-6/).
+
+## JAMS compartidas, amigos e identidad de instalacion
+
+Disponible desde **JAMS / Amigos**. Consulta [la implementacion y verificacion](../DESKTOP_JAMS.md) para compatibilidad con Android, dependencias y limites. Desde esta carpeta ejecuta `python packaging/setup_jams.py` para instalar el cliente Firebase fijado.
+
+El onboarding incluye el catalogo completo de generos de Android (2,234 opciones combinadas), buscador local y artistas por genero con paginas de 20 resultados. Las fotos y las paginas consultadas se guardan en cache; la seleccion se conserva al filtrar y cargar mas artistas.
+
+Los nombres de artista de la tabla y del reproductor abren su perfil: foto, canciones destacadas, busqueda de canciones, albumes paginados y pistas de cada album. Desde el perfil puedes reproducir, descargar, anadir a cola y administrar Me gusta. Tambien esta disponible en el menu contextual de las canciones.

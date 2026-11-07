@@ -7,7 +7,7 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def build(cc=None, windres=None):
+def build(cc=None, windres=None, output=None):
     cc = cc or shutil.which('x86_64-w64-mingw32-gcc') or shutil.which('gcc')
     windres = windres or shutil.which('x86_64-w64-mingw32-windres') or shutil.which('windres')
     if not cc or not windres:
@@ -16,7 +16,8 @@ def build(cc=None, windres=None):
     directory.mkdir(parents=True, exist_ok=True)
     resource = directory / 'launcher.o'
     subprocess.run([windres, '--preprocessor', cc, '--preprocessor-arg=-E', '--preprocessor-arg=-xc', '--preprocessor-arg=-DRC_INVOKED', '-I', str(ROOT / 'packaging'), str(ROOT / 'packaging/launcher.rc'), str(resource)], check=True)
-    executable = ROOT / 'MusicVault.exe'
+    executable = Path(output) if output else ROOT / 'MusicVault.exe'
+    executable.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run([cc, '-Os', '-Wall', '-Wextra', '-Werror', '-municode', '-mwindows', '-static',
                     '-Wl,--no-insert-timestamp', str(ROOT / 'packaging/launcher.c'), str(resource),
                     '-o', str(executable), '-lshell32', '-luser32'], check=True)
@@ -27,5 +28,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--cc')
     parser.add_argument('--windres')
+    parser.add_argument('--output', type=Path)
     args = parser.parse_args()
-    print(build(args.cc, args.windres))
+    print(build(args.cc, args.windres, args.output))

@@ -158,6 +158,8 @@ class Player(QObject):
         self.queue_changed.emit()
 
     def play_queue(self, tracks, index=0):
+        if getattr(self, "jam_add", None) and self.jam_add(tracks, index, True):
+            return
         if not tracks:
             return
         self._save_progress()
@@ -265,7 +267,9 @@ class Player(QObject):
                 self.queue[i] = track
         self.persist_queue()
 
-    def toggle(self):
+    def toggle(self, _jam=False):
+        if not _jam and getattr(self, "jam_transport", None) and self.jam_transport("toggle", None):
+            return
         if self.preparing:
             self.stop()
             return
@@ -275,7 +279,9 @@ class Player(QObject):
             return
         self.set_playing(not self.playing)
 
-    def set_playing(self, value):
+    def set_playing(self, value, _jam=False):
+        if not _jam and getattr(self, "jam_transport", None) and self.jam_transport("playing", value):
+            return
         if self.preparing:
             if not value:
                 self.stop()
@@ -320,14 +326,18 @@ class Player(QObject):
         self.append(successor)
         return len(self.queue) - 1
 
-    def next(self):
+    def next(self, _jam=False):
+        if not _jam and getattr(self, "jam_transport", None) and self.jam_transport("next", None):
+            return
         index = self.next_index()
         if index is None:
             self.stop()
         else:
             self.play_index(index)
 
-    def previous(self):
+    def previous(self, _jam=False):
+        if not _jam and getattr(self, "jam_transport", None) and self.jam_transport("previous", None):
+            return
         if self.position > 3:
             self.seek(0)
         elif self.index > 0:
@@ -335,7 +345,9 @@ class Player(QObject):
         elif self.queue:
             self.play_index(0)
 
-    def seek(self, position):
+    def seek(self, position, _jam=False):
+        if not _jam and getattr(self, "jam_transport", None) and self.jam_transport("seek", position):
+            return
         if self.loaded:
             if self.current_source.startswith(("http://", "https://")):
                 self.current_stream_seeked = True
@@ -369,6 +381,8 @@ class Player(QObject):
         self.changed.emit()
 
     def append(self, track):
+        if getattr(self, "jam_add", None) and self.jam_add([track], 0, False):
+            return
         self.queue.append(self.db.save_track(track, restore=True))
         if self.index < 0:
             self.index = 0
@@ -451,6 +465,9 @@ class Player(QObject):
                         and self.current_record_path and not self.current_stream_seeked):
                     self.stream_cached.emit(self.current, self.current_record_path)
                 self.current_record_path = ""
+                if getattr(self, "jam_transport", None) and self.jam_transport("ended"):
+                    self.set_playing(False, _jam=True)
+                    return
                 successor = self.next_index(automatic=True)
                 if successor is None:
                     successor = self.related_successor()

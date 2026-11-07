@@ -3,6 +3,7 @@ from collections import OrderedDict
 from dataclasses import replace
 from pathlib import Path
 import json
+import ssl
 import os
 import selectors
 import shutil
@@ -29,11 +30,21 @@ MUSICBRAINZ_LOCK = threading.Lock()
 MUSICBRAINZ_LAST = 0.0
 
 
+def image_tls_context():
+    context = ssl.create_default_context()
+    try:
+        import certifi
+        context.load_verify_locations(cafile=certifi.where())
+    except ImportError:
+        pass
+    return context
+
+
 def get_bytes(url, maximum=12 * 1024 * 1024):
     if not url.startswith("https://"):
         raise ValueError("El proveedor requiere HTTPS.")
     request = Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json,image/*"})
-    with urlopen(request, timeout=8) as response:
+    with urlopen(request, timeout=8, context=image_tls_context()) as response:
         body = response.read(maximum + 1)
         if len(body) > maximum:
             raise ValueError("La respuesta del proveedor excede el tamaño permitido.")
@@ -334,17 +345,8 @@ def youtube_search(query, cancel=None):
 
 
 def cover_file(url):
-    if not url or not url.startswith("https://"):
-        return url
-    path = data_dir() / "covers" / (stable_id(url) + ".img")
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        body = get_bytes(url)
-        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as file:
-            file.write(body)
-            temporary = file.name
-        os.replace(temporary, path)
-    return str(path)
+    from .artwork import cover_file as fetch_artwork
+    return fetch_artwork(url)
 
 
 def fetch_lyrics(track, db):

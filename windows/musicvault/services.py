@@ -3,6 +3,7 @@ from collections import OrderedDict
 from dataclasses import replace
 from pathlib import Path
 import json
+import ssl
 import os
 from .processes import PipeSelector, stop_process, process_options
 import shutil
@@ -33,6 +34,16 @@ COVER_CACHE = CoverImageCache()
 MUSICBRAINZ = MusicBrainzProvider()
 
 
+def image_tls_context():
+    context = ssl.create_default_context()
+    try:
+        import certifi
+        context.load_verify_locations(cafile=certifi.where())
+    except ImportError:
+        pass
+    return context
+
+
 def get_bytes(url, maximum=12 * 1024 * 1024, retries=3):
     if not url.startswith("https://"):
         raise ValueError("El proveedor requiere HTTPS.")
@@ -40,7 +51,7 @@ def get_bytes(url, maximum=12 * 1024 * 1024, retries=3):
     for attempt in range(retries):
         try:
             request = Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json,image/*"})
-            with urlopen(request, timeout=8) as response:
+            with urlopen(request, timeout=8, context=image_tls_context()) as response:
                 body = response.read(maximum + 1)
                 if len(body) > maximum:
                     raise ValueError("La respuesta del proveedor excede el tamaño permitido.")
@@ -370,13 +381,10 @@ def youtube_search(query, cancel=None):
 
 
 def cover_file(url):
-    if not url or not url.startswith(("https://", "http://", "//")):
-        return url
     cached = COVER_CACHE.get(url)
     if cached:
         return cached
-    downloaded = COVER_CACHE.put(url)
-    return downloaded or url
+    return COVER_CACHE.put(url)
 
 
 def fetch_lyrics(track, db):

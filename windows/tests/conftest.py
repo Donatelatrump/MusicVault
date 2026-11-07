@@ -26,6 +26,7 @@ def db(tmp_path):
 @pytest.fixture(autouse=True)
 def isolated_data(tmp_path, monkeypatch):
     monkeypatch.setenv("MUSICVAULT_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("MUSICVAULT_DISABLE_UPDATES", "1")
 
 
 @pytest.fixture

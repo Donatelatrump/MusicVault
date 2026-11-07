@@ -13,16 +13,12 @@ from .track_model import TrackModel, TrackTable
 
 
 def icon_button(name, title, callback, size=36, primary=False):
-    item = QPushButton()
+    from .widgets import CircularPlayButton
+    item = CircularPlayButton() if primary else QPushButton()
     item.setObjectName("playCircle" if primary else "icon")
     item.setIcon(icon(name, "#191207" if primary else "#B3A992"))
     item.setIconSize(QSize(22, 22))
     item.setFixedSize(size, size)
-    if primary:
-        # Clip the control itself to an ellipse instead of relying solely on
-        # Qt style-sheet border-radius. Some desktop themes otherwise paint
-        # the primary transport control as a square.
-        item.setMask(QRegion(0, 0, size, size, QRegion.RegionType.Ellipse))
     item.setToolTip(title)
     item.setAccessibleName(title)
     item.clicked.connect(callback)
@@ -56,14 +52,11 @@ def build_window(self):
     side.addSpacing(18)
     self.nav = {}
     routes = (("Inicio", "home"), ("Buscar", "search"), ("Biblioteca", "library"),
-              ("Favoritos", "heart"), ("Álbumes", "album"), ("Jam", "queue"))
+              ("Favoritos", "heart"), ("Álbumes", "album"))
     for name, glyph in routes:
         if name == "Biblioteca":
             side.addSpacing(18)
-        if name == "Jam":
-            item = button(name, self.toggle_jam)
-        else:
-            item = button(name, lambda checked=False, route=name: self.show_route(route))
+        item = button(name, lambda checked=False, route=name: self.show_route(route))
         item.setObjectName("nav")
         item.setCheckable(True)
         item.setIcon(icon(glyph, "#B3A992", 20))
@@ -71,6 +64,9 @@ def build_window(self):
         item.setMinimumHeight(42)
         side.addWidget(item)
         self.nav[name] = item
+    shared = button("JAMS / Amigos", self.shared_jams.show)
+    shared.setObjectName("nav")
+    side.addWidget(shared)
     side.addSpacing(18)
     collections_header = QHBoxLayout()
     collections_header.addWidget(label("TUS COLECCIONES", "eyebrow"))
@@ -204,6 +200,18 @@ def build_window(self):
     hour = datetime.now().hour
     self.home_greeting = label("Buenos días" if hour < 12 else "Buenas tardes" if hour < 20 else "Buenas noches", "heading")
     layout.addWidget(self.home_greeting)
+    self.dj_actions = QWidget()
+    dj_actions = QHBoxLayout(self.dj_actions)
+    dj_actions.setContentsMargins(0, 0, 0, 0)
+    self.dj_button = button("DJ para ti", self.open_personal_dj)
+    self.dj_button.setCheckable(True)
+    self.dj_button.setIcon(icon("queue", "#B3A992", 20))
+    dj_actions.addWidget(self.dj_button)
+    self.dj_stop = button("Detener mezcla", self.stop_jam)
+    self.dj_stop.hide()
+    dj_actions.addWidget(self.dj_stop)
+    dj_actions.addStretch()
+    layout.addWidget(self.dj_actions)
     self.description = label("", "muted")
     self.description.setWordWrap(True)
     layout.addWidget(self.description)
@@ -361,8 +369,9 @@ def build_window(self):
     self.table.setItemDelegateForColumn(5, StatusDelegate(self.table))
     self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
     self.table.customContextMenuRequested.connect(self.track_menu)
-    self.table.doubleClicked.connect(lambda index: self.play_row(index.row()) if index.column() != 0 else None)
-    self.table.clicked.connect(lambda index: self.play_row(index.row()) if index.column() == 0 else None)
+    self.table.doubleClicked.connect(lambda index: self.play_row(index.row()) if index.column() not in (0, 2) else None)
+    self.table.clicked.connect(lambda index: self.play_row(index.row()) if index.column() == 0 else self.open_artist_profile(self.shown_tracks[index.row()].artist) if index.column() == 2 else None)
+    self.table.entered.connect(lambda index: self.table.viewport().setCursor(Qt.CursorShape.PointingHandCursor if index.column()==2 else Qt.CursorShape.ArrowCursor))
     table_header = self.table.horizontalHeader()
     table_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
     table_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
@@ -439,7 +448,10 @@ def build_window(self):
     titles = QVBoxLayout()
     titles.setSpacing(2)
     self.current_title = label("Nada en reproducción", "trackTitle")
-    self.current_artist = label("Selecciona una canción", "muted")
+    from .widgets import ArtistLinkLabel
+    self.current_artist = ArtistLinkLabel("Selecciona una canción")
+    self.current_artist.setObjectName("muted")
+    self.current_artist.clicked.connect(lambda: self.open_artist_profile())
     for item in (self.current_title, self.current_artist):
         item.setMinimumWidth(0)
         item.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
@@ -524,7 +536,11 @@ def build_full_player(self):
     metadata=QHBoxLayout(); self.catalog_number=label("VAULT —","eyebrow"); metadata.addWidget(self.catalog_number); metadata.addStretch()
     self.full_favorite=icon_button("heart","Favorito",lambda:self.favorite(self.player.current) if self.player.current else None); metadata.addWidget(self.full_favorite); panel.addLayout(metadata)
     self.full_title=label("","heading"); self.full_title.setWordWrap(True); panel.addWidget(self.full_title)
-    self.full_artist=label("","muted"); panel.addWidget(self.full_artist); panel.addSpacing(8)
+    from .widgets import ArtistLinkLabel
+    self.full_artist=ArtistLinkLabel()
+    self.full_artist.setObjectName("muted")
+    self.full_artist.clicked.connect(lambda: self.open_artist_profile())
+    panel.addWidget(self.full_artist); panel.addSpacing(8)
     self.full_seek=SeekSlider(Qt.Orientation.Horizontal); self.full_seek.setRange(0,1000)
     self.full_seek.seekRequested.connect(lambda value:self.player.seek(value*self.player.duration/1000)); panel.addWidget(self.full_seek)
     self.full_time=label("0:00 / 0:00","mono"); panel.addWidget(self.full_time)

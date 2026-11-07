@@ -142,7 +142,9 @@ class CoverImageCache(QObject):
         if not url or not url.startswith(("https://", "http://", "//")):
             return url
         url = "https:" + url if url.startswith("//") else url.replace("http://", "https://", 1)
-        path = self._path_for(url)
+        from .artwork import candidates
+        self.cache_dir = data_dir() / "covers"
+        path = self._path_for(candidates(url)[0])
         if path.exists():
             if not self._valid(path):
                 try:
@@ -154,43 +156,13 @@ class CoverImageCache(QObject):
         return None
 
     def put(self, url: str) -> str | None:
-        """Descarga, valida y guarda la portada; devuelve la ruta local o None."""
-        if not url or not url.startswith(("https://", "http://", "//")):
-            return url
-        url = "https:" + url if url.startswith("//") else url.replace("http://", "https://", 1)
-        path = self._path_for(url)
-
-        if path.exists() and self._valid(path):
-            return str(path)
-
-        candidates = [url]
-        parsed = urlsplit(url)
-        parts = parsed.path.split("/")
-        if parsed.hostname in ("i.ytimg.com", "img.youtube.com") and len(parts) >= 4 and parts[1] in ("vi", "vi_webp"):
-            fallback = f"https://i.ytimg.com/vi/{parts[2]}/hqdefault.jpg"
-            if fallback != url:
-                candidates.append(fallback)
-
-        last_error = None
-        for candidate in candidates:
-            temporary = None
-            try:
-                body = get_bytes(candidate, maximum=8 * 1024 * 1024)
-                temporary = Path(__file__).resolve().parents[1] / "Data" / "covers" / (".tmp-" + stable_id(candidate) + ".img")
-                temporary.parent.mkdir(parents=True, exist_ok=True)
-                temporary.write_bytes(body)
-                if not self._valid(temporary):
-                    raise ValueError("No es una imagen válida.")
-                os.replace(temporary, path)
-                self.updated.emit(candidate, str(path))
-                self._cleanup()
-                return str(path)
-            except Exception as error:
-                last_error = error
-            finally:
-                if temporary:
-                    temporary.unlink(missing_ok=True)
-        return None
+        from .artwork import cover_file
+        path = cover_file(url)
+        self.cache_dir = data_dir() / "covers"
+        self._cleanup()
+        if path:
+            self.updated.emit(url, path)
+        return path
 
 
 class MusicBrainzProvider:

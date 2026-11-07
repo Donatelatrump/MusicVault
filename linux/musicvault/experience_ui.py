@@ -1,8 +1,8 @@
 """Optimized desktop UI surfaces shared by Linux and Windows."""
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QSortFilterProxyModel, QTimer, QAbstractListModel, QModelIndex, pyqtSignal
-from PyQt6.QtGui import QStandardItem, QStandardItemModel
+from PyQt6.QtCore import Qt, QSortFilterProxyModel, QTimer, QAbstractListModel, QModelIndex, pyqtSignal, QSize, QPoint, QEvent
+from PyQt6.QtGui import QStandardItem, QStandardItemModel, QIcon
 from PyQt6.QtWidgets import (
     QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListView,
     QProgressBar, QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
@@ -90,7 +90,7 @@ class StartupOverlay(QFrame):
 
 
 class OnboardingDialog(QDialog):
-    """Two-step local-only genre/artist onboarding with an optimized artist list."""
+    """Instant local suggestions with optional asynchronous artist portraits."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -101,6 +101,21 @@ class OnboardingDialog(QDialog):
         self.selected_genres = set()
         self.selected_artists = set()
         self._prepared_artists = ()
+        from .services import Jobs
+        self.portrait_jobs = Jobs(self)
+        self.portrait_jobs.pool.setMaxThreadCount(3)
+        self._portrait_pending = set()
+        self._portrait_icons = {}
+        self._portrait_failed = set()
+        self._portrait_closed = False
+        self._catalog_genres = None
+        self._catalog_generation = 0
+        self._remote_artists = []
+        self._artists_loading = False
+        self._artists_more = True
+        self.artist_catalog = None
+        self.catalog_jobs = Jobs(self)
+        self.catalog_jobs.pool.setMaxThreadCount(1)
         self.skipped = False
         self.stack = QStackedWidget()
         root = QVBoxLayout(self)
@@ -108,6 +123,20 @@ class OnboardingDialog(QDialog):
         root.addWidget(self.stack)
         self._build_genres()
         self._build_artists()
+        self.portrait_timer = QTimer(self)
+        self.portrait_timer.setSingleShot(True)
+        self.portrait_timer.setInterval(80)
+        self.portrait_timer.timeout.connect(self._load_artist_portraits)
+        self.artist_list.verticalScrollBar().valueChanged.connect(lambda _: self.portrait_timer.start())
+        self.artist_list.viewport().installEventFilter(self)
+        self.artist_proxy.modelReset.connect(self.portrait_timer.start)
+        self.artist_search.textChanged.connect(lambda _: self.portrait_timer.start())
+        self.finished.connect(self._close_portraits)
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.Resize and watched is self.artist_list.viewport():
+            self.portrait_timer.start()
+        return super().eventFilter(watched, event)
 
     def _page_shell(self, step, title, subtitle):
         page = QWidget()
@@ -127,27 +156,39 @@ class OnboardingDialog(QDialog):
     def _build_genres(self):
         page, outer = self._page_shell(
             1, "¿Qué suena en tu bóveda?",
-            "Elige uno o varios géneros. La lista de artistas ya vive dentro de MusicVault, así que el siguiente paso aparece sin esperar a Internet.",
+            "Busca entre miles de estilos. Puedes elegir varios y explorar sus artistas en el siguiente paso.",
         )
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        surface = QWidget()
-        grid = QGridLayout(surface)
-        grid.setContentsMargins(0, 8, 0, 8)
-        grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(10)
-        self.genre_buttons = {}
-        for index, genre in enumerate(GENRE_OPTIONS):
-            chip = QPushButton(genre)
-            chip.setObjectName("chip")
-            chip.setCheckable(True)
-            chip.setMinimumHeight(42)
-            chip.toggled.connect(lambda checked, name=genre: self._genre_toggled(name, checked))
-            self.genre_buttons[genre] = chip
-            grid.addWidget(chip, index // 3, index % 3)
-        scroll.setWidget(surface)
-        outer.addWidget(scroll, 1)
+        from .onboarding_catalog import genre_options
+        from .artist_cards import GenreChipDelegate
+        self.genre_search = QLineEdit()
+        self.genre_search.setPlaceholderText("Buscar entre todos los géneros")
+        self.genre_search.addAction(icon("search", "#B3A992"), QLineEdit.ActionPosition.LeadingPosition)
+        outer.addWidget(self.genre_search)
+        self.genre_model = QStandardItemModel(self)
+        for genre in genre_options():
+            item = QStandardItem(genre)
+            item.setCheckable(True)
+            item.setEditable(False)
+            item.setToolTip(genre)
+            self.genre_model.appendRow(item)
+        self.genre_search.setPlaceholderText(f"Buscar entre {self.genre_model.rowCount():,} géneros")
+        self.genre_proxy = QSortFilterProxyModel(self)
+        self.genre_model.itemChanged.connect(lambda item: self._genre_toggled(item.text(), item.checkState() == Qt.CheckState.Checked))
+        self.genre_proxy.setSourceModel(self.genre_model)
+        self.genre_proxy.setFilterCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.genre_search.textChanged.connect(self.genre_proxy.setFilterFixedString)
+        self.genre_list = QListView()
+        self.genre_list.setModel(self.genre_proxy)
+        self.genre_list.setViewMode(QListView.ViewMode.IconMode)
+        self.genre_list.setResizeMode(QListView.ResizeMode.Adjust)
+        self.genre_list.setMovement(QListView.Movement.Static)
+        self.genre_list.setGridSize(QSize(240, 48))
+        self.genre_list.setUniformItemSizes(True)
+        self.genre_list.setItemDelegate(GenreChipDelegate(self.genre_list))
+        self.genre_list.setEditTriggers(QListView.EditTrigger.NoEditTriggers)
+        self.genre_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.genre_list.clicked.connect(self._genre_clicked)
+        outer.addWidget(self.genre_list, 1)
         controls = QHBoxLayout()
         skip = _button("Configurar después", self._skip)
         skip.setObjectName("textButton")
@@ -160,6 +201,11 @@ class OnboardingDialog(QDialog):
         controls.addWidget(self.genre_next)
         outer.addLayout(controls)
         self.stack.addWidget(page)
+
+    def _genre_clicked(self, index):
+        item = self.genre_model.itemFromIndex(self.genre_proxy.mapToSource(index))
+        checked = item.checkState() != Qt.CheckState.Checked
+        item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
 
     def _genre_toggled(self, genre, checked):
         if checked:
@@ -190,10 +236,21 @@ class OnboardingDialog(QDialog):
         self.artist_list = QListView()
         self.artist_list.setModel(self.artist_proxy)
         self.artist_list.setUniformItemSizes(True)
+        from .artist_cards import ArtistCardDelegate
+        self.artist_list.setViewMode(QListView.ViewMode.IconMode)
+        self.artist_list.setResizeMode(QListView.ResizeMode.Adjust)
+        self.artist_list.setMovement(QListView.Movement.Static)
+        self.artist_list.setGridSize(QSize(144, 150))
+        self.artist_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.artist_list.setItemDelegate(ArtistCardDelegate(self.artist_list))
+        self.artist_list.clicked.connect(self._artist_clicked)
         self.artist_list.setVerticalScrollMode(QListView.ScrollMode.ScrollPerPixel)
         self.artist_list.setEditTriggers(QListView.EditTrigger.NoEditTriggers)
         self.artist_model.itemChanged.connect(lambda item: self._sync_selected_artists())
         outer.addWidget(self.artist_list, 1)
+        self.artist_more = _button("Cargar más artistas", self._load_more_artists)
+        outer.addWidget(self.artist_more)
+        self.artist_list.verticalScrollBar().valueChanged.connect(self._artist_scroll)
         self.artist_search.textChanged.connect(self.artist_proxy.setFilterFixedString)
         self.artist_search.returnPressed.connect(self._add_custom_artist)
         tools = QHBoxLayout()
@@ -211,15 +268,26 @@ class OnboardingDialog(QDialog):
         self.stack.addWidget(page)
 
     def _go_artists(self):
+        genres = tuple(sorted(self.selected_genres))
+        if self._catalog_genres != genres:
+            from .onboarding_catalog import OnboardingCatalog
+            self._catalog_generation += 1
+            self._catalog_genres = genres
+            self.artist_catalog = OnboardingCatalog(genres)
+            self._remote_artists = []
+            self._artists_loading = False
+            self._artists_more = True
         self._refill_artists()
         self.artist_search.clear()
         self.stack.setCurrentIndex(1)
         self.artist_search.setFocus()
+        self.portrait_timer.start()
+        self._load_more_artists()
 
     def _refill_artists(self):
         selected = set(self.selected_artists)
         self.artist_model.clear()
-        suggestions = self._prepared_artists or tuple(suggested_artists(self.selected_genres))
+        suggestions = list(dict.fromkeys([*(self._prepared_artists or suggested_artists(self.selected_genres)), *self._remote_artists]))
         for name in suggestions:
             item = QStandardItem(name)
             item.setEditable(False)
@@ -233,12 +301,99 @@ class OnboardingDialog(QDialog):
             item.setCheckState(Qt.CheckState.Checked)
             self.artist_model.appendRow(item)
         self._update_artist_count()
+        self._apply_portrait_icons()
+
+    def _artist_scroll(self, value):
+        bar = self.artist_list.verticalScrollBar()
+        if value > 0 and bar.maximum() > 0 and value >= bar.maximum()-160 and not self.artist_search.text().strip():
+            self._load_more_artists()
+
+    def _load_more_artists(self):
+        if self._portrait_closed or self._artists_loading or not self._artists_more or self.artist_catalog is None:
+            return
+        self._artists_loading = True
+        self.artist_more.setText("Cargando artistas…")
+        self.artist_more.setEnabled(False)
+        generation, catalog = self._catalog_generation, self.artist_catalog
+        def ready(page):
+            if self._portrait_closed or generation != self._catalog_generation:
+                return
+            names, self._artists_more = page
+            self._artists_loading = False
+            known = {self.artist_model.item(row).text().casefold() for row in range(self.artist_model.rowCount())}
+            for name in names:
+                if name.casefold() in known:
+                    continue
+                known.add(name.casefold())
+                self._remote_artists.append(name)
+                item = QStandardItem(name)
+                item.setEditable(False); item.setCheckable(True)
+                item.setCheckState(Qt.CheckState.Checked if name in self.selected_artists else Qt.CheckState.Unchecked)
+                self.artist_model.appendRow(item)
+            self.artist_more.setText("Cargar más artistas" if self._artists_more else "No hay más artistas en estos géneros")
+            self.artist_more.setEnabled(self._artists_more)
+            self._apply_portrait_icons()
+            self.portrait_timer.start()
+        def failed(error):
+            if self._portrait_closed or generation != self._catalog_generation:
+                return
+            self._artists_loading = False
+            self.artist_more.setText("Reintentar carga de artistas")
+            self.artist_more.setEnabled(True)
+        self.catalog_jobs.submit(lambda cancel, progress: catalog.next(cancel), ready, failed)
 
     def _artist_clicked(self, proxy_index):
         source = self.artist_proxy.mapToSource(proxy_index)
         item = self.artist_model.itemFromIndex(source)
         item.setCheckState(Qt.CheckState.Unchecked if item.checkState() == Qt.CheckState.Checked else Qt.CheckState.Checked)
         self._sync_selected_artists()
+
+    def _apply_portrait_icons(self):
+        self.artist_model.blockSignals(True)
+        try:
+            for row in range(self.artist_model.rowCount()):
+                item = self.artist_model.item(row)
+                if item.text() in self._portrait_icons:
+                    item.setIcon(self._portrait_icons[item.text()])
+        finally:
+            self.artist_model.blockSignals(False)
+
+    def _load_artist_portraits(self):
+        if self._portrait_closed or self.stack.currentIndex() != 1:
+            return
+        from .artist_portraits import portrait
+        viewport = self.artist_list.viewport()
+        # The grid stays virtual; fetch the visible rows and one extra row only.
+        first = self.artist_list.indexAt(QPoint(8, 8)).row()
+        first = max(0, first)
+        columns = max(1, viewport.width() // 144)
+        count = columns * (viewport.height() // 150 + 2)
+        for row in range(first, min(self.artist_proxy.rowCount(), first+count)):
+            name = self.artist_proxy.index(row, 0).data()
+            if name in self._portrait_pending or name in self._portrait_icons or name in self._portrait_failed:
+                continue
+            self._portrait_pending.add(name)
+            def ready(path, artist=name):
+                self._portrait_pending.discard(artist)
+                if self._portrait_closed:
+                    return
+                image = QIcon(path) if path else QIcon()
+                if image.isNull():
+                    self._portrait_failed.add(artist)
+                    return
+                self._portrait_icons[artist] = image
+                self._apply_portrait_icons()
+                self.artist_list.viewport().update()
+            self.portrait_jobs.submit(lambda cancel, progress, artist=name: portrait(artist, cancel),
+                                      ready, lambda error, artist=name: ready('', artist))
+
+    def _close_portraits(self):
+        self._portrait_closed = True
+        self.portrait_timer.stop()
+        for job in list(self.catalog_jobs.active):
+            job.cancel.set()
+        for job in list(self.portrait_jobs.active):
+            job.cancel.set()
 
     def _sync_selected_artists(self):
         self.selected_artists = {

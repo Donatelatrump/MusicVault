@@ -1,4 +1,36 @@
-# MusicVault portable para Windows x64
+# MusicVault 0.10.0 para Windows x64
+
+**Instalador completo:** abre `MusicVault-Windows-x64-0.10.0-Setup.exe`.
+**Portable:** extrae completo `MusicVault-Windows-x64-0.10.0.zip` y abre `MusicVault.exe`.
+Ambos incluyen Python, Qt/WebEngine, libmpv, FFmpeg, yt-dlp, Node.js, Firebase y
+NewPipeExtractor con Java privado. No necesitas instalar esas dependencias aparte.
+Destino: Windows 10/11 x64, instalación por usuario sin permisos de administrador.
+
+La versión 0.10.0 incorpora JAMS con salas visuales, amigos e invitaciones; perfiles
+de artista con canciones y álbumes; más de 2,200 géneros con artistas paginados y
+fotos; carátulas de alta resolución; Favoritos inmediatos por streaming; corazón
+rojo relleno y reproducción circular. DJ para ti está en Inicio.
+
+## Actualizaciones
+
+MusicVault consulta las releases estables de GitHub al arrancar y al volver al
+primer plano, con un máximo de una comprobación exitosa cada 24 horas.
+**Ajustes → Actualizaciones → Buscar actualizaciones** permite comprobar manualmente
+y activar o desactivar la revisión automática. «Ahora no» silencia esa versión;
+la actualización permanece disponible en Ajustes.
+
+Al pulsar Actualizar se descarga el instalador completo y se comprueba su tamaño
+y SHA-256. Al aceptar la instalación, MusicVault cierra y abre el instalador en
+la misma carpeta. **Data conserva biblioteca y preferencias.** La sesión anónima
+JAMS se conserva al actualizar en la misma ruta; se almacena fuera de Data, en
+`%LOCALAPPDATA%/MusicVault/installations/`. La distribución excluye esos datos
+privados. No se incluyen credenciales de GitHub.
+
+Para actualizar manualmente, cierra la aplicación y elige su carpeta actual en
+el instalador. Para el portable, conserva Data al extraer los archivos nuevos.
+Consulta `UPDATES.md` para reconstrucción y publicación de futuras actualizaciones.
+
+## Notas históricas de 0.9.7
 
 Adaptación de la versión Linux 0.9.7, sincronizada con el modelo de reproducción de Android. Los resultados remotos se reproducen mediante streaming sin descargarlos primero. Incluye caché temporal de 24 horas o hasta 1 GB, preparación de las canciones visibles y reutilización de la caché al descargar. La búsqueda reúne canciones, álbumes y playlists de YouTube; las playlists se pueden guardar sin descargar sus pistas. Descargar sigue siendo una acción explícita.
 
@@ -55,3 +87,11 @@ Descarga `MusicVault-Windows-x64-0.9.7-Update1.exe` y ejecútalo. Detecta la ins
 Para la versión portable, coloca el actualizador junto a `MusicVault.exe` o selecciona la carpeta del paquete cuando se solicite. Requiere la base Windows 0.9.7 con las mismas dependencias; para versiones anteriores utiliza el instalador completo. El actualizador valida los hashes antes de escribir y conserva originales para revertir si falla la copia.
 
 Reconstrucción: genera primero el portable y ejecuta `python packaging/build_update.py` con NSIS disponible en PATH.
+
+## JAMS compartidas, amigos e identidad de instalacion
+
+Disponible desde **JAMS / Amigos**. Consulta [la implementacion y verificacion](../DESKTOP_JAMS.md) para compatibilidad con Android, dependencias y limites. Desde esta carpeta ejecuta `python packaging/setup_jams.py` para instalar el cliente Firebase fijado.
+
+El onboarding incluye el catalogo completo de generos de Android (2,234 opciones combinadas), buscador local y artistas por genero con paginas de 20 resultados. Las fotos y las paginas consultadas se guardan en cache; la seleccion se conserva al filtrar y cargar mas artistas.
+
+Los nombres de artista de la tabla y del reproductor abren su perfil: foto, canciones destacadas, busqueda de canciones, albumes paginados y pistas de cada album. Desde el perfil puedes reproducir, descargar, anadir a cola y administrar Me gusta. Tambien esta disponible en el menu contextual de las canciones.

@@ -109,6 +109,8 @@ class Window(QMainWindow):
         self.setMinimumSize(920, 680)
         self.setAcceptDrops(True)
         self.setStyleSheet(STYLE)
+        from .jams import SharedJams
+        self.shared_jams = SharedJams(self)
         self._build()
         self.clipboard = QApplication.clipboard()
         self.clipboard.dataChanged.connect(self.check_spotify_clipboard)
@@ -197,6 +199,9 @@ class Window(QMainWindow):
 
     def refresh_download_surfaces(self):
         self.refresh_downloads()
+        profile = getattr(self, "artist_profile", None)
+        if profile is not None and profile.isVisible():
+            profile.refresh_tracks()
         if self.route not in ("Álbumes", "Descargas"):
             self.refresh_tracks()
 
@@ -258,7 +263,10 @@ class Window(QMainWindow):
             widget.setChecked(active)
             glyph = {"Inicio":"home","Buscar":"search","Biblioteca":"library","Álbumes":"album","Descargas":"download","Favoritos":"heart","Jam":"queue"}[name]
             widget.setIcon(icon(glyph,"#E0A458" if active else "#B3A992",20))
-        self.heading.setText(route)
+        self.dj_actions.setVisible(route in ("Inicio", "Jam"))
+        self.dj_button.setText("Otra mezcla" if route == "Jam" else "DJ para ti")
+        self.dj_stop.setVisible(self.jam_state.active)
+        self.heading.setText("DJ para ti" if route == "Jam" else route)
         self.heading.setVisible(route != "Inicio")
         self.home_greeting.setVisible(route == "Inicio")
         self.description.hide()
@@ -342,8 +350,10 @@ class Window(QMainWindow):
             self.refresh_library_filters(self.db.library_facets(favorites=favorites))
             artist = self.artist_filter.currentData() or ""
             album = self.album_filter.currentData() or ""
-            tracks = self.db.library_tracks(query, favorites=favorites, availability=availability,
-                                            artist=artist, album=album)
+            if favorites:
+                tracks = self.db.tracks(query, favorites=True, artist=artist, album=album)
+            else:
+                tracks = self.db.library_tracks(query, availability=availability, artist=artist, album=album)
             order = self.library_sort.currentData()
             def sort_text(value):
                 return "".join(
@@ -539,6 +549,8 @@ class Window(QMainWindow):
         the desktop settings database predates onboarding. Their downloaded/imported
         library is a stronger signal and is converted into a small artist seed.
         """
+        if self._quitting:
+            return
         complete = bool(self.db.setting("taste_onboarding_complete", False))
         if not complete:
             existing = self.db.library_tracks()
@@ -677,6 +689,12 @@ class Window(QMainWindow):
 
     # ── Jam (DJ para ti) integration ──────────────────────────────────────
 
+    def open_personal_dj(self):
+        if self.jam_state.active and self.route != "Jam":
+            self.show_route("Jam")
+        else:
+            self.start_jam()
+
     def toggle_jam(self):
         """Activate or deactivate the DJ jam mix."""
         if self.jam_state.active:
@@ -760,7 +778,8 @@ class Window(QMainWindow):
 
     def _refresh_jam_ui(self):
         """Update nav/button states to reflect jam active/inactive."""
-        jam_btn = self.nav.get("Jam")
+        jam_btn = self.dj_button
+        self.dj_stop.setVisible(self.jam_state.active)
         if jam_btn:
             jam_btn.setChecked(self.jam_state.active)
             jam_btn.setIcon(
@@ -1280,6 +1299,7 @@ class Window(QMainWindow):
         selected = self.selected_tracks()
         menu = QMenu(self)
         menu.addAction("Reproducir", lambda: self.play_row(row))
+        menu.addAction("Ver perfil del artista", lambda: self.open_artist_profile(track.artist))
         menu.addAction("Añadir a la cola", lambda: [self.player.append(t) for t in selected])
         menu.addAction("Quitar de favoritos" if track.id in self.db.favorites() else "Añadir a favoritos",
                        lambda: self.favorite(track))
@@ -1299,12 +1319,23 @@ class Window(QMainWindow):
         menu.addAction("Quitar de la biblioteca", lambda: self.remove_tracks(selected))
         menu.exec(self.table.viewport().mapToGlobal(position))
 
+    def open_artist_profile(self, name=None):
+        if not name and self.player.current:
+            name = self.player.current.artist
+        if not name or name in ("Artista desconocido", "YouTube"):
+            return
+        from .artist_profile import ArtistProfileDialog
+        dialog = getattr(self, "artist_profile", None)
+        if dialog is None:
+            dialog = self.artist_profile = ArtistProfileDialog(self)
+        dialog.show_artist(name)
+
     def favorite(self, track):
         self.db.toggle_favorite(track)
         self.refresh_tracks()
         if self.player_dialog:
-            self.full_favorite.setIcon(icon("heart","#C96A5E" if track.id in self.db.favorites() else "#F1EAD9"))
-        self.mini_favorite.setIcon(icon("heart","#C96A5E" if self.player.current and self.player.current.id in self.db.favorites() else "#F1EAD9"))
+            self.full_favorite.setIcon(icon("heart_filled" if self.player.current and self.player.current.id in self.db.favorites() else "heart", "#E53935" if self.player.current and self.player.current.id in self.db.favorites() else "#F1EAD9"))
+        self.mini_favorite.setIcon(icon("heart_filled" if self.player.current and self.player.current.id in self.db.favorites() else "heart", "#E53935" if self.player.current and self.player.current.id in self.db.favorites() else "#F1EAD9"))
 
     def remove_tracks(self, tracks):
         for track in tracks:
@@ -2071,7 +2102,7 @@ class Window(QMainWindow):
         self.current_title.setToolTip(track.title if track else "")
         self.setWindowTitle(f"{track.title} — MusicVault" if track else "MusicVault")
         self.mini_cover.load("")
-        self.mini_favorite.setIcon(icon("heart","#C96A5E" if track and track.id in self.db.favorites() else "#F1EAD9"))
+        self.mini_favorite.setIcon(icon("heart_filled" if track and track.id in self.db.favorites() else "heart", "#E53935" if track and track.id in self.db.favorites() else "#F1EAD9"))
         self.track_model.set_current(track.id if track else None)
         if track:
             self.load_cover(track.cover, lambda path: self.apply_current_cover(track.id, path))
@@ -2145,7 +2176,7 @@ class Window(QMainWindow):
         track = self.player.current
         self.full_title.setText(track.title if track else "Tu próxima canción")
         self.full_artist.setText(f"{track.artist}  ·  {track.album}" if track else "Selecciona música de tu biblioteca")
-        self.full_favorite.setIcon(icon("heart","#C96A5E" if track and track.id in self.db.favorites() else "#F1EAD9"))
+        self.full_favorite.setIcon(icon("heart_filled" if track and track.id in self.db.favorites() else "heart", "#E53935" if track and track.id in self.db.favorites() else "#F1EAD9"))
         from .models import stable_id
         self.catalog_number.setText("VAULT-"+str(int(stable_id(track.id)[:8],16)%10000).zfill(4) if track else "VAULT —")
         self.record.cover = QPixmap()
@@ -2524,6 +2555,7 @@ class Window(QMainWindow):
             return
 
         self._quitting = True
+        self.shared_jams.close()
         app = QApplication.instance()
 
         # Full exit: close every auxiliary top-level window first so no Qt

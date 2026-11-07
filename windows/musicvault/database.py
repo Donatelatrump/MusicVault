@@ -233,11 +233,13 @@ class Database:
         clause = "removed=0"
         if favorites:
             clause += " AND id IN (SELECT track_id FROM favorites)"
+        if not favorites:
+            clause += " AND path<>''"
         with self.connect() as db:
             artists = [r[0] for r in db.execute(
-                f"SELECT DISTINCT artist FROM tracks WHERE {clause} AND path<>'' ORDER BY artist COLLATE NOCASE")]
+                f"SELECT DISTINCT artist FROM tracks WHERE {clause} ORDER BY artist COLLATE NOCASE")]
             albums = [r[0] for r in db.execute(
-                f"SELECT DISTINCT album FROM tracks WHERE {clause} AND path<>'' ORDER BY album COLLATE NOCASE")]
+                f"SELECT DISTINCT album FROM tracks WHERE {clause} ORDER BY album COLLATE NOCASE")]
         return artists, albums
 
     def scanned_files(self):
